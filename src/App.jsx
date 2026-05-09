@@ -6,6 +6,26 @@ import {
   ArrowDownAZ, ArrowUpZA, Settings, Trash2, UserPlus, ListChecks, Trophy, LayoutDashboard, AlertTriangle
 } from 'lucide-react';
 
+// === 🔥 Firebase 연동 준비 (1단계: 설정 및 초기화) ===
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore';
+
+const firebaseConfig = {
+  apiKey: "AIzaSyB6X9GIAOFBl8H5A9rE1iNEmBJhLpQ4LlI",
+  authDomain: "kydaegu-8de35.firebaseapp.com",
+  projectId: "kydaegu-8de35",
+  storageBucket: "kydaegu-8de35.firebasestorage.app",
+  messagingSenderId: "690405998115",
+  appId: "1:690405998115:web:b301b8c4e08403716a7b96"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const APP_ID = 'kydaegu-academy-v1';
+// ====================================================
+
 const ATTENDANCE_OPTIONS = ['출석', '결석', '지각', '조퇴', '사전통보', '병결', '알바', '가족사정', '개인사정', '컨디션 난조', '학교', '시험', '과제', '실습', '타학원', '독서실', '기타'];
 const MONTHS = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8월', '9월', '10월', '11월', '12월'];
 const DISPLAY_MONTHS = MONTHS.slice(0, 11); 
@@ -125,32 +145,93 @@ export default function App() {
   const [students, setStudents] = useState(initialMockData);
   const [isXlsxReady, setIsXlsxReady] = useState(false);
 
-  // 2단계 & 4단계: 학년도별 localStorage 최상위 자동 저장 및 불러오기 통합
-  useEffect(() => {
-    const savedData = localStorage.getItem(`studentManagement_${academicYear}`);
-    if (savedData) {
-      try {
-        const parsed = JSON.parse(savedData);
-        if (parsed.students) setStudents(parsed.students);
-        if (parsed.classes) setClasses(parsed.classes);
-      } catch (e) {
-        console.error("데이터 로드 실패", e);
-      }
-    } else {
-      // 저장된 데이터가 없으면 학년도에 따라 초기화
-      if (academicYear === '2026') {
-        setStudents(initialMockData);
-      } else {
-        setStudents([]);
-      }
-      setClasses(['GB1A', 'GB1B', 'GB2A', 'S-CLASS']);
-    }
-  }, [academicYear]);
+  // --- ☁️ Firebase 실시간 연동 상태 ---
+  const [user, setUser] = useState(null);
+  const [saveStatus, setSaveStatus] = useState('idle'); // 'idle', 'saving', 'saved', 'error'
+  const [isDataLoaded, setIsDataLoaded] = useState(false);
 
-  // 4단계: 학년도별 localStorage 자동 저장
+  // --- [인증] 앱 시작 시 익명 로그인 처리 ---
   useEffect(() => {
-    localStorage.setItem(`studentManagement_${academicYear}`, JSON.stringify({ classes, students }));
-  }, [classes, students, academicYear]);
+    const initAuth = async () => {
+      try {
+        await signInAnonymously(auth);
+      } catch (e) {
+        console.error("인증 에러:", e);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (u) => setUser(u));
+    return () => unsubscribe();
+  }, []);
+
+  // --- [불러오기] Firestore에서 데이터 가져오기 ---
+  useEffect(() => {
+    if (!user) return;
+
+    const loadCloudData = async () => {
+      setIsDataLoaded(false);
+      try {
+        // 'years' 폴더를 추가하여 경로 갯수를 6개(짝수)로 맞춤
+        const docRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`);
+        const docSnap = await getDoc(docRef);
+
+        if (docSnap.exists()) {
+          const cloudData = docSnap.data();
+          setStudents(cloudData.students || []);
+          setClasses(cloudData.classes || ['GB1A', 'GB1B', 'GB2A', 'S-CLASS']);
+        } else {
+          // 클라우드에 데이터가 없으면 로컬스토리지 백업 확인 (마이그레이션용)
+          const savedLocal = localStorage.getItem(`studentManagement_${academicYear}`);
+          if (savedLocal) {
+            const parsed = JSON.parse(savedLocal);
+            setStudents(parsed.students || []);
+            setClasses(parsed.classes || []);
+          } else {
+            setStudents(academicYear === '2026' ? initialMockData : []);
+            setClasses(['GB1A', 'GB1B', 'GB2A', 'S-CLASS']);
+          }
+        }
+      } catch (e) {
+        console.error("데이터 로드 에러:", e);
+      } finally {
+        setIsDataLoaded(true);
+      }
+    };
+
+    loadCloudData();
+  }, [user, academicYear]);
+
+  // --- [저장하기] 데이터 변경 시 Firestore에 자동 백업 ---
+  useEffect(() => {
+    if (!user || !isDataLoaded) return;
+
+    const saveToCloud = async () => {
+      setSaveStatus('saving');
+      try {
+        // 'years' 폴더를 추가하여 경로 갯수를 6개(짝수)로 맞춤
+        const docRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`);
+        await setDoc(docRef, {
+          classes,
+          students,
+          lastUpdated: Date.now(),
+          updatedBy: user.uid
+        });
+        
+        // 로컬스토리지에도 이중 백업 (오프라인 대비)
+        localStorage.setItem(`studentManagement_${academicYear}`, JSON.stringify({ classes, students }));
+        
+        setSaveStatus('saved');
+        setTimeout(() => setSaveStatus('idle'), 2000);
+      } catch (e) {
+        console.error("데이터 저장 에러:", e);
+        setSaveStatus('error');
+      }
+    };
+
+    // 과도한 서버 요청을 방지하기 위해 1초 뒤에 저장 (디바운싱)
+    const timer = setTimeout(saveToCloud, 1000);
+    return () => clearTimeout(timer);
+  }, [classes, students, user, isDataLoaded, academicYear]);
 
   /* * [7단계: Supabase/Firebase 연동 준비 가이드 (데이터 구조 분리 제안)]
    * 현재는 localStorage를 이용해 JSON 통짜 데이터를 저장하고 있지만,
