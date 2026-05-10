@@ -293,6 +293,38 @@ export default function App() {
     }
   };
 
+  const handleEditClass = (e, oldName) => {
+    e.stopPropagation();
+    const newName = prompt('새로운 반 이름을 입력하세요:', oldName);
+    if(newName && newName.trim() && newName.trim() !== oldName) {
+      if(classes.includes(newName.trim().toUpperCase())) { alert('이미 존재하는 반 이름입니다.'); return; }
+      setClasses(prev => prev.map(c => c === oldName ? newName.trim().toUpperCase() : c));
+      setStudents(prev => prev.map(s => s.className === oldName ? {...s, className: newName.trim().toUpperCase()} : s));
+    }
+  };
+
+  const handleDeleteClass = (e, clsName) => {
+    e.stopPropagation();
+    const studentsInClass = students.filter(s => s.className === clsName);
+    if(studentsInClass.length > 0) {
+      if(!window.confirm(`[${clsName}] 반에 ${studentsInClass.length}명의 학생이 있습니다.\n반을 삭제하면 이 학생들은 '미배정' 상태로 변경됩니다.\n삭제하시겠습니까?`)) return;
+      setStudents(prev => prev.map(s => s.className === clsName ? {...s, className: '미배정'} : s));
+    } else {
+      if(!window.confirm(`[${clsName}] 반을 삭제하시겠습니까?`)) return;
+    }
+    setClasses(prev => prev.filter(c => c !== clsName));
+  };
+
+  const handleMoveClass = (e, index, direction) => {
+    e.stopPropagation();
+    if((direction === -1 && index === 0) || (direction === 1 && index === classes.length - 1)) return;
+    const newClasses = [...classes];
+    const temp = newClasses[index];
+    newClasses[index] = newClasses[index + direction];
+    newClasses[index + direction] = temp;
+    setClasses(newClasses);
+  };
+
   const classStats = useMemo(() => {
     const stats = { '대구캠퍼스 전체': students.length };
     classes.forEach(cls => stats[cls] = 0);
@@ -348,14 +380,24 @@ export default function App() {
 
           <h2 className="text-xl font-bold text-slate-700 mb-4 px-2">개별 반 관리</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-            {classes.map((clsName) => (
-              <div key={clsName} onClick={() => setSelectedClass(clsName)} className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm hover:shadow-xl hover:border-indigo-400 transition-all cursor-pointer group transform hover:-translate-y-1 relative overflow-hidden">
+            {classes.map((clsName, index) => (
+              <div key={clsName} onClick={() => setSelectedClass(clsName)} className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm hover:shadow-xl hover:border-indigo-400 transition-all cursor-pointer group transform hover:-translate-y-1 relative overflow-hidden flex flex-col justify-between">
                 <div className="absolute top-0 left-0 w-1 h-full bg-indigo-500 opacity-0 group-hover:opacity-100 transition-opacity"></div>
-                <div className="flex justify-between items-start mb-6">
-                  <h2 className="text-2xl font-extrabold text-slate-800 group-hover:text-indigo-600 transition-colors">{clsName}</h2>
-                  <span className="bg-slate-100 text-slate-600 group-hover:bg-indigo-100 group-hover:text-indigo-700 px-3 py-1 text-sm font-bold rounded-full transition-colors">{classStats[clsName]}명</span>
+                <div>
+                  <div className="flex justify-between items-start mb-6">
+                    <h2 className="text-2xl font-extrabold text-slate-800 group-hover:text-indigo-600 transition-colors">{clsName}</h2>
+                    <span className="bg-slate-100 text-slate-600 group-hover:bg-indigo-100 group-hover:text-indigo-700 px-3 py-1 text-sm font-bold rounded-full transition-colors">{classStats[clsName]}명</span>
+                  </div>
                 </div>
-                <div className="flex items-center text-slate-400 group-hover:text-indigo-500 text-sm font-bold gap-1 transition-colors">명단 접속 <ChevronRight size={16} /></div>
+                <div className="flex items-center justify-between mt-2">
+                  <div className="flex items-center text-slate-400 group-hover:text-indigo-500 text-sm font-bold gap-1 transition-colors">명단 접속 <ChevronRight size={16} /></div>
+                  <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button onClick={(e) => handleMoveClass(e, index, -1)} className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded" title="위로(앞으로) 이동"><ChevronLeft size={14} className="rotate-90" /></button>
+                    <button onClick={(e) => handleMoveClass(e, index, 1)} className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded" title="아래로(뒤로) 이동"><ChevronRight size={14} className="rotate-90" /></button>
+                    <button onClick={(e) => handleEditClass(e, clsName)} className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded" title="이름 수정"><PenTool size={14} /></button>
+                    <button onClick={(e) => handleDeleteClass(e, clsName)} className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded" title="반 삭제"><Trash2 size={14} /></button>
+                  </div>
+                </div>
               </div>
             ))}
             <form onSubmit={handleAddClass} className="bg-slate-100/50 rounded-2xl p-6 border-2 border-dashed border-slate-300 flex flex-col justify-center transition-colors focus-within:border-indigo-400 focus-within:bg-indigo-50/30">
@@ -419,6 +461,46 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   const [batchStudyTimeDate, setBatchStudyTimeDate] = useState(0);
   const [batchStudyTimeIn, setBatchStudyTimeIn] = useState('');
   const [batchStudyTimeOut, setBatchStudyTimeOut] = useState('');
+  const [batchDailyDate, setBatchDailyDate] = useState(0);
+  const [batchDailyT1, setBatchDailyT1] = useState('');
+  const [batchDailyT2, setBatchDailyT2] = useState('');
+
+  const handleBatchDailyChange = () => {
+    if (selectedStudents.length === 0) { showAlert('일괄 적용할 학생을 선택해주세요.'); return; }
+    showConfirm(`선택한 ${selectedStudents.length}명의 ${dailyMonth} ${Number(batchDailyDate) + 1}일 Daily 성적을 일괄 변경하시겠습니까?`, () => {
+      setStudents(prev => prev.map(student => {
+        if (!selectedStudents.includes(student.id)) return student;
+        const newDaily = [...(student.dailyRecords[dailyMonth] || Array(31).fill({t1:'', t2:''}))];
+        newDaily[batchDailyDate] = { 
+          t1: batchDailyT1 !== '' ? batchDailyT1 : newDaily[batchDailyDate].t1, 
+          t2: batchDailyT2 !== '' ? batchDailyT2 : newDaily[batchDailyDate].t2 
+        };
+        return { ...student, dailyRecords: { ...student.dailyRecords, [dailyMonth]: newDaily } };
+      }));
+      showAlert(`Daily 성적 일괄 적용이 완료되었습니다.`);
+      setSelectedStudents([]);
+      setBatchDailyT1(''); setBatchDailyT2('');
+    });
+  };
+
+  const handleResetDaily = (isAllMonth) => {
+    if (selectedStudents.length === 0) { showAlert('초기화할 학생을 선택해주세요.'); return; }
+    const targetMsg = isAllMonth ? `${dailyMonth} 전체 Daily` : `${dailyMonth} ${Number(batchDailyDate) + 1}일 Daily`;
+    showConfirm(`선택한 ${selectedStudents.length}명의 [${targetMsg}] 데이터를 초기화(삭제)하시겠습니까?`, () => {
+      setStudents(prev => prev.map(student => {
+        if (!selectedStudents.includes(student.id)) return student;
+        const newDaily = [...(student.dailyRecords[dailyMonth] || Array(31).fill({t1:'', t2:''}))];
+        if (isAllMonth) {
+          return { ...student, dailyRecords: { ...student.dailyRecords, [dailyMonth]: Array(31).fill({t1:'', t2:''}) } };
+        } else {
+          newDaily[batchDailyDate] = { t1: '', t2: '' };
+          return { ...student, dailyRecords: { ...student.dailyRecords, [dailyMonth]: newDaily } };
+        }
+      }));
+      showAlert(`Daily 성적 초기화가 완료되었습니다.`);
+      setSelectedStudents([]);
+    });
+  };
 
   const toggleStudentSelection = (studentId) => {
     setSelectedStudents(prev => 
@@ -497,6 +579,46 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
       setSelectedStudents([]); // 선택 초기화
       setBatchStudyTimeIn('');
       setBatchStudyTimeOut('');
+    });
+  };
+
+  const handleResetAttendance = (isAllMonth) => {
+    if (selectedStudents.length === 0) { showAlert('초기화할 학생을 선택해주세요.'); return; }
+    const targetMsg = isAllMonth ? `${attendanceMonth} 전체 출결` : `${attendanceMonth} ${Number(batchAttendanceDate) + 1}일 ${batchAttendanceTimeOfDay === 'am' ? '오전' : '오후'} 출결`;
+    showConfirm(`선택한 ${selectedStudents.length}명의 [${targetMsg}] 데이터를 초기화(삭제)하시겠습니까?`, () => {
+      setStudents(prev => prev.map(student => {
+        if (!selectedStudents.includes(student.id)) return student;
+        const updatedAm = [...(student.attendance[attendanceMonth]?.am || Array(31).fill(''))]; 
+        const updatedPm = [...(student.attendance[attendanceMonth]?.pm || Array(31).fill(''))];
+        if (isAllMonth) {
+          return { ...student, attendance: { ...student.attendance, [attendanceMonth]: { ...student.attendance[attendanceMonth], am: Array(31).fill(''), pm: Array(31).fill('') } } };
+        } else {
+          if (batchAttendanceTimeOfDay === 'am') updatedAm[batchAttendanceDate] = '';
+          if (batchAttendanceTimeOfDay === 'pm') updatedPm[batchAttendanceDate] = '';
+          return { ...student, attendance: { ...student.attendance, [attendanceMonth]: { ...student.attendance[attendanceMonth], am: updatedAm, pm: updatedPm } } };
+        }
+      }));
+      showAlert(`출결 초기화가 완료되었습니다.`);
+      setSelectedStudents([]);
+    });
+  };
+
+  const handleResetStudyTime = (isAllMonth) => {
+    if (selectedStudents.length === 0) { showAlert('초기화할 학생을 선택해주세요.'); return; }
+    const targetMsg = isAllMonth ? `${studyTimeMonth} 전체 학습시간` : `${studyTimeMonth} ${Number(batchStudyTimeDate) + 1}일 학습시간`;
+    showConfirm(`선택한 ${selectedStudents.length}명의 [${targetMsg}] 데이터를 초기화(삭제)하시겠습니까?`, () => {
+      setStudents(prev => prev.map(student => {
+        if (!selectedStudents.includes(student.id)) return student;
+        const newDaily = [...(student.studyTime[studyTimeMonth] || Array.from({length: 31}, () => ({in: '', out: ''})))];
+        if (isAllMonth) {
+          return { ...student, studyTime: { ...student.studyTime, [studyTimeMonth]: Array.from({length: 31}, () => ({in: '', out: ''})) } };
+        } else {
+          newDaily[batchStudyTimeDate] = { in: '', out: '' };
+          return { ...student, studyTime: { ...student.studyTime, [studyTimeMonth]: newDaily } };
+        }
+      }));
+      showAlert(`학습시간 초기화가 완료되었습니다.`);
+      setSelectedStudents([]);
     });
   };
 
@@ -1056,9 +1178,29 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
         });
         if(existingIdx >= 0) {
             updated[existingIdx] = { 
-                ...updated[existingIdx], ...newStu,
-                studyTime: updated[existingIdx].studyTime, attendance: updated[existingIdx].attendance,
-                dailyRecords: updated[existingIdx].dailyRecords, scores: updated[existingIdx].scores, startMonth: updated[existingIdx].startMonth 
+                ...updated[existingIdx],
+                name: newStu.name,
+                contact: newStu.contact || updated[existingIdx].contact,
+                parentContact: newStu.parentContact || updated[existingIdx].parentContact,
+                gender: newStu.gender || updated[existingIdx].gender,
+                address: newStu.address || updated[existingIdx].address,
+                university: newStu.university || updated[existingIdx].university,
+                major: newStu.major || updated[existingIdx].major,
+                gradStatus: newStu.gradStatus || updated[existingIdx].gradStatus,
+                transferType: newStu.transferType || updated[existingIdx].transferType,
+                targetTrack: newStu.targetTrack || updated[existingIdx].targetTrack,
+                credits: newStu.credits || updated[existingIdx].credits,
+                gpa: newStu.gpa || updated[existingIdx].gpa,
+                motivation: newStu.motivation || updated[existingIdx].motivation,
+                englishScore: newStu.englishScore || updated[existingIdx].englishScore,
+                notes: newStu.notes || updated[existingIdx].notes,
+                studyTime: updated[existingIdx].studyTime, 
+                attendance: updated[existingIdx].attendance,
+                dailyRecords: updated[existingIdx].dailyRecords, 
+                scores: updated[existingIdx].scores, 
+                consulting: updated[existingIdx].consulting,
+                startMonth: updated[existingIdx].startMonth,
+                className: updated[existingIdx].className
             };
         } else updated.unshift(newStu);
       }); 
@@ -1215,18 +1357,20 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
     for (let i = 0; i < Math.min(20, rows.length); i++) {
         if (!rows[i] || !Array.isArray(rows[i])) continue;
         const rowStr = rows[i].map(v => String(v || '').replace(/\s/g, ''));
-        if (rowStr.some(c => c === '아이디' || c === '수험번호')) { headerRowIdx = i; break; }
+        if (rowStr.some(c => c === '아이디' || c === '수험번호' || c === '이름' || c === '성명')) { headerRowIdx = i; break; }
     }
-    if (headerRowIdx === -1) { showAlert("엑셀에서 '아이디' 열을 찾을 수 없습니다."); return; }
+    if (headerRowIdx === -1) { showAlert("엑셀에서 식별자(아이디/학번/이름) 열을 찾을 수 없습니다."); return; }
     const headerRow = rows[headerRowIdx].map(v => String(v || '').replace(/\s/g, ''));
-    const idIdx = headerRow.findIndex(h => h === '아이디' || h === '수험번호');
+    const idIdx = headerRow.findIndex(h => h === '아이디' || h === '수험번호' || h === '이름' || h === '성명');
     const inIdx = headerRow.findIndex(h => h === '등원일시');
     const outIdx = headerRow.findIndex(h => h === '하원일시');
 
-    if (idIdx === -1) { showAlert("엑셀에서 '아이디' 열을 찾을 수 없습니다."); return; }
+    if (idIdx === -1) { showAlert("엑셀에서 식별자(아이디/이름) 열을 찾을 수 없습니다."); return; }
     if (inIdx === -1 && outIdx === -1) { showAlert("엑셀에서 '등원일시' 또는 '하원일시' 열을 찾을 수 없습니다."); return; }
 
     const matchedKeys = new Set(); 
+    let duplicateWarnings = 0;
+
     setStudents(prev => {
         const updated = [...prev];
         for (let i = headerRowIdx + 1; i < rows.length; i++) { 
@@ -1234,11 +1378,26 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
             if (!row || !Array.isArray(row) || row[idIdx] === undefined) continue;
             
             const key = String(row[idIdx]).trim().toLowerCase();
-            const studentIdx = updated.findIndex(s => {
-                const matchId = (s.id && s.id.toLowerCase() === key) || (s.userId && s.userId.toLowerCase() === key);
-                const matchName = s.name === key && (className === '대구캠퍼스 전체' || s.className === className);
-                return matchId || matchName;
-            });
+            
+            // 1순위: 아이디(userId, id) 매칭
+            let studentIdx = updated.findIndex(s => (s.id && s.id.toLowerCase() === key) || (s.userId && s.userId.toLowerCase() === key));
+            
+            // 2순위: 이름 매칭
+            if (studentIdx === -1) {
+                const nameMatches = updated.filter(s => s.name === key);
+                if (nameMatches.length === 1) {
+                    studentIdx = updated.findIndex(s => s.name === key);
+                } else if (nameMatches.length > 1) {
+                    // 동명이인 처리 (현재 선택된 반 우선)
+                    const exactMatch = nameMatches.find(s => className === '대구캠퍼스 전체' || s.className === className);
+                    if (exactMatch) {
+                        studentIdx = updated.findIndex(s => s.id === exactMatch.id);
+                    } else {
+                        duplicateWarnings++;
+                        continue; // 안전을 위해 스킵
+                    }
+                }
+            }
             
             if (studentIdx >= 0) {
                 const formatTime = (t) => {
@@ -1585,6 +1744,12 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                   <button onClick={handleBatchAttendanceChange} className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-bold transition-colors shadow-sm disabled:opacity-50" disabled={selectedStudents.length === 0}>
                     일괄 적용
                   </button>
+                  <button onClick={() => handleResetAttendance(false)} className="bg-rose-100 hover:bg-rose-200 text-rose-600 px-3 py-2 rounded-lg text-sm font-bold transition-colors shadow-sm disabled:opacity-50 ml-2" disabled={selectedStudents.length === 0}>
+                    선택일자 삭제
+                  </button>
+                  <button onClick={() => handleResetAttendance(true)} className="bg-rose-600 hover:bg-rose-700 text-white px-3 py-2 rounded-lg text-sm font-bold transition-colors shadow-sm disabled:opacity-50" disabled={selectedStudents.length === 0}>
+                    월 전체 삭제
+                  </button>
                   <button onClick={() => handleSelectAllStudents(selectedStudents.length !== filteredStudents.length)} className="ml-auto text-sm font-bold text-emerald-700 hover:text-emerald-800 underline">
                     {selectedStudents.length === filteredStudents.length ? '전체 해제' : '전체 선택'}
                   </button>
@@ -1741,6 +1906,12 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                      <input type="text" placeholder="하원 (예: 18:00)" className="w-32 px-3 py-1.5 border border-indigo-200 rounded-lg outline-none text-sm font-bold text-slate-700" value={batchStudyTimeOut} onChange={e => setBatchStudyTimeOut(e.target.value)} />
                      <button onClick={handleBatchStudyTimeChange} className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded-lg text-sm font-bold transition-colors shadow-sm disabled:opacity-50" disabled={selectedStudents.length === 0}>
                         일괄 적용
+                     </button>
+                     <button onClick={() => handleResetStudyTime(false)} className="bg-rose-100 hover:bg-rose-200 text-rose-600 px-3 py-1.5 rounded-lg text-sm font-bold transition-colors shadow-sm disabled:opacity-50 ml-2" disabled={selectedStudents.length === 0}>
+                        선택일자 삭제
+                     </button>
+                     <button onClick={() => handleResetStudyTime(true)} className="bg-rose-600 hover:bg-rose-700 text-white px-3 py-1.5 rounded-lg text-sm font-bold transition-colors shadow-sm disabled:opacity-50" disabled={selectedStudents.length === 0}>
+                        월 전체 삭제
                      </button>
                      <button onClick={() => handleSelectAllStudents(selectedStudents.length !== filteredStudents.length)} className="ml-auto text-sm font-bold text-indigo-700 hover:text-indigo-800 underline">
                         {selectedStudents.length === filteredStudents.length ? '전체 해제' : '전체 선택'}
@@ -1985,6 +2156,20 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                   </div>
 
                   <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
+                    <div className="bg-indigo-50/50 p-4 border-b border-indigo-100/50 flex flex-wrap items-center gap-3">
+                      <div className="text-sm font-bold text-indigo-800 flex items-center gap-2 mr-2"><CheckCircle2 size={18} className="text-indigo-500"/> 👥 선택 학생 일괄 기입 (현재 {selectedStudents.length}명)</div>
+                      <select className="border border-indigo-200 rounded-lg px-3 py-1.5 outline-none text-sm font-bold text-slate-700 bg-white" value={batchDailyDate} onChange={e => setBatchDailyDate(e.target.value)}>
+                        {Array.from({length: 31}, (_, i) => <option key={i} value={i}>{i+1}일</option>)}
+                      </select>
+                      <input type="number" placeholder="1차 점수" className="w-24 px-3 py-1.5 border border-indigo-200 rounded-lg outline-none text-sm font-bold text-slate-700" value={batchDailyT1} onChange={e => setBatchDailyT1(e.target.value)} />
+                      <input type="number" placeholder="2차 점수" className="w-24 px-3 py-1.5 border border-indigo-200 rounded-lg outline-none text-sm font-bold text-slate-700" value={batchDailyT2} onChange={e => setBatchDailyT2(e.target.value)} />
+                      <button onClick={handleBatchDailyChange} className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded-lg text-sm font-bold transition-colors shadow-sm disabled:opacity-50" disabled={selectedStudents.length === 0}>일괄 적용</button>
+                      <button onClick={() => handleResetDaily(false)} className="bg-rose-100 hover:bg-rose-200 text-rose-600 px-3 py-1.5 rounded-lg text-sm font-bold transition-colors shadow-sm disabled:opacity-50 ml-2" disabled={selectedStudents.length === 0}>선택일자 삭제</button>
+                      <button onClick={() => handleResetDaily(true)} className="bg-rose-600 hover:bg-rose-700 text-white px-3 py-1.5 rounded-lg text-sm font-bold transition-colors shadow-sm disabled:opacity-50" disabled={selectedStudents.length === 0}>월 전체 삭제</button>
+                      <button onClick={() => handleSelectAllStudents(selectedStudents.length !== filteredStudents.length)} className="ml-auto text-sm font-bold text-indigo-700 hover:text-indigo-800 underline">
+                        {selectedStudents.length === filteredStudents.length ? '전체 해제' : '전체 선택'}
+                      </button>
+                    </div>
                     <div className="bg-slate-50 p-4 border-b border-slate-200 flex justify-between items-center">
                        <div className="font-bold text-slate-700 flex items-center gap-2">
                          <PenTool size={18} className="text-indigo-500" />
@@ -1995,10 +2180,13 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                     <table className="w-max min-w-full text-center text-sm border-collapse">
                       <thead className="bg-slate-800 text-white font-medium sticky top-0 z-20">
                         <tr>
-                          <th rowSpan={2} className="px-4 py-3 border-r border-slate-700 sticky left-0 z-30 bg-slate-900 w-44 cursor-pointer hover:bg-slate-800 transition-colors" onClick={() => handleSort('name')}>
+                          <th rowSpan={2} className="px-3 py-3 border-r border-slate-700 sticky left-0 z-30 bg-slate-900 w-10 text-center">
+                             <input type="checkbox" className="cursor-pointer" checked={filteredStudents.length > 0 && selectedStudents.length === filteredStudents.length} onChange={(e) => handleSelectAllStudents(e.target.checked)} />
+                          </th>
+                          <th rowSpan={2} className="px-4 py-3 border-r border-slate-700 sticky left-[40px] z-30 bg-slate-900 w-44 cursor-pointer hover:bg-slate-800 transition-colors" onClick={() => handleSort('name')}>
                              <div className="flex items-center justify-between">학생 정보 (참여율) {sortKey === 'name' ? (sortOrder === 'asc' ? <ArrowDownAZ size={16}/> : <ArrowUpZA size={16}/>) : <ArrowDownAZ size={16} className="opacity-30"/>}</div>
                           </th>
-                          <th rowSpan={2} className="px-3 py-3 border-r border-slate-700 sticky left-[176px] z-30 bg-slate-900 w-28 text-indigo-200">누적 / 평균</th>
+                          <th rowSpan={2} className="px-3 py-3 border-r border-slate-700 sticky left-[216px] z-30 bg-slate-900 w-28 text-indigo-200">누적 / 평균</th>
                           <th colSpan={31} className="py-2 border-b border-slate-700 bg-slate-800">{dailyMonth} 일별 DAILY SCORE (1일 ~ 31일)</th>
                         </tr>
                         <tr className="bg-slate-700 text-xs">
@@ -2012,13 +2200,17 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                         {filteredStudents.map((student) => {
                           const dRecords = student.dailyRecords[dailyMonth] || Array(31).fill({t1:'', t2:''});
                           const dailyStats = getDailyStats(dRecords, dailyMonth);
+                          const isSelected = selectedStudents.includes(student.id);
                           return (
-                            <tr key={student.id} className="hover:bg-indigo-50/50 transition-colors group cursor-pointer" onClick={() => setViewingDailySummary(student)}>
-                              <td className="border-r border-slate-200 sticky left-0 z-10 bg-white group-hover:bg-indigo-50 px-4 py-3 align-top text-left">
+                            <tr key={student.id} className={`hover:bg-indigo-50/50 transition-colors group cursor-pointer ${isSelected ? 'bg-indigo-50/30' : ''}`} onClick={() => setViewingDailySummary(student)}>
+                              <td className="border-r border-slate-200 sticky left-0 z-10 bg-white group-hover:bg-indigo-50 shadow-[2px_0_5px_rgba(0,0,0,0.05)] text-center px-3" onClick={(e) => { e.stopPropagation(); toggleStudentSelection(student.id); }}>
+                                 <input type="checkbox" className="cursor-pointer" checked={isSelected} onChange={() => {}} />
+                              </td>
+                              <td className="border-r border-slate-200 sticky left-[40px] z-10 bg-white group-hover:bg-indigo-50 px-4 py-3 align-top text-left shadow-[2px_0_5px_rgba(0,0,0,0.05)]">
                                 <div className="flex justify-between w-full mb-1"><span className="font-bold text-slate-900 text-[14px]">{student.name}</span><span className="font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded">{dailyStats.rate}%</span></div>
                                 <div className="text-[10px] text-slate-400 font-mono tracking-tighter">{student.id}</div>
                               </td>
-                              <td className="border-r border-slate-200 sticky left-[176px] z-10 bg-slate-50 group-hover:bg-indigo-50/80 py-3 px-2">
+                              <td className="border-r border-slate-200 sticky left-[216px] z-10 bg-slate-50 group-hover:bg-indigo-50/80 py-3 px-2 shadow-[2px_0_5px_rgba(0,0,0,0.05)]">
                                 <div className="flex flex-col gap-2 items-center justify-center h-full">
                                   <div className="text-slate-800 font-extrabold text-[13px]">{dailyStats.sum} <span className="text-[10px] font-normal text-slate-500">점</span></div>
                                   <div className="h-px w-8 bg-slate-200"></div>
