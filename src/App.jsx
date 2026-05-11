@@ -9,7 +9,7 @@ import {
 // === 🔥 Firebase 연동 준비 (1단계: 설정 및 초기화) ===
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore';
+import { getFirestore, doc, setDoc, getDoc, collection, getDocs, writeBatch } from 'firebase/firestore';
 
 const firebaseConfig = {
   apiKey: "AIzaSyB6X9GIAOFBl8H5A9rE1iNEmBJhLpQ4LlI",
@@ -171,21 +171,57 @@ export default function App() {
     const loadCloudData = async () => {
       setIsDataLoaded(false);
       try {
-        // 'years' 폴더를 추가하여 경로 갯수를 6개(짝수)로 맞춤
         const docRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`);
         const docSnap = await getDoc(docRef);
 
+        let loadedClasses = [];
+        let loadedStudents = [];
+        let useFallback = true;
+
         if (docSnap.exists()) {
           const cloudData = docSnap.data();
-          setStudents(cloudData.students || []);
-          setClasses(cloudData.classes || ['GB1A', 'GB1B', 'GB2A', 'S-CLASS']);
-        } else {
-          // 클라우드에 데이터가 없으면 로컬스토리지 백업 확인 (마이그레이션용)
+          
+          if (cloudData.classes && Array.isArray(cloudData.classes)) {
+             loadedClasses = cloudData.classes;
+          }
+
+          // students 하위 컬렉션에서 개별 학생 문서들을 긁어옴
+          const studentsColRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`, 'students');
+          const studentsSnap = await getDocs(studentsColRef);
+          
+          if (!studentsSnap.empty) {
+             studentsSnap.forEach(doc => {
+                 loadedStudents.push(doc.data());
+             });
+          }
+
+          // 컬렉션 방식 데이터가 존재하거나, 메인 문서에 클래스 정보라도 있으면 반영
+          if (loadedStudents.length > 0) {
+            setClasses(loadedClasses.length > 0 ? loadedClasses : ['GB1A', 'GB1B', 'GB2A', 'S-CLASS']);
+            setStudents(loadedStudents);
+            useFallback = false;
+          } else if (loadedClasses.length > 0) {
+            loadedClasses = loadedClasses;
+            useFallback = true;
+          }
+        }
+
+        // 클라우드 데이터가 아예 없거나 빈 문서 상태일 경우 로컬 백업 확인
+        if (useFallback) {
           const savedLocal = localStorage.getItem(`studentManagement_${academicYear}`);
           if (savedLocal) {
-            const parsed = JSON.parse(savedLocal);
-            setStudents(parsed.students || []);
-            setClasses(parsed.classes || []);
+            try {
+              const parsed = JSON.parse(savedLocal);
+              if (parsed.students && Array.isArray(parsed.students) && parsed.classes && Array.isArray(parsed.classes)) {
+                setStudents(parsed.students);
+                setClasses(parsed.classes);
+              } else {
+                throw new Error("Invalid localStorage data");
+              }
+            } catch (err) {
+              setStudents(academicYear === '2026' ? initialMockData : []);
+              setClasses(['GB1A', 'GB1B', 'GB2A', 'S-CLASS']);
+            }
           } else {
             setStudents(academicYear === '2026' ? initialMockData : []);
             setClasses(['GB1A', 'GB1B', 'GB2A', 'S-CLASS']);
@@ -207,23 +243,66 @@ export default function App() {
 
     const saveToCloud = async () => {
       setSaveStatus('saving');
+      
+      // 1. 로컬스토리지 이중 백업은 무조건 우선 실행 (기존 구조 호환 유지)
       try {
-        // 'years' 폴더를 추가하여 경로 갯수를 6개(짝수)로 맞춤
+        localStorage.setItem(`studentManagement_${academicYear}`, JSON.stringify({ classes, students }));
+      } catch (localErr) {
+        console.error("로컬스토리지 백업 에러:", localErr);
+      }
+
+      try {
         const docRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`);
-        await setDoc(docRef, {
-          classes,
-          students,
-          lastUpdated: Date.now(),
-          updatedBy: user.uid
+        const studentsColRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`, 'students');
+
+        // 삭제된 학생 동기화를 위해 기존 클라우드에 있는 문서 목록 가져오기
+        const currentIds = students.map(s => s.id);
+        const existingDocsSnap = await getDocs(studentsColRef);
+        const docsToDelete = [];
+        existingDocsSnap.forEach(docSnap => {
+            if (!currentIds.includes(docSnap.id)) {
+                docsToDelete.push(docSnap.ref);
+            }
+        });
+
+        // 처리할 모든 저장/삭제 작업 모으기
+        const operations = [];
+        
+        // 메인 문서 업데이트 (students 배열 통째로 저장하지 않음)
+        operations.push({ 
+            type: 'set', 
+            ref: docRef, 
+            data: { classes, lastUpdated: Date.now(), updatedBy: user.uid, storageMode: 'subcollection' } 
         });
         
-        // 로컬스토리지에도 이중 백업 (오프라인 대비)
-        localStorage.setItem(`studentManagement_${academicYear}`, JSON.stringify({ classes, students }));
-        
+        // 학생 개별 문서 업데이트
+        students.forEach(student => {
+           operations.push({ type: 'set', ref: doc(studentsColRef, student.id), data: student });
+        });
+
+        // 삭제될 문서 작업 추가
+        docsToDelete.forEach(ref => {
+           operations.push({ type: 'delete', ref: ref });
+        });
+
+        // Firestore batch 제한을 고려하여 450개 단위로 청크 분할하여 안전하게 전송
+        const chunkSize = 450;
+        for (let i = 0; i < operations.length; i += chunkSize) {
+            const chunk = operations.slice(i, i + chunkSize);
+            const batch = writeBatch(db);
+            
+            chunk.forEach(op => {
+                if (op.type === 'set') batch.set(op.ref, op.data);
+                else if (op.type === 'delete') batch.delete(op.ref);
+            });
+            
+            await batch.commit();
+        }
+
         setSaveStatus('saved');
         setTimeout(() => setSaveStatus('idle'), 2000);
       } catch (e) {
-        console.error("데이터 저장 에러:", e);
+        console.error("데이터 클라우드 분산 저장 에러:", e);
         setSaveStatus('error');
       }
     };
