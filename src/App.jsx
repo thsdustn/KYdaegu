@@ -115,7 +115,7 @@ const createStudent = (id, userId, name, startMonth, targetTrack, mEng, mMath, w
     }
 
     return {
-      id, userId, name, startMonth: startMonth || '1월', className: "GB1A", gender: id.includes("586") ? "여" : "남",
+      id, userId, name, startMonth: startMonth || '1월', className: "GB1A", classNames: ["GB1A"], gender: id.includes("586") ? "여" : "남",
       contact: "010-0000-0000", parentContact: "010-1111-1111", address: "대구/경북",
       university: "대학교", major: "전공", gradStatus: "재학/휴학", transferType: "일반",
       targetTrack, credits: 70, gpa: "3.5", motivation: "학벌", englishScore: "토익",
@@ -191,7 +191,9 @@ export default function App() {
           
           if (!studentsSnap.empty) {
              studentsSnap.forEach(doc => {
-                 loadedStudents.push(doc.data());
+                 const data = doc.data();
+                 if (!data.classNames) data.classNames = [data.className || '미배정'];
+                 loadedStudents.push(data);
              });
           }
 
@@ -213,7 +215,8 @@ export default function App() {
             try {
               const parsed = JSON.parse(savedLocal);
               if (parsed.students && Array.isArray(parsed.students) && parsed.classes && Array.isArray(parsed.classes)) {
-                setStudents(parsed.students);
+                const normalized = parsed.students.map(s => ({...s, classNames: s.classNames || [s.className || '미배정']}));
+                setStudents(normalized);
                 setClasses(parsed.classes);
               } else {
                 throw new Error("Invalid localStorage data");
@@ -286,7 +289,7 @@ export default function App() {
         });
 
         // Firestore batch 제한을 고려하여 450개 단위로 청크 분할하여 안전하게 전송
-        const chunkSize = 450;
+        const chunkSize = 5;
         for (let i = 0; i < operations.length; i += chunkSize) {
             const chunk = operations.slice(i, i + chunkSize);
             const batch = writeBatch(db);
@@ -345,7 +348,10 @@ export default function App() {
     reader.onload = (evt) => {
       try {
         const parsed = JSON.parse(evt.target.result);
-        if (parsed.students) setStudents(parsed.students);
+        if (parsed.students) {
+          const normalized = parsed.students.map(s => ({...s, classNames: s.classNames || [s.className || '미배정']}));
+          setStudents(normalized);
+        }
         if (parsed.classes) setClasses(parsed.classes);
         alert("데이터 복원이 완료되었습니다.");
       } catch (err) {
@@ -378,20 +384,47 @@ export default function App() {
     if(newName && newName.trim() && newName.trim() !== oldName) {
       if(classes.includes(newName.trim().toUpperCase())) { alert('이미 존재하는 반 이름입니다.'); return; }
       setClasses(prev => prev.map(c => c === oldName ? newName.trim().toUpperCase() : c));
-      setStudents(prev => prev.map(s => s.className === oldName ? {...s, className: newName.trim().toUpperCase()} : s));
+      setStudents(prev => prev.map(s => {
+        const cNames = s.classNames || [s.className];
+        if (cNames.includes(oldName)) {
+          const newClassNames = cNames.map(c => c === oldName ? newName.trim().toUpperCase() : c);
+          return { ...s, className: newClassNames[0], classNames: newClassNames };
+        }
+        return s;
+      }));
     }
   };
 
   const handleDeleteClass = (e, clsName) => {
     e.stopPropagation();
-    const studentsInClass = students.filter(s => s.className === clsName);
-    if(studentsInClass.length > 0) {
-      if(!window.confirm(`[${clsName}] 반에 ${studentsInClass.length}명의 학생이 있습니다.\n반을 삭제하면 이 학생들은 '미배정' 상태로 변경됩니다.\n삭제하시겠습니까?`)) return;
-      setStudents(prev => prev.map(s => s.className === clsName ? {...s, className: '미배정'} : s));
+
+    const studentsInClass = students.filter(s => (s.classNames || [s.className]).includes(clsName));
+
+    if (studentsInClass.length > 0) {
+      if (
+        !window.confirm(
+          `[${clsName}] 반에 ${studentsInClass.length}명의 학생이 있습니다.\n\n반을 삭제하면 해당 학생들의 소속에서 이 반만 제거됩니다.\n모든 반에서 제외된 학생은 '미배정' 처리됩니다.\n\n계속하시겠습니까?`
+        )
+      ) return;
+
+      setStudents(prev => prev.map(s => {
+        let cNames = s.classNames || [s.className];
+        if (cNames.includes(clsName)) {
+          cNames = cNames.filter(c => c !== clsName);
+          if (cNames.length === 0) cNames = ['미배정'];
+          return { ...s, className: cNames[0], classNames: cNames };
+        }
+        return s;
+      }));
     } else {
-      if(!window.confirm(`[${clsName}] 반을 삭제하시겠습니까?`)) return;
+      if (!window.confirm(`[${clsName}] 반을 삭제하시겠습니까?`)) return;
     }
+
     setClasses(prev => prev.filter(c => c !== clsName));
+
+    if (selectedClass === clsName) {
+      setSelectedClass(null);
+    }
   };
 
   const handleMoveClass = (e, index, direction) => {
@@ -407,7 +440,12 @@ export default function App() {
   const classStats = useMemo(() => {
     const stats = { '대구캠퍼스 전체': students.length };
     classes.forEach(cls => stats[cls] = 0);
-    students.forEach(s => { if (stats[s.className] !== undefined) stats[s.className]++; });
+    students.forEach(s => {
+      const cNames = s.classNames || [s.className];
+      cNames.forEach(cName => {
+        if (stats[cName] !== undefined) stats[cName]++;
+      });
+    });
     return stats;
   }, [students, classes]);
 
@@ -530,6 +568,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   const [viewingWeeklyMonthlySummary, setViewingWeeklyMonthlySummary] = useState(null); 
   const [viewingAttendanceSummary, setViewingAttendanceSummary] = useState(null); 
   const [reportStudentId, setReportStudentId] = useState(null);
+  const [selectedReportIds, setSelectedReportIds] = useState([]);
 
   // 6단계: 선택 학생 state 및 일괄 처리 로직 추가
   const [selectedStudents, setSelectedStudents] = useState([]);
@@ -701,9 +740,477 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
     });
   };
 
-  // PDF 인쇄용 함수 (1단계 적용 완료)
+  // PDF 인쇄용 함수 + 월간 리포트 일괄 출력
+  const getStudentClassList = (student) => {
+    const list = [];
+
+    if (Array.isArray(student.classNames)) list.push(...student.classNames);
+    if (Array.isArray(student.classes)) list.push(...student.classes);
+    if (student.className) list.push(student.className);
+
+    return [...new Set(list.filter(Boolean))];
+  };
+
+  const getStudentClassNames = (student) => {
+    const list = getStudentClassList(student);
+    return list.length > 0 ? list.join(' / ') : '-';
+  };
+
+  const escapeHtml = (value) => {
+    return String(value ?? '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
+  };
+
+  const buildMonthlyReportPrintHtml = (targetStudents) => {
+    const renderDiff = (value) => {
+      const num = Number(value);
+      if (value === '' || value === undefined || value === null || isNaN(num)) return '-';
+      if (num > 0) return `<span class="up">+${num}</span>`;
+      if (num < 0) return `<span class="down">${num}</span>`;
+      return `<span>0</span>`;
+    };
+
+    const pages = targetStudents.map((student) => {
+      const classNames = getStudentClassNames(student);
+      const attRate = getAttendanceRateNum(student, selectedMonth);
+      const dailyStats = getDailyStats(student.dailyRecords?.[selectedMonth], selectedMonth);
+      const studyStats = getStudyTimeStats(student);
+      const weeklyStats = getMonthlyWeeklyStats(student, selectedMonth, 'english');
+
+      const monthScore = student.scores?.monthly?.[selectedMonth] || {};
+      const eng = monthScore.english || {};
+      const math = monthScore.math || {};
+      const total = monthScore.total || {};
+      const isHuman = student.targetTrack === '인문계';
+
+      return `
+        <section class="report-page">
+          <div class="top-line"></div>
+
+          <header class="report-header">
+            <div>
+              <div class="eyebrow">${escapeHtml(academicYear)} ACADEMIC REPORT</div>
+              <h1>${escapeHtml(selectedMonth)} 월간 학습 리포트</h1>
+            </div>
+            <div class="issue-date">
+              <div>DATE OF ISSUE</div>
+              <strong>${new Date().toLocaleDateString('ko-KR')}</strong>
+            </div>
+          </header>
+
+          <section class="student-box">
+            <div class="student-main">
+              <div class="avatar">${escapeHtml(student.name?.charAt(0) || '')}</div>
+              <div>
+                <h2>${escapeHtml(student.name)} <span>학생</span></h2>
+                <p>${escapeHtml(student.userId || student.id || '-')}</p>
+              </div>
+            </div>
+
+            <div class="student-info">
+              <div>
+                <span>수강반</span>
+                <strong>${escapeHtml(classNames)}</strong>
+              </div>
+              <div>
+                <span>목표계열</span>
+                <strong>${escapeHtml(student.targetTrack || '-')}</strong>
+              </div>
+              <div>
+                <span>기준월</span>
+                <strong>${escapeHtml(selectedMonth)}</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="kpi-grid">
+            <div class="kpi-card">
+              <span>월간 출석률</span>
+              <strong class="green">${attRate}%</strong>
+              <p>출결 관리 핵심 지표</p>
+            </div>
+
+            <div class="kpi-card">
+              <span>Daily 참여율</span>
+              <strong class="blue">${dailyStats.rate}%</strong>
+              <p>평균 ${dailyStats.avg}점 / 총 ${dailyStats.sum}점</p>
+            </div>
+
+            <div class="kpi-card">
+              <span>누적 학습시간</span>
+              <strong class="purple">${escapeHtml(studyStats.totalStr)}</strong>
+              <p>기록일 ${studyStats.daysStudied}일</p>
+            </div>
+
+            <div class="kpi-card">
+              <span>Weekly 평균</span>
+              <strong class="dark">${weeklyStats.avgScore !== '-' ? `${weeklyStats.avgScore}점` : '-'}</strong>
+              <p>영어 기준</p>
+            </div>
+          </section>
+
+          <h3 class="section-title">${escapeHtml(selectedMonth)} 월례고사 성적 요약</h3>
+
+          <table class="score-table">
+            <thead>
+              <tr>
+                <th>과목</th>
+                <th>원점수</th>
+                <th>백분위</th>
+                <th>반 석차</th>
+                <th>전국 석차</th>
+                <th>계열평균 대비</th>
+                <th>상위30% 대비</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              <tr>
+                <td>영어</td>
+                <td>${escapeHtml(eng.score || '-')}</td>
+                <td>${eng.percent ? `${escapeHtml(eng.percent)}%` : '-'}</td>
+                <td>${eng.classRank ? `${escapeHtml(eng.classRank)}등` : '-'}</td>
+                <td>${eng.totalRank ? `${escapeHtml(eng.totalRank)}등` : '-'}</td>
+                <td>${renderDiff(eng.trackAvgDiff)}</td>
+                <td>${renderDiff(eng.top30Diff)}</td>
+              </tr>
+
+              ${
+                !isHuman
+                  ? `
+                    <tr>
+                      <td>수학</td>
+                      <td>${escapeHtml(math.score || '-')}</td>
+                      <td>${math.percent ? `${escapeHtml(math.percent)}%` : '-'}</td>
+                      <td>${math.classRank ? `${escapeHtml(math.classRank)}등` : '-'}</td>
+                      <td>${math.totalRank ? `${escapeHtml(math.totalRank)}등` : '-'}</td>
+                      <td>${renderDiff(math.trackAvgDiff)}</td>
+                      <td>${renderDiff(math.top30Diff)}</td>
+                    </tr>
+
+                    <tr>
+                      <td>영어+수학</td>
+                      <td>${escapeHtml(total.score || '-')}</td>
+                      <td>${total.percent ? `${escapeHtml(total.percent)}%` : '-'}</td>
+                      <td>${total.classRank ? `${escapeHtml(total.classRank)}등` : '-'}</td>
+                      <td>${total.totalRank ? `${escapeHtml(total.totalRank)}등` : '-'}</td>
+                      <td>${renderDiff(total.trackAvgDiff)}</td>
+                      <td>${renderDiff(total.top30Diff)}</td>
+                    </tr>
+                  `
+                  : ''
+              }
+            </tbody>
+          </table>
+
+          <h3 class="section-title">담당 선생님 종합 코멘트</h3>
+          <div class="comment-box">
+            ${escapeHtml(student.notes || '이번 달 학습 현황을 바탕으로 출결, Daily 참여율, Weekly 및 월례고사 성적을 지속적으로 점검해 주세요.')}
+          </div>
+        </section>
+      `;
+    }).join('');
+
+    return `
+      <!DOCTYPE html>
+      <html lang="ko">
+        <head>
+          <meta charset="UTF-8" />
+          <title>${escapeHtml(selectedMonth)} 월간 리포트</title>
+
+          <style>
+            @page {
+              size: A4;
+              margin: 12mm;
+            }
+
+            * {
+              box-sizing: border-box;
+            }
+
+            body {
+              margin: 0;
+              background: #e5e7eb;
+              font-family: Arial, "Noto Sans KR", sans-serif;
+              color: #0f172a;
+            }
+
+            .report-page {
+              width: 210mm;
+              min-height: 297mm;
+              margin: 0 auto;
+              padding: 18mm;
+              background: #ffffff;
+              page-break-after: always;
+              position: relative;
+            }
+
+            .report-page:last-child {
+              page-break-after: auto;
+            }
+
+            .top-line {
+              height: 6px;
+              background: linear-gradient(90deg, #4f46e5, #14b8a6);
+              border-radius: 999px;
+              margin-bottom: 18px;
+            }
+
+            .report-header {
+              display: flex;
+              justify-content: space-between;
+              align-items: flex-end;
+              border-bottom: 3px solid #0f172a;
+              padding-bottom: 14px;
+              margin-bottom: 22px;
+            }
+
+            .eyebrow {
+              font-size: 11px;
+              font-weight: 800;
+              letter-spacing: 1.5px;
+              color: #4f46e5;
+              margin-bottom: 5px;
+            }
+
+            h1 {
+              margin: 0;
+              font-size: 28px;
+              line-height: 1.2;
+            }
+
+            .issue-date {
+              text-align: right;
+              font-size: 11px;
+              color: #64748b;
+            }
+
+            .issue-date strong {
+              display: block;
+              margin-top: 4px;
+              color: #334155;
+              font-size: 13px;
+            }
+
+            .student-box {
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+              background: #f8fafc;
+              border: 1px solid #e2e8f0;
+              border-radius: 18px;
+              padding: 16px 18px;
+              margin-bottom: 22px;
+              gap: 20px;
+            }
+
+            .student-main {
+              display: flex;
+              align-items: center;
+              gap: 14px;
+              min-width: 220px;
+            }
+
+            .avatar {
+              width: 48px;
+              height: 48px;
+              border-radius: 999px;
+              background: #e0e7ff;
+              color: #4f46e5;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              font-size: 24px;
+              font-weight: 900;
+            }
+
+            .student-main h2 {
+              margin: 0;
+              font-size: 20px;
+            }
+
+            .student-main h2 span {
+              font-size: 13px;
+              color: #64748b;
+            }
+
+            .student-main p {
+              margin: 3px 0 0;
+              font-size: 11px;
+              color: #64748b;
+            }
+
+            .student-info {
+              display: flex;
+              gap: 24px;
+              font-size: 12px;
+              text-align: left;
+            }
+
+            .student-info span {
+              display: block;
+              color: #94a3b8;
+              font-weight: 800;
+              margin-bottom: 4px;
+            }
+
+            .student-info strong {
+              color: #334155;
+            }
+
+            .kpi-grid {
+              display: grid;
+              grid-template-columns: repeat(4, 1fr);
+              gap: 12px;
+              margin-bottom: 24px;
+            }
+
+            .kpi-card {
+              border: 1px solid #e2e8f0;
+              border-radius: 16px;
+              padding: 14px;
+              background: #ffffff;
+            }
+
+            .kpi-card span {
+              display: block;
+              font-size: 11px;
+              color: #64748b;
+              font-weight: 800;
+              margin-bottom: 8px;
+            }
+
+            .kpi-card strong {
+              font-size: 23px;
+              font-weight: 900;
+            }
+
+            .kpi-card p {
+              margin: 8px 0 0;
+              font-size: 10px;
+              color: #94a3b8;
+              font-weight: 700;
+            }
+
+            .green { color: #059669; }
+            .blue { color: #2563eb; }
+            .purple { color: #4f46e5; }
+            .dark { color: #1e293b; }
+
+            .section-title {
+              font-size: 14px;
+              font-weight: 900;
+              margin: 22px 0 10px;
+            }
+
+            .score-table {
+              width: 100%;
+              border-collapse: collapse;
+              font-size: 12px;
+              margin-bottom: 18px;
+            }
+
+            .score-table th {
+              background: #f1f5f9;
+              color: #475569;
+              padding: 9px;
+              border: 1px solid #e2e8f0;
+              font-weight: 900;
+            }
+
+            .score-table td {
+              padding: 10px;
+              border: 1px solid #e2e8f0;
+              text-align: center;
+              font-weight: 700;
+            }
+
+            .score-table td:first-child {
+              background: #f8fafc;
+              color: #334155;
+              font-weight: 900;
+            }
+
+            .up {
+              color: #2563eb;
+              font-weight: 900;
+            }
+
+            .down {
+              color: #e11d48;
+              font-weight: 900;
+            }
+
+            .comment-box {
+              min-height: 95px;
+              border: 1px solid #e2e8f0;
+              background: #f8fafc;
+              border-radius: 16px;
+              padding: 14px;
+              font-size: 12px;
+              line-height: 1.7;
+              color: #334155;
+              white-space: pre-wrap;
+            }
+
+            @media print {
+              body {
+                background: #ffffff;
+              }
+
+              .report-page {
+                margin: 0;
+                width: auto;
+                min-height: auto;
+                box-shadow: none;
+              }
+            }
+          </style>
+        </head>
+
+        <body>
+          ${pages}
+
+          <script>
+            window.onload = function() {
+              setTimeout(function() {
+                window.focus();
+                window.print();
+              }, 300);
+            };
+          </script>
+        </body>
+      </html>
+    `;
+  };
+
   const handlePrint = () => {
-    window.print();
+    const targetStudents =
+      selectedReportIds.length > 0
+        ? students.filter(s => selectedReportIds.includes(s.id))
+        : reportStudent
+          ? [reportStudent]
+          : [];
+
+    if (targetStudents.length === 0) {
+      showAlert('출력할 학생을 선택해주세요.');
+      return;
+    }
+
+    const printWindow = window.open('', '_blank');
+
+    if (!printWindow) {
+      showAlert('팝업이 차단되었습니다. 브라우저 팝업 허용 후 다시 시도해주세요.');
+      return;
+    }
+
+    printWindow.document.open();
+    printWindow.document.write(buildMonthlyReportPrintHtml(targetStudents));
+    printWindow.document.close();
   };
 
   // 5단계: 학생 명단 엑셀 다운로드 (Export)
@@ -712,9 +1219,9 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
     const data = filteredStudents.map((s, i) => ({
       "NO": i + 1,
       "학생명": s.name,
-      "아이디": s.userId || s.id,
-      "수강반": s.className,
-      "캠퍼스": "대구",
+      "아이디/수험번호": `${s.userId || '-'} / ${s.id || '-'}`,
+      "수강반": Array.isArray(s.classNames) ? s.classNames.join(' / ') : (s.className || '-'),
+      "연락처": s.contact || '-',
       "성별": s.gender || '-',
       "편입구분": s.transferType || '-',
       "계열": s.targetTrack || '-'
@@ -812,6 +1319,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
   const [showImportModal, setShowImportModal] = useState(false);
   const [importType, setImportType] = useState('student'); 
+  const [uploadMode, setUploadMode] = useState('merge'); // merge | classOverwrite | allOverwrite
   const [uploadTargetDay, setUploadTargetDay] = useState(null); 
   const fileInputRef = useRef(null);
   const omrFileInputRef = useRef(null);
@@ -821,7 +1329,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
   const classStudents = useMemo(() => {
     if (className === '대구캠퍼스 전체') return students;
-    return students.filter(s => s.className === className);
+    return students.filter(s => (s.classNames || [s.className]).includes(className));
   }, [students, className]);
 
   const getAttendanceRate = (student, month) => {
@@ -1064,7 +1572,12 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   };
 
   const filteredStudents = useMemo(() => {
-    let result = classStudents.filter(s => s.name.includes(searchTerm) || s.id.includes(searchTerm) || s.contact.includes(searchTerm));
+    let result = classStudents.filter(s =>
+      (s.name || '').includes(searchTerm) ||
+      (s.id || '').includes(searchTerm) ||
+      (s.userId || '').includes(searchTerm) ||
+      (s.contact || '').includes(searchTerm)
+    );
     
     result.sort((a, b) => {
       let valA, valB;
@@ -1107,10 +1620,14 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
   const handleDeleteStudent = (e, id, name) => {
     e.stopPropagation();
-    showConfirm(`${name} 학생을 명단에서 삭제하시겠습니까?\n삭제된 데이터는 복구할 수 없습니다.`, () => {
-      setStudents(prev => prev.filter(s => s.id !== id));
-      showAlert(`${name} 학생이 삭제되었습니다.`);
-    });
+
+    showConfirm(
+      `${name} 학생을 완전히 삭제하시겠습니까?\n\n화면 명단에서 삭제되며, 자동 저장 후 Firebase 세션에서도 삭제됩니다.\n삭제된 데이터는 복구할 수 없습니다.`,
+      () => {
+        setStudents(prev => prev.filter(s => s.id !== id));
+        showAlert(`${name} 학생이 삭제되었습니다. Firebase에도 자동 반영됩니다.`);
+      }
+    );
   };
 
   const handleAddStudentSubmit = () => {
@@ -1118,6 +1635,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
     const newId = `S-${Date.now()}`;
     const newStu = createStudent(newId, newStudentForm.userId, newStudentForm.name, newStudentForm.startMonth, newStudentForm.targetTrack, {}, {}, {}, {}, {});
     newStu.className = className === '대구캠퍼스 전체' ? 'S-CLASS' : className; 
+    newStu.classNames = [newStu.className];
     setStudents(prev => [newStu, ...prev]);
     setShowAddModal(false);
     setNewStudentForm({ name: '', userId: '', targetTrack: '인문계', startMonth: '1월' });
@@ -1125,7 +1643,22 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   };
 
   const handleProfileChange = (studentId, field, value) => {
-      setStudents(prev => prev.map(s => s.id === studentId ? { ...s, [field]: value } : s));
+    setStudents(prev => prev.map(s => {
+      if (s.id !== studentId) return s;
+
+      if (field === 'className') {
+        return {
+          ...s,
+          className: value,
+          classNames: [value]
+        };
+      }
+
+      return {
+        ...s,
+        [field]: value
+      };
+    }));
   };
 
   const toggleDailyExcluded = (month, dayIndex) => {
@@ -1192,100 +1725,332 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   };
 
   const processStudentRows = (rows, workbook) => {
-    let targetSheetName = workbook.SheetNames.find(n => n.includes('신상정보') || n.includes('목록')) || workbook.SheetNames[0];
-    const targetRows = window.XLSX.utils.sheet_to_json(workbook.Sheets[targetSheetName], { header: 1 });
-    let headerRowIdx = -1;
-    for (let i = 0; i < Math.min(20, targetRows.length); i++) {
-      if (!targetRows[i] || !Array.isArray(targetRows[i])) continue;
-      const rowStr = targetRows[i].map(v => String(v || '').replace(/\s/g, ''));
-      if (rowStr.some(c => c.includes('이름') || c.includes('성명'))) { headerRowIdx = i; break; }
-    }
-    if (headerRowIdx === -1) { showAlert("이름 열을 찾을 수 없습니다."); return; }
+    const cleanCell = (v) => String(v ?? '').replace(/\u00A0/g, '').trim();
 
-    const headerRow = targetRows[headerRowIdx].map(v => String(v || '').replace(/\s/g, ''));
-    const getIdx = (kws) => headerRow.findIndex(h => h && kws.some(k => h.includes(k)));
+    const targetClass = className === '대구캠퍼스 전체' ? 'S-CLASS' : className;
 
-    const idxs = { 
-      id: getIdx(['학번','수험번호']), userId: getIdx(['아이디']), name: getIdx(['이름','성명']), contact: getIdx(['연락처']), 
-      track: getIdx(['희망계열','계열']), gender: getIdx(['성별']), address: getIdx(['거주지역','거주지']),
-      univ: getIdx(['출신대학']), major: getIdx(['출신학과']), grad: getIdx(['졸업여부']),
-      type: getIdx(['편입구분']), credits: getIdx(['이수학점']), gpa: getIdx(['학점']),
-      motiv: getIdx(['편입준비계기','계기']), eng: getIdx(['공인영어']), parent: getIdx(['부모님연락처','부모님']),
-      notes: getIdx(['특이사항','상담'])
+    const makeSafeId = (name, userId, contact, rowIndex) => {
+      const raw = userId || contact || `${name}_${rowIndex}`;
+      return `AUTO_${raw}`.replace(/[^\w가-힣-]/g, '_');
     };
-    
-    let importedCount = 0; const newStudents = [];
-    for (let i = headerRowIdx + 1; i < targetRows.length; i++) {
-      const row = targetRows[i]; 
-      if (!row || !Array.isArray(row) || row[idxs.name] === undefined || String(row[idxs.name]).trim() === '') continue;
-      const sName = String(row[idxs.name]).trim();
-      const sId = idxs.id >= 0 && row[idxs.id] !== undefined ? String(row[idxs.id]).trim() : '';
-      const sUserId = idxs.userId >= 0 && row[idxs.userId] !== undefined ? String(row[idxs.userId]).trim() : '';
-      
-      newStudents.push({
-        id: sId || sUserId || `NEW-${Date.now()}-${i}`,
-        userId: sUserId, name: sName, startMonth: '1월', 
-        className: className === '대구캠퍼스 전체' ? 'S-CLASS' : className, 
-        contact: idxs.contact >= 0 && row[idxs.contact] !== undefined ? String(row[idxs.contact]) : '', 
-        gender: idxs.gender >= 0 && row[idxs.gender] !== undefined ? String(row[idxs.gender]) : '', 
-        address: idxs.address >= 0 && row[idxs.address] !== undefined ? String(row[idxs.address]) : '', 
-        university: idxs.univ >= 0 && row[idxs.univ] !== undefined ? String(row[idxs.univ]) : '', 
-        major: idxs.major >= 0 && row[idxs.major] !== undefined ? String(row[idxs.major]) : '', 
-        gradStatus: idxs.gradStatus >= 0 && row[idxs.gradStatus] !== undefined ? String(row[idxs.gradStatus]) : '',
-        transferType: idxs.type >= 0 && row[idxs.type] !== undefined ? String(row[idxs.type]) : '일반', 
-        targetTrack: idxs.track >= 0 && row[idxs.track] !== undefined ? String(row[idxs.track]) : '미정', 
-        credits: idxs.credits >= 0 && row[idxs.credits] !== undefined ? row[idxs.credits] : '', 
-        gpa: idxs.gpa >= 0 && row[idxs.gpa] !== undefined ? String(row[idxs.gpa]) : '', 
-        motivation: idxs.motiv >= 0 && row[idxs.motiv] !== undefined ? String(row[idxs.motiv]) : '', 
-        englishScore: idxs.eng >= 0 && row[idxs.eng] !== undefined ? String(row[idxs.eng]) : '', 
-        parentContact: idxs.parent >= 0 && row[idxs.parent] !== undefined ? String(row[idxs.parent]) : '', 
-        notes: idxs.notes >= 0 && row[idxs.notes] !== undefined ? String(row[idxs.notes]) : '', 
-        consulting: {}, studyTime: generateEmptyMonthlyStudyTime(), attendance: generateEmptyMonthlyAttendance(),
-        dailyRecords: generateEmptyMonthlyDaily(),
-        scores: { mockEnglish: {}, mockMath: {}, weeklyEnglish: {}, weeklyMath: {}, monthly: generateEmptyMonthlyData(), weeklyDetails: {}, weeklyDetailsMath: {} }
-      }); 
-      importedCount++;
+
+    const normalizeClassNames = (student) => {
+      const raw = Array.isArray(student.classNames)
+        ? student.classNames
+        : [student.className || '미배정'];
+
+      return Array.from(
+        new Set(
+          raw
+            .filter(Boolean)
+            .map(c => String(c).trim())
+            .filter(Boolean)
+        )
+      );
+    };
+
+    let targetSheetName =
+      workbook.SheetNames.find(n => n.includes('신상정보') || n.includes('목록')) ||
+      workbook.SheetNames[0];
+
+    const targetRows = window.XLSX.utils.sheet_to_json(
+      workbook.Sheets[targetSheetName],
+      { header: 1 }
+    );
+
+    let headerRowIdx = -1;
+
+    for (let i = 0; i < Math.min(30, targetRows.length); i++) {
+      if (!targetRows[i] || !Array.isArray(targetRows[i])) continue;
+
+      const rowStr = targetRows[i].map(v =>
+        cleanCell(v).replace(/\s/g, '')
+      );
+
+      if (rowStr.some(c => c.includes('이름') || c.includes('성명'))) {
+        headerRowIdx = i;
+        break;
+      }
     }
 
-    setStudents(prev => {
-      const updated = [...prev]; 
-      newStudents.forEach(newStu => {
-        const existingIdx = updated.findIndex(s => {
-            const isIdMatch = (newStu.userId && s.userId === newStu.userId) || (newStu.id && !newStu.id.startsWith('NEW') && s.id === newStu.id);
-            const isNameMatch = s.name === newStu.name && (className === '대구캠퍼스 전체' ? true : s.className === className);
-            return isIdMatch || isNameMatch;
-        });
-        if(existingIdx >= 0) {
-            updated[existingIdx] = { 
-                ...updated[existingIdx],
-                name: newStu.name,
-                contact: newStu.contact || updated[existingIdx].contact,
-                parentContact: newStu.parentContact || updated[existingIdx].parentContact,
-                gender: newStu.gender || updated[existingIdx].gender,
-                address: newStu.address || updated[existingIdx].address,
-                university: newStu.university || updated[existingIdx].university,
-                major: newStu.major || updated[existingIdx].major,
-                gradStatus: newStu.gradStatus || updated[existingIdx].gradStatus,
-                transferType: newStu.transferType || updated[existingIdx].transferType,
-                targetTrack: newStu.targetTrack || updated[existingIdx].targetTrack,
-                credits: newStu.credits || updated[existingIdx].credits,
-                gpa: newStu.gpa || updated[existingIdx].gpa,
-                motivation: newStu.motivation || updated[existingIdx].motivation,
-                englishScore: newStu.englishScore || updated[existingIdx].englishScore,
-                notes: newStu.notes || updated[existingIdx].notes,
-                studyTime: updated[existingIdx].studyTime, 
-                attendance: updated[existingIdx].attendance,
-                dailyRecords: updated[existingIdx].dailyRecords, 
-                scores: updated[existingIdx].scores, 
-                consulting: updated[existingIdx].consulting,
-                startMonth: updated[existingIdx].startMonth,
-                className: updated[existingIdx].className
-            };
-        } else updated.unshift(newStu);
-      }); 
-      return updated;
+    if (headerRowIdx === -1) {
+      showAlert('엑셀에서 이름/성명 열을 찾을 수 없습니다.');
+      return;
+    }
+
+    const headerRow = targetRows[headerRowIdx].map(v =>
+      cleanCell(v).replace(/\s/g, '')
+    );
+
+    const getIdx = (keywords) =>
+      headerRow.findIndex(h => h && keywords.some(k => h.includes(k)));
+
+    const idxs = {
+      id: getIdx(['학번', '수험번호']),
+      userId: getIdx(['아이디', 'ID']),
+      name: getIdx(['이름', '성명']),
+      contact: getIdx(['연락처', '휴대폰', '전화번호']),
+      track: getIdx(['희망계열', '계열']),
+      gender: getIdx(['성별']),
+      address: getIdx(['거주지역', '거주지', '주소']),
+      univ: getIdx(['출신대학', '대학교']),
+      major: getIdx(['출신학과', '전공']),
+      grad: getIdx(['졸업여부', '학적']),
+      type: getIdx(['편입구분', '편입유형']),
+      credits: getIdx(['이수학점', '학점']),
+      gpa: getIdx(['평점', 'GPA', '백분위']),
+      motiv: getIdx(['편입준비계기', '계기']),
+      eng: getIdx(['공인영어', '토익', '토플', '텝스']),
+      parent: getIdx(['부모님연락처', '보호자연락처', '부모연락처', '보호자']),
+      notes: getIdx(['특이사항', '상담', '메모'])
+    };
+
+    if (idxs.name === -1) {
+      showAlert('엑셀에서 이름/성명 열을 찾을 수 없습니다.');
+      return;
+    }
+
+    const newStudents = [];
+    const importedKeys = new Set();
+
+    for (let i = headerRowIdx + 1; i < targetRows.length; i++) {
+      const row = targetRows[i];
+
+      if (!row || !Array.isArray(row)) continue;
+
+      const sName = cleanCell(row[idxs.name]);
+      if (!sName) continue;
+
+      const sId = idxs.id >= 0 ? cleanCell(row[idxs.id]) : '';
+      const sUserId = idxs.userId >= 0 ? cleanCell(row[idxs.userId]) : '';
+      const sContact = idxs.contact >= 0 ? cleanCell(row[idxs.contact]) : '';
+
+      const finalId = sId || sUserId || makeSafeId(sName, sUserId, sContact, i);
+
+      if (importedKeys.has(finalId)) continue;
+      importedKeys.add(finalId);
+
+      newStudents.push({
+        id: finalId,
+        userId: sUserId,
+        name: sName,
+        startMonth: '1월',
+
+        // 핵심: 엑셀을 업로드한 현재 반을 무조건 저장
+        className: targetClass,
+        classNames: [targetClass],
+
+        contact: sContact,
+        gender: idxs.gender >= 0 ? cleanCell(row[idxs.gender]) : '',
+        address: idxs.address >= 0 ? cleanCell(row[idxs.address]) : '',
+        university: idxs.univ >= 0 ? cleanCell(row[idxs.univ]) : '',
+        major: idxs.major >= 0 ? cleanCell(row[idxs.major]) : '',
+        gradStatus: idxs.grad >= 0 ? cleanCell(row[idxs.grad]) : '',
+        transferType: idxs.type >= 0 ? cleanCell(row[idxs.type]) : '일반',
+        targetTrack: idxs.track >= 0 ? cleanCell(row[idxs.track]) : '미정',
+        credits: idxs.credits >= 0 ? cleanCell(row[idxs.credits]) : '',
+        gpa: idxs.gpa >= 0 ? cleanCell(row[idxs.gpa]) : '',
+        motivation: idxs.motiv >= 0 ? cleanCell(row[idxs.motiv]) : '',
+        englishScore: idxs.eng >= 0 ? cleanCell(row[idxs.eng]) : '',
+        parentContact: idxs.parent >= 0 ? cleanCell(row[idxs.parent]) : '',
+        notes: idxs.notes >= 0 ? cleanCell(row[idxs.notes]) : '',
+
+        consulting: {},
+        studyTime: generateEmptyMonthlyStudyTime(),
+        attendance: generateEmptyMonthlyAttendance(),
+        dailyRecords: generateEmptyMonthlyDaily(),
+        scores: {
+          mockEnglish: {},
+          mockMath: {},
+          weeklyEnglish: {},
+          weeklyMath: {},
+          monthly: generateEmptyMonthlyData(),
+          weeklyDetails: {},
+          weeklyDetailsMath: {}
+        }
+      });
+    }
+
+    if (newStudents.length === 0) {
+      showAlert('업로드할 학생 데이터를 찾지 못했습니다.');
+      return;
+    }
+
+    const findExistingIndex = (arr, newStu) => {
+      return arr.findIndex(s => {
+        const idMatch =
+          newStu.id &&
+          s.id &&
+          String(s.id).trim().toLowerCase() === String(newStu.id).trim().toLowerCase();
+
+        const userIdMatch =
+          newStu.userId &&
+          s.userId &&
+          String(s.userId).trim().toLowerCase() === String(newStu.userId).trim().toLowerCase();
+
+        const nameContactMatch =
+          newStu.name &&
+          s.name &&
+          s.name === newStu.name &&
+          newStu.contact &&
+          s.contact &&
+          s.contact === newStu.contact;
+
+        return idMatch || userIdMatch || nameContactMatch;
+      });
+    };
+
+    let addCount = 0;
+    let updateCount = 0;
+    let addClassCount = 0;
+    let excludeCount = 0;
+
+    newStudents.forEach(newStu => {
+      const idx = findExistingIndex(students, newStu);
+
+      if (idx >= 0) {
+        updateCount++;
+
+        const oldClassNames = normalizeClassNames(students[idx]);
+
+        if (!oldClassNames.includes(targetClass)) {
+          addClassCount++;
+        }
+      } else {
+        addCount++;
+      }
     });
-    showAlert(`완료! 총 ${importedCount}명의 정보가 처리되었습니다.`);
+
+    if (uploadMode === 'classOverwrite' && className !== '대구캠퍼스 전체') {
+      students
+        .filter(s => normalizeClassNames(s).includes(targetClass))
+        .forEach(s => {
+          const stillExists = newStudents.some(newStu => findExistingIndex([s], newStu) >= 0);
+          if (!stillExists) excludeCount++;
+        });
+    }
+
+    if (uploadMode === 'allOverwrite') {
+      excludeCount = Math.max(students.length - updateCount, 0);
+    }
+
+    const modeText =
+      uploadMode === 'merge'
+        ? '① 추가/수정만 하기'
+        : uploadMode === 'classOverwrite'
+          ? '② 해당 반 명단 덮어쓰기'
+          : '③ 전체 명단 덮어쓰기';
+
+    showConfirm(
+      `[${targetClass}] 명단 업로드 미리보기\n\n업로드 방식: ${modeText}\n\n추가될 학생: ${addCount}명\n수정될 학생: ${updateCount}명\n해당 반 소속 추가: ${addClassCount}명\n명단에서 제외될 학생: ${excludeCount}명\n\n적용하시겠습니까?`,
+      () => {
+        setStudents(prev => {
+          if (uploadMode === 'allOverwrite') {
+            return newStudents.map(s => ({
+              ...s,
+              className: targetClass,
+              classNames: [targetClass]
+            }));
+          }
+
+          let updated = [...prev];
+          const touchedIds = new Set();
+
+          newStudents.forEach(newStu => {
+            const existingIdx = findExistingIndex(updated, newStu);
+
+            if (existingIdx >= 0) {
+              const existing = updated[existingIdx];
+
+              const oldClassNames = normalizeClassNames(existing).filter(c => c !== '미배정');
+              const mergedClassNames = Array.from(new Set([...oldClassNames, targetClass]));
+
+              const mergedStudent = {
+                ...existing,
+
+                id: existing.id || newStu.id,
+                userId: newStu.userId || existing.userId,
+                name: newStu.name || existing.name,
+
+                contact: newStu.contact || existing.contact,
+                parentContact: newStu.parentContact || existing.parentContact,
+                gender: newStu.gender || existing.gender,
+                address: newStu.address || existing.address,
+                university: newStu.university || existing.university,
+                major: newStu.major || existing.major,
+                gradStatus: newStu.gradStatus || existing.gradStatus,
+                transferType: newStu.transferType || existing.transferType,
+                targetTrack: newStu.targetTrack || existing.targetTrack,
+                credits: newStu.credits || existing.credits,
+                gpa: newStu.gpa || existing.gpa,
+                motivation: newStu.motivation || existing.motivation,
+                englishScore: newStu.englishScore || existing.englishScore,
+                notes: newStu.notes || existing.notes,
+
+                // 핵심: 현재 업로드한 반을 반드시 포함
+                className: targetClass,
+                classNames: mergedClassNames,
+
+                studyTime: existing.studyTime || generateEmptyMonthlyStudyTime(),
+                attendance: existing.attendance || generateEmptyMonthlyAttendance(),
+                dailyRecords: existing.dailyRecords || generateEmptyMonthlyDaily(),
+                scores: existing.scores || {
+                  mockEnglish: {},
+                  mockMath: {},
+                  weeklyEnglish: {},
+                  weeklyMath: {},
+                  monthly: generateEmptyMonthlyData(),
+                  weeklyDetails: {},
+                  weeklyDetailsMath: {}
+                },
+                consulting: existing.consulting || {},
+                startMonth: existing.startMonth || newStu.startMonth || '1월'
+              };
+
+              updated[existingIdx] = mergedStudent;
+              touchedIds.add(mergedStudent.id);
+            } else {
+              updated.unshift({
+                ...newStu,
+                className: targetClass,
+                classNames: [targetClass]
+              });
+              touchedIds.add(newStu.id);
+            }
+          });
+
+          // 해당 반 덮어쓰기:
+          // 엑셀에 없는 기존 학생은 삭제하지 않고 해당 반 소속만 제거
+          if (uploadMode === 'classOverwrite' && className !== '대구캠퍼스 전체') {
+            updated = updated.map(s => {
+              const cNames = normalizeClassNames(s);
+
+              if (!cNames.includes(targetClass)) return s;
+              if (touchedIds.has(s.id)) return s;
+
+              const nextClassNames = cNames.filter(c => c !== targetClass);
+              const finalClassNames = nextClassNames.length > 0 ? nextClassNames : ['미배정'];
+
+              return {
+                ...s,
+                className: finalClassNames[0],
+                classNames: finalClassNames
+              };
+            });
+          }
+
+          console.log('[학생 엑셀 업로드 적용 완료]', {
+            targetClass,
+            uploadMode,
+            count: newStudents.length
+          });
+
+          return updated;
+        });
+
+        showAlert(`완료! 총 ${newStudents.length}명의 정보가 처리되었습니다. 자동 저장까지 3~10초 정도 기다려주세요.`);
+      }
+    );
   };
 
   const processDailyRows = (rows) => {
@@ -1301,7 +2066,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
       for (let i = headerRowIdx + 1; i < rows.length; i++) {
         const row = rows[i]; if (!row || !Array.isArray(row) || !row[idIdx]) continue;
         const key = String(row[idIdx]).trim();
-        const studentIdx = updated.findIndex(s => (s.id === key || s.name === key) && (className === '대구캠퍼스 전체' ? true : s.className === className));
+        const studentIdx = updated.findIndex(s => (s.id === key || s.name === key) && (className === '대구캠퍼스 전체' ? true : (s.classNames || [s.className]).includes(className)));
         if (studentIdx >= 0) {
           const newDaily = [...updated[studentIdx].dailyRecords[dailyMonth]];
           for(let d=0; d<31; d++) { let val = row[dateColStart + d]; if(val !== undefined && val !== null) newDaily[d].t1 = val; }
@@ -1326,16 +2091,55 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
           if (!row || row.length < 2 || row[0] === undefined) continue;
           const key = String(row[0]).trim(); 
           if (key === '' || key === '수험번호') continue; 
-          const studentIdx = updated.findIndex(s => (s.id.toLowerCase() === key.toLowerCase() || s.userId.toLowerCase() === key.toLowerCase()) && (className === '대구캠퍼스 전체' ? true : s.className === className));
+          const studentIdx = updated.findIndex(s => (s.id.toLowerCase() === key.toLowerCase() || s.userId.toLowerCase() === key.toLowerCase()) && (className === '대구캠퍼스 전체' ? true : (s.classNames || [s.className]).includes(className)));
           
           if (studentIdx >= 0) {
-               let correctCount = 0; let details = []; 
+               let correctCount = 0; 
+               let details = []; 
+
+               const normalizeOmrAnswer = (value) => {
+                 const raw = String(value ?? '').trim().toLowerCase();
+
+                 if (!raw) return '';
+
+                 const clean = raw
+                   .replace(/\s/g, '')
+                   .replace(/[.)]/g, '')
+                   .replace(/번/g, '');
+
+                 const answerMap = {
+                   a: '1',
+                   b: '2',
+                   c: '3',
+                   d: '4',
+                   '①': '1',
+                   '②': '2',
+                   '③': '3',
+                   '④': '4'
+                 };
+
+                 return answerMap[clean] || clean;
+               };
+
                for(let q = 0; q < maxQs; q++) {
-                  const userAns = String(row[1 + q] || '').trim().toLowerCase(); 
-                  const correctAns = String(currentSettings.answers[q] || '').trim().toLowerCase();
-                  const isCorrect = (userAns !== '' && correctAns !== '' && userAns === correctAns);
-                  if(isCorrect) correctCount++;
-                  details.push({ qNum: q + 1, userAns, correctAns, isCorrect, type: currentSettings.types[q] || '미지정' });
+                 const userAns = normalizeOmrAnswer(row[1 + q]);
+                 const correctAns = normalizeOmrAnswer(currentSettings.answers[q]);
+
+                 const isCorrect = (
+                   userAns !== '' &&
+                   correctAns !== '' &&
+                   userAns === correctAns
+                 );
+
+                 if(isCorrect) correctCount++;
+
+                 details.push({
+                   qNum: q + 1,
+                   userAns,
+                   correctAns,
+                   isCorrect,
+                   type: currentSettings.types[q] || '미지정'
+                 });
                }
                const score = correctCount * (currentSettings.qScore || 2.5);
                const weekKey = `${weeklyMonth}_w${selectedWeek}`;
@@ -1386,7 +2190,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
     setStudents(prev => {
       let updated = [...prev];
       updated = updated.map(s => {
-        if(className === '대구캠퍼스 전체' || s.className === className) { 
+        if(className === '대구캠퍼스 전체' || (s.classNames || [s.className]).includes(className)) { 
            return { ...s, scores: { ...s.scores, monthly: { ...s.scores.monthly, [selectedMonth]: { english: { ...emptyMonthlyScore }, math: { ...emptyMonthlyScore }, total: { ...emptyMonthlyScore } } } } }; 
         }
         return s;
@@ -1398,7 +2202,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
           const idVal = row[baseIdx + 1]; 
           if (!idVal) return;
           const key = String(idVal).trim().toLowerCase();
-          const studentIdx = updated.findIndex(s => s.userId?.toLowerCase() === key && (className === '대구캠퍼스 전체' ? true : s.className === className));
+          const studentIdx = updated.findIndex(s => s.userId?.toLowerCase() === key && (className === '대구캠퍼스 전체' ? true : (s.classNames || [s.className]).includes(className)));
           if (studentIdx >= 0) {
             const score = row[baseIdx + 8]; if (score === undefined || score === '') return;
             const percent = row[baseIdx + 9] !== undefined ? row[baseIdx + 9] : ''; 
@@ -1418,7 +2222,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
       }
 
       const computeRank = (subject) => {
-        let validStudents = updated.filter(s => (className === '대구캠퍼스 전체' ? true : s.className === className) && s.scores.monthly[selectedMonth]?.[subject]?.score !== '');
+        let validStudents = updated.filter(s => (className === '대구캠퍼스 전체' ? true : (s.classNames || [s.className]).includes(className)) && s.scores.monthly[selectedMonth]?.[subject]?.score !== '');
         validStudents.sort((a, b) => Number(b.scores.monthly[selectedMonth][subject].score) - Number(a.scores.monthly[selectedMonth][subject].score));
         validStudents.forEach((s, idx) => {
           const sIdx = updated.findIndex(u => u.id === s.id);
@@ -1468,7 +2272,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                     studentIdx = updated.findIndex(s => s.name === key);
                 } else if (nameMatches.length > 1) {
                     // 동명이인 처리 (현재 선택된 반 우선)
-                    const exactMatch = nameMatches.find(s => className === '대구캠퍼스 전체' || s.className === className);
+                    const exactMatch = nameMatches.find(s => className === '대구캠퍼스 전체' || (s.classNames || [s.className]).includes(className));
                     if (exactMatch) {
                         studentIdx = updated.findIndex(s => s.id === exactMatch.id);
                     } else {
@@ -1733,9 +2537,9 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                          <th className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors" onClick={() => handleSort('name')}>
                             <div className="flex items-center justify-center gap-1">학생명 {sortKey === 'name' ? (sortOrder === 'asc' ? <ArrowDownAZ size={14}/> : <ArrowUpZA size={14}/>) : <ArrowDownAZ size={14} className="opacity-30"/>}</div>
                          </th>
-                         <th className="px-4 py-3">아이디</th>
+                         <th className="px-4 py-3">아이디/수험번호</th>
                          <th className="px-4 py-3">수강반</th>
-                         <th className="px-4 py-3">캠퍼스</th>
+                         <th className="px-4 py-3">연락처</th>
                          <th className="px-4 py-3">성별</th>
                          <th className="px-4 py-3">편입구분</th>
                          <th className="px-4 py-3">계열</th>
@@ -1747,12 +2551,37 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                            <tr key={student.id} className="hover:bg-indigo-50/40 transition-colors group cursor-pointer" onClick={() => setViewingProfileId(student.id)}>
                              <td className="px-4 py-3 text-slate-400 font-medium">{index + 1}</td>
                              <td className="px-4 py-3 font-bold text-slate-900 group-hover:text-indigo-600">{student.name}</td>
-                             <td className="px-4 py-3 font-mono text-slate-600">{student.userId || student.id}</td>
-                             <td className="px-4 py-3 font-bold text-indigo-600">{student.className}</td>
-                             <td className="px-4 py-3 text-slate-600">대구</td>
-                             <td className="px-4 py-3 text-slate-600">{student.gender || '-'}</td>
+                             <td className="px-4 py-3 font-mono text-slate-600">
+                              <div className="font-bold text-slate-700">{student.userId || '-'}</div>
+                              <div className="text-[11px] text-slate-400">{student.id || '-'}</div>
+                            </td>
+                            <td className="px-4 py-3 font-bold text-indigo-600">
+                              <div className="flex flex-col items-center gap-1">
+                                {[...new Set([
+                                  ...(Array.isArray(student.classNames) ? student.classNames : []),
+                                  ...(Array.isArray(student.classes) ? student.classes : []),
+                                  student.className
+                                ].filter(Boolean))]
+                                  .sort((a, b) => a.localeCompare(b, 'ko'))
+                                  .map(cls => (
+                                    <div key={cls} className="leading-tight">
+                                      {cls}
+                                    </div>
+                                  ))}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 text-slate-600">{student.contact || '-'}</td>
+                            <td className="px-4 py-3 text-slate-600">{student.gender || '-'}</td>
                              <td className="px-4 py-3"><span className="bg-slate-100 text-slate-600 px-2 py-1 rounded text-xs font-bold">{student.transferType || '-'}</span></td>
-                             <td className="px-4 py-3"><span className="bg-blue-50 text-blue-600 px-2 py-1 rounded text-xs font-bold">{student.targetTrack || '-'}</span></td>
+                             <td className="px-4 py-3">
+                               <span className={`px-2 py-1 rounded text-xs font-bold ${
+                                 student.targetTrack === '인문계'
+                                   ? 'bg-rose-50 text-rose-600'
+                                   : 'bg-blue-50 text-blue-600'
+                               }`}>
+                                 {student.targetTrack || '-'}
+                               </span>
+                             </td>
                              <td className="px-4 py-3">
                                <button onClick={(e) => handleDeleteStudent(e, student.id, student.name)} className="p-1.5 bg-rose-50 text-rose-500 rounded hover:bg-rose-500 hover:text-white transition-colors">
                                  <Trash2 size={16} />
@@ -1854,7 +2683,12 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
               </div>
 
               <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
-                <div className="overflow-x-auto custom-scrollbar pb-4">
+                <div className="overflow-x-auto custom-scrollbar pb-4" onWheel={(e) => {
+                  if (e.deltaY !== 0 && !e.shiftKey) {
+                    e.currentTarget.scrollLeft += e.deltaY;
+                    e.preventDefault();
+                  }
+                }}>
                   <table className="w-max min-w-full text-center text-sm border-collapse">
                     <thead className="bg-slate-800 text-white font-medium sticky top-0 z-20">
                       <tr>
@@ -2003,7 +2837,12 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                      </div>
                      <div className="text-indigo-600 font-extrabold text-xl">{classAvgStudyTime}</div>
                   </div>
-                  <div className="overflow-x-auto custom-scrollbar pb-4">
+                  <div className="overflow-x-auto custom-scrollbar pb-4" onWheel={(e) => {
+                  if (e.deltaY !== 0 && !e.shiftKey) {
+                    e.currentTarget.scrollLeft += e.deltaY;
+                    e.preventDefault();
+                  }
+                }}>
                     <table className="w-max min-w-full text-center text-sm border-collapse">
                       <thead className="bg-slate-800 text-white font-medium sticky top-0 z-20">
                         <tr>
@@ -2255,7 +3094,12 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                          {dailyMonth} DAILY 현황 (전체 반 평균 참여율: <span className="text-emerald-600">{dailyClassStats.avgRate}%</span> / 반 평균 점수: <span className="text-indigo-600">{dailyClassStats.avgScore}점</span>)
                        </div>
                     </div>
-                    <div className="overflow-x-auto custom-scrollbar pb-4">
+                    <div className="overflow-x-auto custom-scrollbar pb-4" onWheel={(e) => {
+                  if (e.deltaY !== 0 && !e.shiftKey) {
+                    e.currentTarget.scrollLeft += e.deltaY;
+                    e.preventDefault();
+                  }
+                }}>
                     <table className="w-max min-w-full text-center text-sm border-collapse">
                       <thead className="bg-slate-800 text-white font-medium sticky top-0 z-20">
                         <tr>
@@ -2818,19 +3662,94 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
               {/* 학생 리스트 (프린트 시 숨김) */}
               <div className="w-80 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col shrink-0 print:hidden">
                  <div className="p-4 bg-slate-50 border-b border-slate-200">
-                    <h2 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><FileText size={18}/> 리포트 생성 대상</h2>
-                    <div className="relative">
-                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
-                      <input type="text" placeholder="학생 검색..." className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
-                    </div>
+                   <h2 className="font-bold text-slate-800 mb-3 flex items-center gap-2">
+                     <FileText size={18}/> 리포트 생성 대상
+                   </h2>
+
+                   <div className="relative mb-3">
+                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
+                     <input
+                       type="text"
+                       placeholder="학생 검색..."
+                       className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                       value={searchTerm}
+                       onChange={(e) => setSearchTerm(e.target.value)}
+                     />
+                   </div>
+
+                   <div className="flex gap-2">
+                     <button
+                       onClick={() => {
+                         if (filteredStudents.length === 0) return;
+
+                         if (selectedReportIds.length === filteredStudents.length) {
+                           setSelectedReportIds([]);
+                         } else {
+                           setSelectedReportIds(filteredStudents.map(s => s.id));
+                         }
+                       }}
+                       className="flex-1 bg-white border border-slate-200 text-slate-600 px-3 py-2 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors"
+                     >
+                       {filteredStudents.length > 0 && selectedReportIds.length === filteredStudents.length ? '전체 해제' : '전체 선택'}
+                     </button>
+
+                     <button
+                       onClick={handlePrint}
+                       className="flex-1 bg-indigo-600 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-indigo-700 transition-colors"
+                     >
+                       선택 출력 {selectedReportIds.length > 0 ? `(${selectedReportIds.length})` : ''}
+                     </button>
+                   </div>
                  </div>
                  <div className="overflow-y-auto flex-1 p-2 space-y-1">
-                    {filteredStudents.map(student => (
-                       <div key={student.id} onClick={() => setReportStudentId(student.id)} className={`p-3 rounded-xl cursor-pointer transition-colors border ${reportStudentId === student.id ? 'bg-indigo-50 border-indigo-200 shadow-sm' : 'border-transparent hover:bg-slate-50'}`}>
-                          <div className="font-bold text-slate-800 text-sm">{student.name} <span className="text-xs text-slate-400 font-medium ml-1">({student.targetTrack.charAt(0)})</span></div>
-                          <div className="text-xs text-slate-400 mt-1">{student.userId || student.id}</div>
-                       </div>
-                    ))}
+                    {filteredStudents.map(student => {
+                      const isChecked = selectedReportIds.includes(student.id);
+
+                      return (
+                        <div
+                          key={student.id}
+                          onClick={() => setReportStudentId(student.id)}
+                          className={`p-3 rounded-xl cursor-pointer transition-colors border flex gap-3 items-start ${
+                            reportStudentId === student.id
+                              ? 'bg-indigo-50 border-indigo-200 shadow-sm'
+                              : 'border-transparent hover:bg-slate-50'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => {
+                              const checked = e.target.checked;
+
+                              setSelectedReportIds(prev =>
+                                checked
+                                  ? [...new Set([...prev, student.id])]
+                                  : prev.filter(id => id !== student.id)
+                              );
+                            }}
+                            className="mt-1 cursor-pointer"
+                          />
+
+                          <div className="flex-1 min-w-0">
+                            <div className="font-bold text-slate-800 text-sm">
+                              {student.name}
+                              <span className="text-xs text-slate-400 font-medium ml-1">
+                                ({student.targetTrack?.charAt(0) || '-'})
+                              </span>
+                            </div>
+
+                            <div className="text-xs text-slate-400 mt-1 truncate">
+                              {student.userId || student.id}
+                            </div>
+
+                            <div className="text-[10px] text-indigo-500 font-bold mt-1 truncate">
+                              {getStudentClassNames(student)}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
                  </div>
               </div>
               
@@ -2842,7 +3761,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                        {/* 인쇄 버튼 (화면에만 보임) */}
                        <div className="absolute top-8 right-8 print:hidden">
                           <button onClick={handlePrint} className="bg-indigo-600 text-white px-5 py-2.5 rounded-xl font-bold flex items-center gap-2 hover:bg-indigo-700 shadow-lg transition-all transform hover:scale-105">
-                             <Printer size={18}/> A4 PDF 저장
+                             <Printer size={18}/> A4 PDF 출력/저장
                           </button>
                        </div>
 
@@ -2870,7 +3789,10 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                           </div>
                           <div className="h-10 w-px bg-slate-200"></div>
                           <div className="flex gap-8 text-sm">
-                             <div><div className="text-xs text-slate-400 font-bold mb-1">수강반</div><div className="font-extrabold text-slate-700">{reportStudent.className}</div></div>
+                             <div>
+                               <div className="text-xs text-slate-400 font-bold mb-1">수강반</div>
+                               <div className="font-extrabold text-slate-700">{getStudentClassNames(reportStudent)}</div>
+                             </div>
                              <div><div className="text-xs text-slate-400 font-bold mb-1">목표계열</div><div className="font-extrabold text-slate-700">{reportStudent.targetTrack}</div></div>
                              <div><div className="text-xs text-slate-400 font-bold mb-1">기준월</div><div className="font-extrabold text-indigo-600">{selectedMonth}</div></div>
                           </div>
@@ -3183,6 +4105,30 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
               </h2>
               <p className="text-sm text-slate-500">파일을 올리시면 {importType === 'monthly' || importType === 'studyTimeDaily' ? '아이디' : '학번/이름'}을(를) 매칭하여 데이터를 추출합니다.</p>
             </div>
+            {importType === 'student' && (
+              <div className="mb-5 bg-slate-50 border border-slate-200 rounded-2xl p-4">
+                <label className="block text-xs font-extrabold text-slate-500 mb-2">
+                  명단 업로드 방식 선택
+                </label>
+
+                <select
+                  value={uploadMode}
+                  onChange={(e) => setUploadMode(e.target.value)}
+                  className="w-full border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-bold text-slate-700 outline-none bg-white focus:ring-2 focus:ring-indigo-400"
+                >
+                  <option value="merge">① 추가/수정만 하기</option>
+                  <option value="classOverwrite">② 해당 반 명단 덮어쓰기</option>
+                  <option value="allOverwrite">③ 전체 명단 덮어쓰기</option>
+                </select>
+
+                <p className="text-[11px] text-slate-400 font-bold mt-2 leading-relaxed">
+                  ※ 추천: 반별 엑셀 업로드는 ② 해당 반 명단 덮어쓰기를 사용하세요.
+                  <br />
+                  ※ 새 엑셀에 없는 기존 해당 반 학생은 명단에서 제외되며 Firebase에서도 삭제됩니다.
+                </p>
+              </div>
+            )}
+
             {/* 업로드 박스 */}
             <div className="border-2 border-dashed border-slate-300 rounded-2xl p-8 text-center cursor-pointer transition-colors hover:bg-indigo-50 hover:border-indigo-400 group" onClick={() => triggerDirectUpload(importType)}>
               <Upload className="w-10 h-10 mx-auto mb-3 transition-colors text-indigo-300 group-hover:text-indigo-500" />
@@ -3457,41 +4403,112 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
           <div className="bg-white rounded-3xl w-full max-w-4xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
             <div className="bg-slate-900 text-white p-6 md:p-8 border-b flex justify-between items-center relative overflow-hidden">
-              <div className="absolute right-0 top-0 opacity-10 transform translate-x-4 -translate-y-4"><School size={150}/></div>
+              <div className="absolute right-0 top-0 opacity-10 transform translate-x-4 -translate-y-4">
+                <School size={150}/>
+              </div>
+
               <div className="flex items-center gap-5 relative z-10 w-full pr-12">
-                <div className="w-16 h-16 bg-white/10 rounded-2xl flex items-center justify-center font-bold text-3xl shadow-inner border border-white/20 shrink-0">{studentProfileToView.name.charAt(0)}</div>
+                <div className="w-16 h-16 bg-white/10 rounded-2xl flex items-center justify-center font-bold text-3xl shadow-inner border border-white/20 shrink-0">
+                  {studentProfileToView.name.charAt(0)}
+                </div>
+
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-3 mb-1 flex-wrap">
-                    <input className="text-3xl font-extrabold bg-transparent border-b border-transparent hover:border-white/30 focus:border-white outline-none w-40 transition-colors px-1 -ml-1" value={studentProfileToView.name} onChange={e => handleProfileChange(studentProfileToView.id, 'name', e.target.value)} />
-                    <select className="bg-transparent border-b border-transparent hover:border-white/30 focus:border-white outline-none text-slate-300 font-medium cursor-pointer transition-colors" value={studentProfileToView.gender} onChange={e => handleProfileChange(studentProfileToView.id, 'gender', e.target.value)}>
+                    <input
+                      className="text-3xl font-extrabold bg-transparent border-b border-transparent hover:border-white/30 focus:border-white outline-none w-40 transition-colors px-1 -ml-1"
+                      value={studentProfileToView.name}
+                      onChange={e => handleProfileChange(studentProfileToView.id, 'name', e.target.value)}
+                    />
+
+                    <select
+                      className="bg-transparent border-b border-transparent hover:border-white/30 focus:border-white outline-none text-slate-300 font-medium cursor-pointer transition-colors"
+                      value={studentProfileToView.gender || ''}
+                      onChange={e => handleProfileChange(studentProfileToView.id, 'gender', e.target.value)}
+                    >
                       <option className="text-black" value="남">남</option>
                       <option className="text-black" value="여">여</option>
                     </select>
-                    <select className="bg-indigo-500 hover:bg-indigo-400 text-white px-2 py-0.5 rounded text-xs font-bold shadow-sm outline-none border border-indigo-400 ml-2 cursor-pointer transition-colors" value={studentProfileToView.className} onChange={e => {
+
+                    <select
+                      className="bg-indigo-500 hover:bg-indigo-400 text-white px-2 py-0.5 rounded text-xs font-bold shadow-sm outline-none border border-indigo-400 ml-2 cursor-pointer transition-colors"
+                      value={className === '대구캠퍼스 전체' ? (studentProfileToView.className || '') : className}
+                      onChange={e => {
                         const targetClass = e.target.value;
-                        showConfirm(`정말로 해당 학생을 [${targetClass}] 반으로 이동하시겠습니까?\n모든 누적 데이터는 그대로 안전하게 유지됩니다.`, () => {
-                          handleProfileChange(studentProfileToView.id, 'className', targetClass);
-                          setViewingProfileId(null); 
-                          showAlert('반 변경이 완료되었습니다.');
-                        });
-                      }}>
-                      {classes.map(c => <option key={c} value={c} className="text-black bg-white">{c}</option>)}
+                        const currentClass = className === '대구캠퍼스 전체' ? studentProfileToView.className : className;
+
+                        showConfirm(
+                          `해당 학생의 소속을 [${currentClass}] → [${targetClass}](으)로 변경하시겠습니까?\n(다른 반 수강 정보는 유지됩니다.)`,
+                          () => {
+                            setStudents(prev => prev.map(s => {
+                              if (s.id !== studentProfileToView.id) return s;
+
+                              let cNames = Array.isArray(s.classNames)
+                                ? [...s.classNames]
+                                : [s.className].filter(Boolean);
+
+                              cNames = cNames.filter(c => c !== currentClass);
+
+                              if (!cNames.includes(targetClass)) {
+                                cNames.push(targetClass);
+                              }
+
+                              return {
+                                ...s,
+                                className: cNames[0] || targetClass || '미배정',
+                                classNames: cNames
+                              };
+                            }));
+
+                            setViewingProfileId(null);
+                            showAlert('반 소속이 변경되었습니다.');
+                          }
+                        );
+                      }}
+                    >
+                      {classes.map(c => (
+                        <option key={c} value={c} className="text-black bg-white">
+                          {c}
+                        </option>
+                      ))}
                     </select>
                   </div>
+
                   <div className="text-indigo-200 font-mono text-sm tracking-wider flex items-center gap-2">
-                    학번: <input className="bg-transparent border-b border-transparent hover:border-indigo-300/50 focus:border-indigo-300 outline-none w-28 px-1 transition-colors" value={studentProfileToView.id} readOnly title="학번(고유키)은 수정할 수 কাশী 없습니다."/> 
-                    <span className="opacity-50">|</span> 
-                    ID: <input className="bg-transparent border-b border-transparent hover:border-indigo-300/50 focus:border-indigo-300 outline-none w-32 px-1 transition-colors" value={studentProfileToView.userId} onChange={e => handleProfileChange(studentProfileToView.id, 'userId', e.target.value)} />
+                    학번:
+                    <input
+                      className="bg-transparent border-b border-transparent hover:border-indigo-300/50 focus:border-indigo-300 outline-none w-28 px-1 transition-colors"
+                      value={studentProfileToView.id}
+                      readOnly
+                      title="학번(고유키)은 수정할 수 없습니다."
+                    />
+
+                    <span className="opacity-50">|</span>
+
+                    ID:
+                    <input
+                      className="bg-transparent border-b border-transparent hover:border-indigo-300/50 focus:border-indigo-300 outline-none w-32 px-1 transition-colors"
+                      value={studentProfileToView.userId || ''}
+                      onChange={e => handleProfileChange(studentProfileToView.id, 'userId', e.target.value)}
+                    />
                   </div>
                 </div>
               </div>
-              <button onClick={() => setViewingProfileId(null)} className="absolute top-6 right-6 p-2 hover:bg-white/10 rounded-full transition-colors z-20"><X size={28} /></button>
+
+              <button
+                onClick={() => setViewingProfileId(null)}
+                className="absolute top-6 right-6 p-2 hover:bg-white/10 rounded-full transition-colors z-20"
+              >
+                <X size={28} />
+              </button>
             </div>
-            
+
             <div className="p-6 md:p-8 overflow-y-auto bg-slate-50 flex-1">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
                 <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
-                  <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Phone size={18} className="text-emerald-500"/> 연락처 및 기본정보</h3>
+                  <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                    <Phone size={18} className="text-emerald-500"/> 연락처 및 기본정보
+                  </h3>
+
                   <div className="space-y-3 text-sm">
                     <ProfileRow label="학생 연락처" value={studentProfileToView.contact} onChange={e => handleProfileChange(studentProfileToView.id, 'contact', e.target.value)} bold />
                     <ProfileRow label="부모님 연락처" value={studentProfileToView.parentContact} onChange={e => handleProfileChange(studentProfileToView.id, 'parentContact', e.target.value)} bold />
@@ -3499,8 +4516,12 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                     <ProfileRow label="등록월(시작월) 변경" value={studentProfileToView.startMonth || '1월'} onChange={e => handleProfileChange(studentProfileToView.id, 'startMonth', e.target.value)} options={MONTHS} />
                   </div>
                 </div>
+
                 <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
-                  <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Bookmark size={18} className="text-amber-500"/> 편입 목표</h3>
+                  <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                    <Bookmark size={18} className="text-amber-500"/> 편입 목표
+                  </h3>
+
                   <div className="space-y-3 text-sm">
                     <ProfileRow label="편입구분" value={studentProfileToView.transferType} onChange={e => handleProfileChange(studentProfileToView.id, 'transferType', e.target.value)} options={['일반', '학사', '기타']} />
                     <ProfileRow label="희망계열" value={studentProfileToView.targetTrack} onChange={e => handleProfileChange(studentProfileToView.id, 'targetTrack', e.target.value)} options={['인문계', '자연계', '사범계', '예체능', '경찰대', '기타']} />
@@ -3508,8 +4529,12 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                   </div>
                 </div>
               </div>
+
               <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm mb-6">
-                <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Building size={18} className="text-blue-500"/> 출신 대학 및 스펙</h3>
+                <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                  <Building size={18} className="text-blue-500"/> 출신 대학 및 스펙
+                </h3>
+
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-sm">
                   <ProfileRow label="출신대학" value={studentProfileToView.university} onChange={e => handleProfileChange(studentProfileToView.id, 'university', e.target.value)} bold />
                   <ProfileRow label="출신학과" value={studentProfileToView.major} onChange={e => handleProfileChange(studentProfileToView.id, 'major', e.target.value)} bold />
@@ -3519,13 +4544,17 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                   <ProfileRow label="공인영어 보유" value={studentProfileToView.englishScore} onChange={e => handleProfileChange(studentProfileToView.id, 'englishScore', e.target.value)} bold inputClassName="text-blue-600 bg-blue-50 px-2 rounded" />
                 </div>
               </div>
+
               <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-col h-64">
-                <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><MessageSquare size={18} className="text-purple-500"/> 상담 및 특이사항</h3>
-                <textarea 
-                    className="bg-slate-50 p-4 rounded-xl text-sm text-slate-700 whitespace-pre-wrap leading-relaxed border border-slate-200 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 w-full flex-1 resize-none transition-all"
-                    value={studentProfileToView.notes || ''}
-                    onChange={(e) => handleProfileChange(studentProfileToView.id, 'notes', e.target.value)}
-                    placeholder="기재된 특이사항이 없습니다. 이곳을 클릭하여 학생의 상담 내용 및 특이사항을 자유롭게 입력하세요."
+                <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                  <MessageSquare size={18} className="text-purple-500"/> 상담 및 특이사항
+                </h3>
+
+                <textarea
+                  className="bg-slate-50 p-4 rounded-xl text-sm text-slate-700 whitespace-pre-wrap leading-relaxed border border-slate-200 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 w-full flex-1 resize-none transition-all"
+                  value={studentProfileToView.notes || ''}
+                  onChange={(e) => handleProfileChange(studentProfileToView.id, 'notes', e.target.value)}
+                  placeholder="기재된 특이사항이 없습니다. 이곳을 클릭하여 학생의 상담 내용 및 특이사항을 자유롭게 입력하세요."
                 />
               </div>
             </div>
@@ -3566,51 +4595,64 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                     {/* 상단 요약 */}
                     <div className="grid grid-cols-2 gap-4">
                       <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-5 flex flex-col items-center justify-center">
-                         <span className="text-sm font-bold text-indigo-500 mb-1">월간 위클리 평균 점수</span>
-                         <span className="text-3xl font-extrabold text-indigo-700">{stats.avgScore} 점</span>
+                        <span className="text-sm font-bold text-indigo-500 mb-1">월간 위클리 평균 점수</span>
+                        <span className="text-3xl font-extrabold text-indigo-700">{stats.avgScore} 점</span>
                       </div>
                       <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-5 flex flex-col items-center justify-center">
-                         <span className="text-sm font-bold text-emerald-500 mb-1">월간 종합 정답률</span>
-                         <span className="text-3xl font-extrabold text-emerald-700">{stats.overallRate}%</span>
+                        <span className="text-sm font-bold text-emerald-500 mb-1">월간 종합 정답률</span>
+                        <span className="text-3xl font-extrabold text-emerald-700">{stats.overallRate}%</span>
                       </div>
                     </div>
 
-                    {/* 주차별 점수 뷰 + 그래프 추가 */}
+                    {/* 주차별 점수 뷰 */}
                     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden p-6">
-                      <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><BarChart3 size={18} className="text-indigo-500"/> {weeklyMonth} 주차별 성적 추이</h3>
-                      
-                      {/* 차트 영역 */}
+                      <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2">
+                        <BarChart3 size={18} className="text-indigo-500"/> {weeklyMonth} 주차별 성적 추이
+                      </h3>
+
                       <div className="h-48 flex items-end justify-around border-b border-slate-200 pb-2 relative px-4 mb-6">
-                         <div className="absolute left-0 top-0 h-full w-full flex flex-col justify-between pointer-events-none pb-2 text-[10px] text-slate-400 font-mono">
-                            <div>100</div><div>75</div><div>50</div><div>25</div><div>0</div>
-                         </div>
-                         {[1, 2, 3, 4, 5].map(w => {
-                             const score = viewingWeeklySummary.scores[scoreField]?.[`${weeklyMonth}_w${w}`];
-                             const scoreVal = score !== undefined && score !== null ? Number(score) : 0;
-                             const displaySc = scoreVal > 100 ? 100 : scoreVal;
-                             return (
-                                 <div key={w} className="w-16 flex flex-col items-center justify-end h-full z-10 relative group">
-                                     <div className="w-full bg-indigo-400 rounded-t-sm transition-all group-hover:bg-indigo-500 relative flex justify-center" style={{ height: `${displaySc}%`, minHeight: scoreVal>0?'4px':'0' }}>
-                                         {scoreVal > 0 && <span className="absolute -top-6 text-xs font-bold text-indigo-700">{scoreVal}</span>}
-                                     </div>
-                                     <span className="text-xs font-bold text-slate-500 absolute -bottom-8">{w}주차</span>
-                                 </div>
-                             )
-                         })}
+                        <div className="absolute left-0 top-0 h-full w-full flex flex-col justify-between pointer-events-none pb-2 text-[10px] text-slate-400 font-mono">
+                          <div>100</div><div>75</div><div>50</div><div>25</div><div>0</div>
+                        </div>
+
+                        {[1, 2, 3, 4, 5].map(w => {
+                          const score = viewingWeeklySummary.scores[scoreField]?.[`${weeklyMonth}_w${w}`];
+                          const scoreVal = score !== undefined && score !== null ? Number(score) : 0;
+                          const displaySc = scoreVal > 100 ? 100 : scoreVal;
+
+                          return (
+                            <div key={w} className="w-16 flex flex-col items-center justify-end h-full z-10 relative group">
+                              <div
+                                className="w-full bg-indigo-400 rounded-t-sm transition-all group-hover:bg-indigo-500 relative flex justify-center"
+                                style={{ height: `${displaySc}%`, minHeight: scoreVal > 0 ? '4px' : '0' }}
+                              >
+                                {scoreVal > 0 && <span className="absolute -top-6 text-xs font-bold text-indigo-700">{scoreVal}</span>}
+                              </div>
+                              <span className="text-xs font-bold text-slate-500 absolute -bottom-8">{w}주차</span>
+                            </div>
+                          );
+                        })}
                       </div>
 
-                      {/* 표 영역 */}
                       <table className="w-full text-center text-sm border-collapse border border-slate-200 rounded-xl overflow-hidden">
                         <thead className="bg-slate-50 border-b border-slate-200">
                           <tr>
-                            {[1, 2, 3, 4, 5].map(w => <th key={w} className="py-3 text-slate-500 font-bold border-r border-slate-200">{w}주차</th>)}
+                            {[1, 2, 3, 4, 5].map(w => (
+                              <th key={w} className="py-3 text-slate-500 font-bold border-r border-slate-200">
+                                {w}주차
+                              </th>
+                            ))}
                           </tr>
                         </thead>
                         <tbody>
                           <tr>
                             {[1, 2, 3, 4, 5].map(w => {
-                               const score = viewingWeeklySummary.scores[scoreField]?.[`${weeklyMonth}_w${w}`];
-                               return <td key={w} className="py-4 font-bold text-indigo-600 border-r border-slate-200 last:border-0">{score !== undefined && score !== null ? `${score} 점` : '-'}</td>;
+                              const score = viewingWeeklySummary.scores[scoreField]?.[`${weeklyMonth}_w${w}`];
+                              return (
+                                <td key={w} className="py-4 font-bold text-indigo-600 border-r border-slate-200 last:border-0">
+                                  {score !== undefined && score !== null ? `${score} 점` : '-'}
+                                </td>
+                              );
                             })}
                           </tr>
                         </tbody>
@@ -3619,7 +4661,9 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
                     {/* 유형별 정답률 요약 카드 */}
                     <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
-                      <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><ListChecks size={18} className="text-emerald-500"/> 월간 유형별 정답률 종합</h3>
+                      <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                        <ListChecks size={18} className="text-emerald-500"/> 월간 유형별 정답률 종합
+                      </h3>
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                         {Object.entries(stats.typeStats).map(([type, typeStat]) => (
                           <div key={type} className="bg-emerald-50/30 border border-emerald-100 p-4 rounded-xl flex flex-col items-center">
@@ -3627,7 +4671,9 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                             <span className="text-xl font-extrabold text-emerald-700">
                               {typeStat.total > 0 ? Math.round((typeStat.correct / typeStat.total) * 100) : 0}%
                             </span>
-                            <span className="text-[10px] text-slate-400 mt-1">({typeStat.correct} / {typeStat.total}문항)</span>
+                            <span className="text-[10px] text-slate-400 mt-1">
+                              ({typeStat.correct} / {typeStat.total}문항)
+                            </span>
                           </div>
                         ))}
                       </div>
@@ -3990,16 +5036,29 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                   const am = viewingAttendanceSummary.attendance[month]?.am || [];
                   const pm = viewingAttendanceSummary.attendance[month]?.pm || [];
                   const entries = [...am, ...pm].filter(v => v !== '');
-                  const stats = { 출석:0, 지각:0, 사전통보:0, 개인사정:0, 학교:0, 병결:0, 진료:0, 기타:0, penalty:0 };
-                  
+
+                  const stats = {
+                    출석: 0,
+                    지각: 0,
+                    결석: 0,
+                    조퇴: 0,
+                    사전통보: 0,
+                    개인사정: 0,
+                    학교: 0,
+                    병결: 0,
+                    진료: 0,
+                    기타: 0,
+                    penalty: 0
+                  };
+
                   entries.forEach(v => {
                     if (stats[v] !== undefined) stats[v]++;
                     else stats.기타++;
-                    
-                    if (v === '지각') stats.penalty += 1;
-                    else if (v === '개인사정') stats.penalty += 2;
-                    else if (v !== '출석' && v !== '학교' && v !== '사전통보' && v !== '진료' && v !== '병결') stats.penalty += 3;
                   });
+
+                  // 핵심: 벌점 기준 설정값을 그대로 사용
+                  stats.penalty = getAttendancePenalty(viewingAttendanceSummary, month);
+
                   return stats;
                 };
 
