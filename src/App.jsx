@@ -1596,6 +1596,52 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
     });
   };
 
+  const attendanceTopScrollRef = useRef(null);
+  const attendanceBodyScrollRef = useRef(null);
+  const isSyncingAttendanceScroll = useRef(false);
+
+  const syncAttendanceScroll = (source) => {
+    const top = attendanceTopScrollRef.current;
+    const body = attendanceBodyScrollRef.current;
+
+    if (!top || !body || isSyncingAttendanceScroll.current) return;
+
+    isSyncingAttendanceScroll.current = true;
+
+    if (source === 'top') {
+      body.scrollLeft = top.scrollLeft;
+    } else {
+      top.scrollLeft = body.scrollLeft;
+    }
+
+    requestAnimationFrame(() => {
+      isSyncingAttendanceScroll.current = false;
+    });
+  };
+
+  const dailyTopScrollRef = useRef(null);
+  const dailyBodyScrollRef = useRef(null);
+  const isSyncingDailyScroll = useRef(false);
+
+  const syncDailyScroll = (source) => {
+    const top = dailyTopScrollRef.current;
+    const body = dailyBodyScrollRef.current;
+
+    if (!top || !body || isSyncingDailyScroll.current) return;
+
+    isSyncingDailyScroll.current = true;
+
+    if (source === 'top') {
+      body.scrollLeft = top.scrollLeft;
+    } else {
+      top.scrollLeft = body.scrollLeft;
+    }
+
+    requestAnimationFrame(() => {
+      isSyncingDailyScroll.current = false;
+    });
+  };
+
   const [showAddModal, setShowAddModal] = useState(false);
   const [newStudentForm, setNewStudentForm] = useState({ name: '', userId: '', targetTrack: '인문계', startMonth: '1월' });
 
@@ -3088,12 +3134,19 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
               </div>
 
               <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
-                <div className="overflow-x-auto custom-scrollbar pb-4" onWheel={(e) => {
-                  if (e.deltaY !== 0 && !e.shiftKey) {
-                    e.currentTarget.scrollLeft += e.deltaY;
-                    e.preventDefault();
-                  }
-                }}>
+                <div
+                  ref={attendanceTopScrollRef}
+                  className="overflow-x-auto custom-scrollbar h-5 bg-slate-50 border-b border-slate-200"
+                  onScroll={() => syncAttendanceScroll('top')}
+                >
+                  <div style={{ width: '4200px', height: '1px' }} />
+                </div>
+
+                <div
+                  ref={attendanceBodyScrollRef}
+                  className="overflow-x-auto custom-scrollbar pb-4"
+                  onScroll={() => syncAttendanceScroll('body')}
+                >
                   <table className="w-max min-w-full text-center text-sm border-collapse">
                     <thead className="bg-slate-800 text-white font-medium sticky top-0 z-20">
                       <tr>
@@ -3506,12 +3559,19 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                          {dailyMonth} DAILY 현황 (전체 반 평균 참여율: <span className="text-emerald-600">{dailyClassStats.avgRate}%</span> / 반 평균 점수: <span className="text-indigo-600">{dailyClassStats.avgScore}점</span>)
                        </div>
                     </div>
-                    <div className="overflow-x-auto custom-scrollbar pb-4" onWheel={(e) => {
-                  if (e.deltaY !== 0 && !e.shiftKey) {
-                    e.currentTarget.scrollLeft += e.deltaY;
-                    e.preventDefault();
-                  }
-                }}>
+                    <div
+                      ref={dailyTopScrollRef}
+                      className="overflow-x-auto custom-scrollbar h-5 bg-slate-50 border-b border-slate-200"
+                      onScroll={() => syncDailyScroll('top')}
+                    >
+                      <div style={{ width: '4200px', height: '1px' }} />
+                    </div>
+
+                    <div
+                      ref={dailyBodyScrollRef}
+                      className="overflow-x-auto custom-scrollbar pb-4"
+                      onScroll={() => syncDailyScroll('body')}
+                    >
                     <table className="w-max min-w-full text-center text-sm border-collapse">
                       <thead className="bg-slate-800 text-white font-medium sticky top-0 z-20">
                         <tr>
