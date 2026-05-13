@@ -774,6 +774,93 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
       return `<span>0</span>`;
     };
 
+    const getMonthlyPercentTrend = (student) => {
+      return DISPLAY_MONTHS.map((m) => {
+        const monthScore = student.scores?.monthly?.[m] || {};
+        const engPercent = Number(monthScore.english?.percent || 0);
+        const mathPercent = Number(monthScore.math?.percent || 0);
+        const totalPercent = Number(monthScore.total?.percent || 0);
+
+        let value = totalPercent || engPercent || mathPercent || 0;
+
+        return {
+          month: m,
+          value: isNaN(value) ? 0 : value
+        };
+      });
+    };
+
+    const getWeeklyScoreTrend = (student) => {
+      const scoreKey = 'weeklyEnglish';
+
+      return [1, 2, 3, 4, 5].map((week) => {
+        const weekKey = `${selectedMonth}_w${week}`;
+        const value = Number(student.scores?.[scoreKey]?.[weekKey] || 0);
+
+        return {
+          label: `${week}주`,
+          value: isNaN(value) ? 0 : value
+        };
+      });
+    };
+
+    const getWeaknessTypes = (student) => {
+      const stats = getMonthlyWeeklyStats(student, selectedMonth, 'english');
+      const types = Object.entries(stats.typeStats || {}).map(([name, v]) => ({
+        name,
+        rate: v.total > 0 ? Math.round((v.correct / v.total) * 100) : 0,
+        total: v.total
+      }));
+
+      return types.slice(0, 5);
+    };
+
+    const renderMiniBarChart = (items, emptyText = '데이터가 없습니다.') => {
+      if (!items || items.every(item => Number(item.value || 0) === 0)) {
+        return `<div class="empty-chart">${emptyText}</div>`;
+      }
+
+      return `
+        <div class="mini-chart">
+          ${items.map(item => {
+            const value = Math.max(0, Math.min(100, Number(item.value || 0)));
+            return `
+              <div class="mini-bar-item">
+                <div class="mini-bar-value">${value ? value : '-'}</div>
+                <div class="mini-bar-track">
+                  <div class="mini-bar-fill" style="height:${value}%"></div>
+                </div>
+                <div class="mini-bar-label">${escapeHtml(item.month || item.label)}</div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    };
+
+    const renderWeaknessBars = (types) => {
+      if (!types || types.length === 0) {
+        return `<div class="empty-chart">유형 데이터가 없습니다.</div>`;
+      }
+
+      const validTypes = types.filter(t => t.total > 0);
+      const minRate = validTypes.length > 0 ? Math.min(...validTypes.map(t => t.rate)) : -1;
+
+      return `
+        <div class="weak-list">
+          ${types.map(t => `
+            <div class="weak-row">
+              <span class="weak-name">${escapeHtml(t.name)}</span>
+              <div class="weak-track">
+                <div class="${t.rate === minRate && t.total > 0 ? 'weak-fill danger' : 'weak-fill'}" style="width:${Math.max(0, Math.min(100, t.rate))}%"></div>
+              </div>
+              <strong>${t.rate}%</strong>
+            </div>
+          `).join('')}
+        </div>
+      `;
+    };
+
     const pages = targetStudents.map((student) => {
       const classNames = getStudentClassNames(student);
       const attRate = getAttendanceRateNum(student, selectedMonth);
@@ -787,17 +874,20 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
       const total = monthScore.total || {};
       const isHuman = student.targetTrack === '인문계';
 
+      const monthlyTrend = getMonthlyPercentTrend(student);
+      const weeklyTrend = getWeeklyScoreTrend(student);
+      const weaknessTypes = getWeaknessTypes(student);
+
       return `
         <section class="report-page">
-          <div class="top-line"></div>
-
           <header class="report-header">
             <div>
               <div class="eyebrow">${escapeHtml(academicYear)} ACADEMIC REPORT</div>
               <h1>${escapeHtml(selectedMonth)} 월간 학습 리포트</h1>
             </div>
+
             <div class="issue-date">
-              <div>DATE OF ISSUE</div>
+              <span>DATE OF ISSUE</span>
               <strong>${new Date().toLocaleDateString('ko-KR')}</strong>
             </div>
           </header>
@@ -907,10 +997,31 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
             </tbody>
           </table>
 
-          <h3 class="section-title">담당 선생님 종합 코멘트</h3>
-          <div class="comment-box">
-            ${escapeHtml(student.notes || '이번 달 학습 현황을 바탕으로 출결, Daily 참여율, Weekly 및 월례고사 성적을 지속적으로 점검해 주세요.')}
-          </div>
+          <section class="analysis-grid analysis-grid-top">
+            <div class="analysis-card wide">
+              <h3 class="section-title small-title">월별 월례고사 성적 추이(백분위)</h3>
+              ${renderMiniBarChart(monthlyTrend, '월례고사 백분위 데이터가 없습니다.')}
+            </div>
+          </section>
+
+          <section class="analysis-grid">
+            <div class="analysis-card">
+              <h3 class="section-title small-title">${escapeHtml(selectedMonth)} Weekly 점수 추이</h3>
+              ${renderMiniBarChart(weeklyTrend, 'Weekly 점수 데이터가 없습니다.')}
+            </div>
+
+            <div class="analysis-card">
+              <h3 class="section-title small-title">${escapeHtml(selectedMonth)} 유형별 취약점 분석</h3>
+              ${renderWeaknessBars(weaknessTypes)}
+            </div>
+          </section>
+
+          <section class="comment-section">
+            <h3 class="section-title small-title">담당 선생님 종합 코멘트</h3>
+            <div class="comment-box">
+              ${escapeHtml(student.notes || '이번 달 학습 현황을 바탕으로 출결, Daily 참여율, Weekly 및 월례고사 성적을 지속적으로 점검해 주세요.')}
+            </div>
+          </section>
         </section>
       `;
     }).join('');
@@ -925,7 +1036,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
           <style>
             @page {
               size: A4;
-              margin: 12mm;
+              margin: 6mm;
             }
 
             * {
@@ -943,21 +1054,15 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
               width: 210mm;
               min-height: 297mm;
               margin: 0 auto;
-              padding: 18mm;
+              padding: 9mm;
               background: #ffffff;
               page-break-after: always;
               position: relative;
+              overflow: hidden;
             }
 
             .report-page:last-child {
               page-break-after: auto;
-            }
-
-            .top-line {
-              height: 6px;
-              background: linear-gradient(90deg, #4f46e5, #14b8a6);
-              border-radius: 999px;
-              margin-bottom: 18px;
             }
 
             .report-header {
@@ -965,35 +1070,35 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
               justify-content: space-between;
               align-items: flex-end;
               border-bottom: 3px solid #0f172a;
-              padding-bottom: 14px;
-              margin-bottom: 22px;
+              padding-bottom: 8px;
+              margin-bottom: 10px;
             }
 
             .eyebrow {
-              font-size: 11px;
+              font-size: 9px;
               font-weight: 800;
-              letter-spacing: 1.5px;
+              letter-spacing: 1.2px;
               color: #4f46e5;
-              margin-bottom: 5px;
+              margin-bottom: 3px;
             }
 
             h1 {
               margin: 0;
-              font-size: 28px;
-              line-height: 1.2;
+              font-size: 22px;
+              line-height: 1.15;
             }
 
             .issue-date {
               text-align: right;
-              font-size: 11px;
+              font-size: 9px;
               color: #64748b;
             }
 
             .issue-date strong {
               display: block;
-              margin-top: 4px;
+              margin-top: 2px;
               color: #334155;
-              font-size: 13px;
+              font-size: 10px;
             }
 
             .student-box {
@@ -1002,52 +1107,52 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
               align-items: center;
               background: #f8fafc;
               border: 1px solid #e2e8f0;
-              border-radius: 18px;
-              padding: 16px 18px;
-              margin-bottom: 22px;
-              gap: 20px;
+              border-radius: 12px;
+              padding: 9px 11px;
+              margin-bottom: 10px;
+              gap: 14px;
             }
 
             .student-main {
               display: flex;
               align-items: center;
-              gap: 14px;
-              min-width: 220px;
+              gap: 10px;
+              min-width: 180px;
             }
 
             .avatar {
-              width: 48px;
-              height: 48px;
+              width: 34px;
+              height: 34px;
               border-radius: 999px;
               background: #e0e7ff;
               color: #4f46e5;
               display: flex;
               align-items: center;
               justify-content: center;
-              font-size: 24px;
+              font-size: 17px;
               font-weight: 900;
             }
 
             .student-main h2 {
               margin: 0;
-              font-size: 20px;
+              font-size: 15px;
             }
 
             .student-main h2 span {
-              font-size: 13px;
+              font-size: 10px;
               color: #64748b;
             }
 
             .student-main p {
-              margin: 3px 0 0;
-              font-size: 11px;
+              margin: 2px 0 0;
+              font-size: 9px;
               color: #64748b;
             }
 
             .student-info {
               display: flex;
-              gap: 24px;
-              font-size: 12px;
+              gap: 18px;
+              font-size: 10px;
               text-align: left;
             }
 
@@ -1055,7 +1160,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
               display: block;
               color: #94a3b8;
               font-weight: 800;
-              margin-bottom: 4px;
+              margin-bottom: 2px;
             }
 
             .student-info strong {
@@ -1065,33 +1170,33 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
             .kpi-grid {
               display: grid;
               grid-template-columns: repeat(4, 1fr);
-              gap: 12px;
-              margin-bottom: 24px;
+              gap: 7px;
+              margin-bottom: 10px;
             }
 
             .kpi-card {
               border: 1px solid #e2e8f0;
-              border-radius: 16px;
-              padding: 14px;
+              border-radius: 11px;
+              padding: 8px;
               background: #ffffff;
             }
 
             .kpi-card span {
               display: block;
-              font-size: 11px;
+              font-size: 9px;
               color: #64748b;
               font-weight: 800;
-              margin-bottom: 8px;
+              margin-bottom: 4px;
             }
 
             .kpi-card strong {
-              font-size: 23px;
+              font-size: 18px;
               font-weight: 900;
             }
 
             .kpi-card p {
-              margin: 8px 0 0;
-              font-size: 10px;
+              margin: 4px 0 0;
+              font-size: 8px;
               color: #94a3b8;
               font-weight: 700;
             }
@@ -1102,28 +1207,33 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
             .dark { color: #1e293b; }
 
             .section-title {
-              font-size: 14px;
+              font-size: 11px;
               font-weight: 900;
-              margin: 22px 0 10px;
+              margin: 9px 0 6px;
+            }
+
+            .small-title {
+              margin-top: 0;
+              margin-bottom: 6px;
             }
 
             .score-table {
               width: 100%;
               border-collapse: collapse;
-              font-size: 12px;
-              margin-bottom: 18px;
+              font-size: 9px;
+              margin-bottom: 9px;
             }
 
             .score-table th {
               background: #f1f5f9;
               color: #475569;
-              padding: 9px;
+              padding: 5px;
               border: 1px solid #e2e8f0;
               font-weight: 900;
             }
 
             .score-table td {
-              padding: 10px;
+              padding: 5px;
               border: 1px solid #e2e8f0;
               text-align: center;
               font-weight: 700;
@@ -1145,14 +1255,151 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
               font-weight: 900;
             }
 
+            .analysis-grid {
+              display: grid;
+              grid-template-columns: 1fr 1fr;
+              gap: 8px;
+              margin-bottom: 8px;
+            }
+
+            .analysis-grid-top {
+              grid-template-columns: 1fr;
+            }
+
+            .analysis-card {
+              border: 1px solid #e2e8f0;
+              border-radius: 12px;
+              padding: 8px;
+              min-height: 106px;
+              background: #ffffff;
+            }
+
+            .analysis-card.wide {
+              min-height: 118px;
+            }
+
+            .mini-chart {
+              height: 76px;
+              display: flex;
+              align-items: flex-end;
+              justify-content: space-between;
+              gap: 5px;
+              border-left: 1px solid #e2e8f0;
+              border-bottom: 1px solid #e2e8f0;
+              padding: 5px 5px 0 5px;
+            }
+
+            .mini-bar-item {
+              flex: 1;
+              height: 100%;
+              min-width: 0;
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              justify-content: flex-end;
+              gap: 2px;
+            }
+
+            .mini-bar-value {
+              font-size: 8px;
+              color: #2563eb;
+              font-weight: 900;
+              min-height: 10px;
+            }
+
+            .mini-bar-track {
+              width: 13px;
+              height: 44px;
+              background: #eef2ff;
+              border-radius: 999px;
+              display: flex;
+              align-items: flex-end;
+              overflow: hidden;
+            }
+
+            .mini-bar-fill {
+              width: 100%;
+              background: #2563eb;
+              border-radius: 999px;
+            }
+
+            .mini-bar-label {
+              font-size: 7.5px;
+              color: #64748b;
+              font-weight: 800;
+              white-space: nowrap;
+            }
+
+            .weak-list {
+              display: flex;
+              flex-direction: column;
+              gap: 6px;
+            }
+
+            .weak-row {
+              display: grid;
+              grid-template-columns: 38px 1fr 32px;
+              align-items: center;
+              gap: 6px;
+              font-size: 8.5px;
+            }
+
+            .weak-name {
+              font-weight: 800;
+              color: #475569;
+              overflow: hidden;
+              white-space: nowrap;
+              text-overflow: ellipsis;
+            }
+
+            .weak-track {
+              height: 8px;
+              background: #f1f5f9;
+              border-radius: 999px;
+              overflow: hidden;
+            }
+
+            .weak-fill {
+              height: 100%;
+              background: #10b981;
+              border-radius: 999px;
+            }
+
+            .weak-fill.danger {
+              background: #fb7185;
+            }
+
+            .weak-row strong {
+              text-align: right;
+              color: #334155;
+            }
+
+            .empty-chart {
+              height: 72px;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              color: #94a3b8;
+              font-size: 9px;
+              font-weight: 700;
+              background: #f8fafc;
+              border-radius: 10px;
+            }
+
+            .comment-section {
+              margin-top: 4px;
+            }
+
             .comment-box {
-              min-height: 95px;
+              min-height: 48px;
+              max-height: 66px;
+              overflow: hidden;
               border: 1px solid #e2e8f0;
               background: #f8fafc;
-              border-radius: 16px;
-              padding: 14px;
-              font-size: 12px;
-              line-height: 1.7;
+              border-radius: 12px;
+              padding: 8px;
+              font-size: 9.5px;
+              line-height: 1.45;
               color: #334155;
               white-space: pre-wrap;
             }
@@ -1167,6 +1414,8 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                 width: auto;
                 min-height: auto;
                 box-shadow: none;
+                page-break-inside: avoid;
+                break-inside: avoid;
               }
             }
           </style>
@@ -1323,6 +1572,29 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   const [uploadTargetDay, setUploadTargetDay] = useState(null); 
   const fileInputRef = useRef(null);
   const omrFileInputRef = useRef(null);
+
+  const studyTimeTopScrollRef = useRef(null);
+  const studyTimeBodyScrollRef = useRef(null);
+  const isSyncingStudyTimeScroll = useRef(false);
+
+  const syncStudyTimeScroll = (source) => {
+    const top = studyTimeTopScrollRef.current;
+    const body = studyTimeBodyScrollRef.current;
+
+    if (!top || !body || isSyncingStudyTimeScroll.current) return;
+
+    isSyncingStudyTimeScroll.current = true;
+
+    if (source === 'top') {
+      body.scrollLeft = top.scrollLeft;
+    } else {
+      top.scrollLeft = body.scrollLeft;
+    }
+
+    requestAnimationFrame(() => {
+      isSyncingStudyTimeScroll.current = false;
+    });
+  };
 
   const [showAddModal, setShowAddModal] = useState(false);
   const [newStudentForm, setNewStudentForm] = useState({ name: '', userId: '', targetTrack: '인문계', startMonth: '1월' });
@@ -2237,81 +2509,214 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
   const processStudyTimeDailyRows = (rows, targetDayIdx) => {
     let headerRowIdx = -1;
+  
     for (let i = 0; i < Math.min(20, rows.length); i++) {
-        if (!rows[i] || !Array.isArray(rows[i])) continue;
-        const rowStr = rows[i].map(v => String(v || '').replace(/\s/g, ''));
-        if (rowStr.some(c => c === '아이디' || c === '수험번호' || c === '이름' || c === '성명')) { headerRowIdx = i; break; }
+      if (!rows[i] || !Array.isArray(rows[i])) continue;
+  
+      const rowStr = rows[i].map(v => String(v || '').replace(/\s/g, ''));
+  
+      const hasIdentifier = rowStr.some(c =>
+        c === '아이디' ||
+        c === 'ID' ||
+        c === '수험번호' ||
+        c === '학번' ||
+        c === '이름' ||
+        c === '성명' ||
+        c === '학생명'
+      );
+  
+      const hasTime = rowStr.some(c =>
+        c === '등원일시' ||
+        c === '하원일시' ||
+        c === '등원시간' ||
+        c === '하원시간'
+      );
+  
+      if (hasIdentifier && hasTime) {
+        headerRowIdx = i;
+        break;
+      }
     }
-    if (headerRowIdx === -1) { showAlert("엑셀에서 식별자(아이디/학번/이름) 열을 찾을 수 없습니다."); return; }
+  
+    if (headerRowIdx === -1) {
+      showAlert("엑셀에서 이름/아이디 및 등원일시/하원일시 열을 찾을 수 없습니다.");
+      return;
+    }
+  
     const headerRow = rows[headerRowIdx].map(v => String(v || '').replace(/\s/g, ''));
-    const idIdx = headerRow.findIndex(h => h === '아이디' || h === '수험번호' || h === '이름' || h === '성명');
-    const inIdx = headerRow.findIndex(h => h === '등원일시');
-    const outIdx = headerRow.findIndex(h => h === '하원일시');
-
-    if (idIdx === -1) { showAlert("엑셀에서 식별자(아이디/이름) 열을 찾을 수 없습니다."); return; }
-    if (inIdx === -1 && outIdx === -1) { showAlert("엑셀에서 '등원일시' 또는 '하원일시' 열을 찾을 수 없습니다."); return; }
-
-    const matchedKeys = new Set(); 
-    let duplicateWarnings = 0;
-
-    setStudents(prev => {
-        const updated = [...prev];
-        for (let i = headerRowIdx + 1; i < rows.length; i++) { 
-            const row = rows[i]; 
-            if (!row || !Array.isArray(row) || row[idIdx] === undefined) continue;
-            
-            const key = String(row[idIdx]).trim().toLowerCase();
-            
-            // 1순위: 아이디(userId, id) 매칭
-            let studentIdx = updated.findIndex(s => (s.id && s.id.toLowerCase() === key) || (s.userId && s.userId.toLowerCase() === key));
-            
-            // 2순위: 이름 매칭
-            if (studentIdx === -1) {
-                const nameMatches = updated.filter(s => s.name === key);
-                if (nameMatches.length === 1) {
-                    studentIdx = updated.findIndex(s => s.name === key);
-                } else if (nameMatches.length > 1) {
-                    // 동명이인 처리 (현재 선택된 반 우선)
-                    const exactMatch = nameMatches.find(s => className === '대구캠퍼스 전체' || (s.classNames || [s.className]).includes(className));
-                    if (exactMatch) {
-                        studentIdx = updated.findIndex(s => s.id === exactMatch.id);
-                    } else {
-                        duplicateWarnings++;
-                        continue; // 안전을 위해 스킵
-                    }
-                }
-            }
-            
-            if (studentIdx >= 0) {
-                const formatTime = (t) => {
-                    if (t === undefined || t === null) return '';
-                    let str = String(t).trim();
-                    if(str === '0' || str === '' || str.includes('미등원') || str.includes('미하원')) return '';
-                    if (!isNaN(str) && Number(str) > 0 && Number(str) < 1) { 
-                        const totalMins = Math.round(Number(str) * 24 * 60);
-                        return `${String(Math.floor(totalMins / 60)).padStart(2,'0')}:${String(totalMins % 60).padStart(2,'0')}`;
-                    }
-                    if(str.includes(':')) {
-                        const p = str.split(':'); 
-                        return `${p[0].padStart(2,'0')}:${p[1].padStart(2,'0')}`;
-                    }
-                    return str;
-                };
-
-                const inTime = inIdx !== -1 ? formatTime(row[inIdx]) : '';
-                const outTime = outIdx !== -1 ? formatTime(row[outIdx]) : '';
-
-                if (inTime || outTime) {
-                    const newDaily = [...updated[studentIdx].studyTime[studyTimeMonth]];
-                    newDaily[targetDayIdx] = { in: inTime || newDaily[targetDayIdx].in, out: outTime || newDaily[targetDayIdx].out };
-                    updated[studentIdx].studyTime[studyTimeMonth] = newDaily;
-                    matchedKeys.add(updated[studentIdx].id);
-                }
-            }
+  
+    const findCol = (keywords) => {
+      return headerRow.findIndex(h =>
+        keywords.some(k => h === k || h.includes(k))
+      );
+    };
+  
+    const userIdIdx = findCol(['아이디', 'ID', '수험번호', '학번']);
+    const nameIdx = findCol(['이름', '성명', '학생명']);
+    const inIdx = findCol(['등원일시', '등원시간']);
+    const outIdx = findCol(['하원일시', '하원시간']);
+  
+    if (userIdIdx === -1 && nameIdx === -1) {
+      showAlert("엑셀에서 아이디/수험번호/이름 열을 찾을 수 없습니다.");
+      return;
+    }
+  
+    if (inIdx === -1 && outIdx === -1) {
+      showAlert("엑셀에서 등원일시 또는 하원일시 열을 찾을 수 없습니다.");
+      return;
+    }
+  
+    const normalizeKey = (value) => {
+      return String(value ?? '').trim().toLowerCase();
+    };
+  
+    const extractTimeOnly = (value) => {
+      if (value === undefined || value === null) return '';
+  
+      if (value instanceof Date && !isNaN(value)) {
+        return `${String(value.getHours()).padStart(2, '0')}:${String(value.getMinutes()).padStart(2, '0')}`;
+      }
+  
+      const str = String(value).trim();
+  
+      if (
+        str === '' ||
+        str === '0' ||
+        str.includes('미등원') ||
+        str.includes('미하원')
+      ) {
+        return '';
+      }
+  
+      // 엑셀 시간이 숫자 소수로 들어오는 경우 처리
+      // 예: 0.56875 → 13:39
+      if (!isNaN(str) && Number(str) > 0) {
+        const num = Number(str);
+        const fraction = num % 1;
+  
+        if (fraction > 0) {
+          const totalMins = Math.round(fraction * 24 * 60);
+          const hh = String(Math.floor(totalMins / 60) % 24).padStart(2, '0');
+          const mm = String(totalMins % 60).padStart(2, '0');
+          return `${hh}:${mm}`;
         }
-        return updated;
+  
+        return '';
+      }
+  
+      // 날짜 + 시간 문자열에서 시간만 추출
+      // 예: 2026-05-12 13:39 → 13:39
+      // 예: 2026.05.12 15:00:00 → 15:00
+      const timeMatch = str.match(/(\d{1,2}):(\d{2})(?::\d{2})?/);
+  
+      if (timeMatch) {
+        const hh = String(timeMatch[1]).padStart(2, '0');
+        const mm = String(timeMatch[2]).padStart(2, '0');
+        return `${hh}:${mm}`;
+      }
+  
+      return '';
+    };
+  
+    const matchedKeys = new Set();
+    let duplicateWarnings = 0;
+  
+    setStudents(prev => {
+      const updated = [...prev];
+  
+      for (let i = headerRowIdx + 1; i < rows.length; i++) {
+        const row = rows[i];
+  
+        if (!row || !Array.isArray(row)) continue;
+  
+        const idKey = userIdIdx !== -1 ? normalizeKey(row[userIdIdx]) : '';
+        const nameKey = nameIdx !== -1 ? normalizeKey(row[nameIdx]) : '';
+  
+        if (!idKey && !nameKey) continue;
+  
+        const candidates = updated.filter(s => {
+          if (className === '대구캠퍼스 전체') return true;
+  
+          const classList = [
+            ...(Array.isArray(s.classNames) ? s.classNames : []),
+            ...(Array.isArray(s.classes) ? s.classes : []),
+            s.className
+          ].filter(Boolean);
+  
+          return classList.includes(className);
+        });
+  
+        let targetStudent = null;
+  
+        // 1순위: 아이디 / 수험번호 매칭
+        if (idKey) {
+          targetStudent = candidates.find(s =>
+            normalizeKey(s.id) === idKey ||
+            normalizeKey(s.userId) === idKey
+          );
+        }
+  
+        // 2순위: 이름 매칭
+        if (!targetStudent && nameKey) {
+          const nameMatches = candidates.filter(s =>
+            normalizeKey(s.name) === nameKey
+          );
+  
+          if (nameMatches.length === 1) {
+            targetStudent = nameMatches[0];
+          } else if (nameMatches.length > 1 && idKey) {
+            targetStudent = nameMatches.find(s =>
+              normalizeKey(s.id) === idKey ||
+              normalizeKey(s.userId) === idKey
+            );
+          } else if (nameMatches.length > 1) {
+            duplicateWarnings++;
+            continue;
+          }
+        }
+  
+        if (!targetStudent) continue;
+  
+        const studentIdx = updated.findIndex(s => s.id === targetStudent.id);
+        if (studentIdx === -1) continue;
+  
+        const inTime = inIdx !== -1 ? extractTimeOnly(row[inIdx]) : '';
+        const outTime = outIdx !== -1 ? extractTimeOnly(row[outIdx]) : '';
+  
+        if (!inTime && !outTime) continue;
+  
+        const currentMonthData =
+          updated[studentIdx].studyTime?.[studyTimeMonth] ||
+          Array.from({ length: 31 }, () => ({ in: '', out: '' }));
+  
+        const newDaily = [...currentMonthData];
+  
+        newDaily[targetDayIdx] = {
+          in: inTime || newDaily[targetDayIdx]?.in || '',
+          out: outTime || newDaily[targetDayIdx]?.out || ''
+        };
+  
+        updated[studentIdx] = {
+          ...updated[studentIdx],
+          studyTime: {
+            ...updated[studentIdx].studyTime,
+            [studyTimeMonth]: newDaily
+          }
+        };
+  
+        matchedKeys.add(updated[studentIdx].id);
+      }
+  
+      return updated;
     });
-    setTimeout(() => { showAlert(`${targetDayIdx + 1}일자 학습시간 연동 완료! 총 ${matchedKeys.size}명 적용.`); }, 50);
+  
+    setTimeout(() => {
+      const duplicateMsg = duplicateWarnings > 0
+        ? ` 동명이인으로 제외된 항목 ${duplicateWarnings}건이 있습니다.`
+        : '';
+  
+      showAlert(`${targetDayIdx + 1}일자 학습시간 연동 완료! 총 ${matchedKeys.size}명 적용.${duplicateMsg}`);
+    }, 50);
   };
 
   const handleMonthlyChange = (studentId, subject, field, value) => {
@@ -2399,26 +2804,26 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
         </div>
         
         <nav className="flex-1 px-4 py-6 space-y-6">
-          <div><SidebarButton icon={LayoutDashboard} label="반별 대시보드" tabName="dashboard" activeTab={activeTab} onClick={() => setActiveTab('dashboard')} /></div>
+          <div><SidebarButton icon={LayoutDashboard} label="대시보드" tabName="dashboard" activeTab={activeTab} onClick={() => setActiveTab('dashboard')} /></div>
           
-          <div className="border-t border-slate-800 pt-4"><SidebarButton icon={Users} label="학생 명단 및 신상" tabName="students" activeTab={activeTab} onClick={() => setActiveTab('students')} /></div>
+          <div className="border-t border-slate-800 pt-4"><SidebarButton icon={Users} label="학생 관리" tabName="students" activeTab={activeTab} onClick={() => setActiveTab('students')} /></div>
           
           <div>
             <button onClick={() => setActiveTab('attendance')} className={`w-full flex items-center justify-between px-4 py-3.5 rounded-xl transition-all font-bold text-sm ${activeTab === 'attendance' ? 'bg-emerald-600 text-white shadow-md' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
-              <div className="flex items-center gap-3"><CalendarCheck size={18} /><span>출결 및 학습시간</span></div>
+              <div className="flex items-center gap-3"><CalendarCheck size={18} /><span>출석 관리</span></div>
               <ChevronDown size={16} className={`transition-transform duration-200 ${activeTab === 'attendance' ? 'rotate-180' : ''}`} />
             </button>
             {activeTab === 'attendance' && (
               <div className="flex flex-col gap-1 px-3 pb-2 pt-2 bg-slate-900/50 rounded-b-xl -mt-2 border-x border-b border-slate-800 shadow-inner">
-                <SubTabButton label="• 출결 관리" subTab="calendar" activeSubTab={activeAttendanceTab} onClick={() => setActiveAttendanceTab('calendar')} />
-                <SubTabButton label="• 학습시간 기입" subTab="studyTime" activeSubTab={activeAttendanceTab} onClick={() => setActiveAttendanceTab('studyTime')} />
+                <SubTabButton label="• 출석" subTab="calendar" activeSubTab={activeAttendanceTab} onClick={() => setActiveAttendanceTab('calendar')} />
+                <SubTabButton label="• 학습시간" subTab="studyTime" activeSubTab={activeAttendanceTab} onClick={() => setActiveAttendanceTab('studyTime')} />
               </div>
             )}
           </div>
 
           <div>
             <button onClick={() => setActiveTab('test')} className={`w-full flex items-center justify-between px-4 py-3.5 rounded-xl transition-all font-bold text-sm ${activeTab === 'test' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
-              <div className="flex items-center gap-3"><PenTool size={18} /><span>TEST 관리</span></div>
+              <div className="flex items-center gap-3"><PenTool size={18} /><span>시험 관리</span></div>
               <ChevronDown size={16} className={`transition-transform duration-200 ${activeTab === 'test' ? 'rotate-180' : ''}`} />
             </button>
             {activeTab === 'test' && (
@@ -2430,7 +2835,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
             )}
           </div>
 
-          <div><SidebarButton icon={BarChart3} label="성적 현황 요약" tabName="grades" activeTab={activeTab} onClick={() => setActiveTab('grades')} highlight="indigo" /></div>
+          <div><SidebarButton icon={BarChart3} label="학습 데이터" tabName="grades" activeTab={activeTab} onClick={() => setActiveTab('grades')} highlight="indigo" /></div>
           <div className="pt-4 border-t border-slate-800"><SidebarButton icon={Printer} label="월간 리포트 생성" tabName="report" activeTab={activeTab} onClick={() => setActiveTab('report')} /></div>
         </nav>
       </aside>
@@ -2837,12 +3242,19 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                      </div>
                      <div className="text-indigo-600 font-extrabold text-xl">{classAvgStudyTime}</div>
                   </div>
-                  <div className="overflow-x-auto custom-scrollbar pb-4" onWheel={(e) => {
-                  if (e.deltaY !== 0 && !e.shiftKey) {
-                    e.currentTarget.scrollLeft += e.deltaY;
-                    e.preventDefault();
-                  }
-                }}>
+                  <div
+                    ref={studyTimeTopScrollRef}
+                    className="overflow-x-auto custom-scrollbar h-5 bg-slate-50 border-b border-slate-200"
+                    onScroll={() => syncStudyTimeScroll('top')}
+                  >
+                    <div style={{ width: '4200px', height: '1px' }} />
+                  </div>
+
+                  <div
+                    ref={studyTimeBodyScrollRef}
+                    className="overflow-x-auto custom-scrollbar pb-4"
+                    onScroll={() => syncStudyTimeScroll('body')}
+                  >
                     <table className="w-max min-w-full text-center text-sm border-collapse">
                       <thead className="bg-slate-800 text-white font-medium sticky top-0 z-20">
                         <tr>
@@ -3753,10 +4165,122 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                  </div>
               </div>
               
+              <style>{`
+                #monthly-report-preview {
+                  overflow: visible !important;
+                }
+
+                #monthly-report-preview .report-chart-box {
+                  min-height: 0 !important;
+                }
+
+                @media print {
+                  body {
+                    background: #ffffff !important;
+                  }
+
+                  #monthly-report-preview {
+                    width: 210mm !important;
+                    min-height: 297mm !important;
+                    padding: 8mm !important;
+                    margin: 0 !important;
+                    box-shadow: none !important;
+                    overflow: visible !important;
+                    page-break-after: always;
+                    break-after: page;
+                  }
+
+                  #monthly-report-preview h1 {
+                    font-size: 20px !important;
+                    margin-bottom: 4px !important;
+                  }
+
+                  #monthly-report-preview h2,
+                  #monthly-report-preview h3 {
+                    font-size: 12px !important;
+                    margin-bottom: 6px !important;
+                  }
+
+                  #monthly-report-preview p,
+                  #monthly-report-preview td,
+                  #monthly-report-preview th,
+                  #monthly-report-preview span,
+                  #monthly-report-preview div {
+                    line-height: 1.25 !important;
+                  }
+
+                  #monthly-report-preview .p-12 { padding: 8mm !important; }
+                  #monthly-report-preview .p-8 { padding: 8mm !important; }
+                  #monthly-report-preview .p-6 { padding: 10px !important; }
+                  #monthly-report-preview .p-5 { padding: 9px !important; }
+                  #monthly-report-preview .p-4 { padding: 8px !important; }
+
+                  #monthly-report-preview .mb-8 { margin-bottom: 10px !important; }
+                  #monthly-report-preview .mb-6 { margin-bottom: 8px !important; }
+                  #monthly-report-preview .mb-5 { margin-bottom: 7px !important; }
+                  #monthly-report-preview .mb-4 { margin-bottom: 6px !important; }
+                  #monthly-report-preview .mb-3 { margin-bottom: 5px !important; }
+                  #monthly-report-preview .mt-4 { margin-top: 4px !important; }
+
+                  #monthly-report-preview .min-h-\\[80px\\] {
+                    min-height: 44px !important;
+                  }
+
+                  #monthly-report-preview .h-64 {
+                    height: 120px !important;
+                  }
+
+                  #monthly-report-preview .h-56 {
+                    height: 110px !important;
+                  }
+
+                  #monthly-report-preview .h-48 {
+                    height: 96px !important;
+                  }
+
+                  #monthly-report-preview .text-4xl {
+                    font-size: 22px !important;
+                  }
+
+                  #monthly-report-preview .text-3xl {
+                    font-size: 19px !important;
+                  }
+
+                  #monthly-report-preview .text-2xl {
+                    font-size: 17px !important;
+                  }
+
+                  #monthly-report-preview .text-xl {
+                    font-size: 15px !important;
+                  }
+
+                  #monthly-report-preview .text-lg {
+                    font-size: 13px !important;
+                  }
+
+                  #monthly-report-preview .text-sm {
+                    font-size: 10.5px !important;
+                  }
+
+                  #monthly-report-preview .text-xs {
+                    font-size: 9px !important;
+                  }
+
+                  #monthly-report-preview table th,
+                  #monthly-report-preview table td {
+                    padding: 4px 5px !important;
+                    font-size: 9px !important;
+                  }
+                }
+              `}</style>
+
               {/* A4 미리보기 영역 */}
               <div className="flex-1 bg-slate-200/50 rounded-2xl border border-slate-200 overflow-y-auto p-8 print:p-0 print:bg-white print:border-none flex justify-center custom-scrollbar">
                  {reportStudent ? (
-                    <div className="bg-white shadow-2xl print:shadow-none w-[210mm] min-h-[297mm] p-12 relative print:w-full print:h-auto overflow-hidden">
+                    <div
+                      id="monthly-report-preview"
+                      className="bg-white shadow-2xl print:shadow-none w-[210mm] min-h-[297mm] p-8 relative print:w-full print:h-auto overflow-visible"
+                    >
                        
                        {/* 인쇄 버튼 (화면에만 보임) */}
                        <div className="absolute top-8 right-8 print:hidden">
