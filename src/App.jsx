@@ -570,6 +570,15 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   const [reportStudentId, setReportStudentId] = useState(null);
   const [selectedReportIds, setSelectedReportIds] = useState([]);
 
+  const [reportListSortOrder, setReportListSortOrder] = useState('asc');
+  const [weeklySearchTerm, setWeeklySearchTerm] = useState('');
+  const [weeklyScoreSort, setWeeklyScoreSort] = useState({
+    week: null,
+    order: 'desc'
+  });
+
+  const weeklyWeekNumbers = useMemo(() => [1, 2, 3, 4, 5], []);
+
   // 6단계: 선택 학생 state 및 일괄 처리 로직 추가
   const [selectedStudents, setSelectedStudents] = useState([]);
   const [batchAttendanceDate, setBatchAttendanceDate] = useState(0);
@@ -1917,9 +1926,21 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
         valA = getMonthlyWeeklyStats(a, weeklyMonth, weeklySubject).avgScore === '-' ? 0 : Number(getMonthlyWeeklyStats(a, weeklyMonth, weeklySubject).avgScore);
         valB = getMonthlyWeeklyStats(b, weeklyMonth, weeklySubject).avgScore === '-' ? 0 : Number(getMonthlyWeeklyStats(b, weeklyMonth, weeklySubject).avgScore);
         return sortOrder === 'asc' ? valA - valB : valB - valA;
-      } else if (sortKey === 'weeklyOverallAvg') {
-        valA = getOverallWeeklyStats(a, weeklySubject).avgScore === '-' ? 0 : Number(getOverallWeeklyStats(a, weeklySubject).avgScore);
-        valB = getOverallWeeklyStats(b, weeklySubject).avgScore === '-' ? 0 : Number(getOverallWeeklyStats(b, weeklySubject).avgScore);
+      } else if (sortKey === 'weeklyOverallAvg' || sortKey === 'weeklyEnglishOverallAvg') {
+        const aAvg = getOverallWeeklyStats(a, 'english').avgScore;
+        const bAvg = getOverallWeeklyStats(b, 'english').avgScore;
+
+        valA = aAvg === '-' ? -1 : Number(aAvg);
+        valB = bAvg === '-' ? -1 : Number(bAvg);
+
+        return sortOrder === 'asc' ? valA - valB : valB - valA;
+      } else if (sortKey === 'weeklyMathOverallAvg') {
+        const aAvg = getOverallWeeklyStats(a, 'math').avgScore;
+        const bAvg = getOverallWeeklyStats(b, 'math').avgScore;
+
+        valA = aAvg === '-' ? -1 : Number(aAvg);
+        valB = bAvg === '-' ? -1 : Number(bAvg);
+
         return sortOrder === 'asc' ? valA - valB : valB - valA;
       } else if (sortKey.startsWith('monthly_')) {
         const subject = sortKey.split('_')[1];
@@ -1930,6 +1951,58 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
     });
     return result;
   }, [classStudents, searchTerm, sortKey, sortOrder, selectedMonth, studyTimeMonth, dailyMonth, weeklyMonth, dailySettings, weeklySubject]);
+
+  const reportStudentsForList = useMemo(() => {
+    return [...filteredStudents].sort((a, b) => {
+      const nameA = a.name || '';
+      const nameB = b.name || '';
+
+      return reportListSortOrder === 'asc'
+        ? nameA.localeCompare(nameB, 'ko')
+        : nameB.localeCompare(nameA, 'ko');
+    });
+  }, [filteredStudents, reportListSortOrder]);
+
+  const weeklyFilteredStudents = useMemo(() => {
+    const keyword = weeklySearchTerm.trim().toLowerCase();
+
+    let result = keyword
+      ? filteredStudents.filter(s =>
+          String(s.name || '').toLowerCase().includes(keyword) ||
+          String(s.id || '').toLowerCase().includes(keyword) ||
+          String(s.userId || '').toLowerCase().includes(keyword)
+        )
+      : [...filteredStudents];
+
+    if (weeklyScoreSort.week) {
+      const scoreField = weeklySubject === 'english' ? 'weeklyEnglish' : 'weeklyMath';
+      const weekKey = `${weeklyMonth}_w${weeklyScoreSort.week}`;
+
+      result = [...result].sort((a, b) => {
+        const rawA = a.scores?.[scoreField]?.[weekKey];
+        const rawB = b.scores?.[scoreField]?.[weekKey];
+
+        const valA =
+          rawA === undefined || rawA === null || rawA === ''
+            ? -1
+            : Number(rawA);
+
+        const valB =
+          rawB === undefined || rawB === null || rawB === ''
+            ? -1
+            : Number(rawB);
+
+        const safeA = Number.isNaN(valA) ? -1 : valA;
+        const safeB = Number.isNaN(valB) ? -1 : valB;
+
+        return weeklyScoreSort.order === 'asc'
+          ? safeA - safeB
+          : safeB - safeA;
+      });
+    }
+
+    return result;
+  }, [filteredStudents, weeklySearchTerm, weeklyScoreSort, weeklySubject, weeklyMonth]);
 
   const handleSort = (key) => {
     if (sortKey === key) setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
@@ -2553,6 +2626,153 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
     showAlert(`완료! 총 ${affectedStudents.size}명의 성적이 연동되었습니다.`);
   };
 
+  const handleResetWeeklyOmrScores = () => {
+    const weekKey = `${weeklyMonth}_w${selectedWeek}`;
+    const scoreField = weeklySubject === 'english' ? 'weeklyEnglish' : 'weeklyMath';
+    const detailField = weeklySubject === 'english' ? 'weeklyDetails' : 'weeklyDetailsMath';
+    const subjectLabel = weeklySubject === 'english' ? '영어' : '수학';
+
+    showConfirm(
+      `${weeklyMonth} ${selectedWeek}주차 ${subjectLabel} Weekly OMR 점수와 상세 분석 데이터를 초기화하시겠습니까?\n\n초기화 후 다시 OMR을 업로드할 수 있습니다.`,
+      () => {
+        setStudents(prev => prev.map(student => {
+          const studentClassNames = Array.isArray(student.classNames)
+            ? student.classNames
+            : [student.className].filter(Boolean);
+
+          const isTarget =
+            className === '대구캠퍼스 전체' ||
+            studentClassNames.includes(className);
+
+          if (!isTarget) return student;
+
+          const currentScores = student.scores || {};
+          const currentScoreObj = currentScores[scoreField] || {};
+          const currentDetailObj = currentScores[detailField] || {};
+
+          const { [weekKey]: removedScore, ...nextScoreObj } = currentScoreObj;
+          const { [weekKey]: removedDetail, ...nextDetailObj } = currentDetailObj;
+
+          return {
+            ...student,
+            scores: {
+              ...currentScores,
+              [scoreField]: nextScoreObj,
+              [detailField]: nextDetailObj
+            }
+          };
+        }));
+
+        showAlert(`${weeklyMonth} ${selectedWeek}주차 ${subjectLabel} Weekly OMR 데이터가 초기화되었습니다.`);
+      }
+    );
+  };
+
+  const handleResetMonthlyOmrScores = (targetSubject = 'all') => {
+    const subjectLabelMap = {
+      english: '영어',
+      math: '수학',
+      total: '영어+수학 합산',
+      all: '전체'
+    };
+
+    const subjectLabel = subjectLabelMap[targetSubject] || '전체';
+
+    showConfirm(
+      `${selectedMonth} Monthly ${subjectLabel} 성적 데이터를 초기화하시겠습니까?\n\n초기화 후 다시 Monthly OMR/엑셀을 업로드할 수 있습니다.`,
+      () => {
+        setStudents(prev => prev.map(student => {
+          const studentClassNames = Array.isArray(student.classNames)
+            ? student.classNames
+            : [student.className].filter(Boolean);
+
+          const isTarget =
+            className === '대구캠퍼스 전체' ||
+            studentClassNames.includes(className);
+
+          if (!isTarget) return student;
+
+          const currentScores = student.scores || {};
+          const currentMonthly = currentScores.monthly || {};
+          const currentMonthData = currentMonthly[selectedMonth] || {
+            english: { ...emptyMonthlyScore },
+            math: { ...emptyMonthlyScore },
+            total: { ...emptyMonthlyScore }
+          };
+
+          const nextMonthData =
+            targetSubject === 'all'
+              ? {
+                  english: { ...emptyMonthlyScore },
+                  math: { ...emptyMonthlyScore },
+                  total: { ...emptyMonthlyScore }
+                }
+              : {
+                  ...currentMonthData,
+                  [targetSubject]: { ...emptyMonthlyScore }
+                };
+
+          return {
+            ...student,
+            scores: {
+              ...currentScores,
+              monthly: {
+                ...currentMonthly,
+                [selectedMonth]: nextMonthData
+              }
+            }
+          };
+        }));
+
+        setMonthlySummaries(prev => {
+          const currentSummary = prev[selectedMonth] || {
+            engAvg: '',
+            engTop30: '',
+            mathAvg: '',
+            mathTop30: '',
+            totAvg: '',
+            totTop30: ''
+          };
+
+          let nextSummary = { ...currentSummary };
+
+          if (targetSubject === 'all') {
+            nextSummary = {
+              engAvg: '',
+              engTop30: '',
+              mathAvg: '',
+              mathTop30: '',
+              totAvg: '',
+              totTop30: ''
+            };
+          }
+
+          if (targetSubject === 'english') {
+            nextSummary.engAvg = '';
+            nextSummary.engTop30 = '';
+          }
+
+          if (targetSubject === 'math') {
+            nextSummary.mathAvg = '';
+            nextSummary.mathTop30 = '';
+          }
+
+          if (targetSubject === 'total') {
+            nextSummary.totAvg = '';
+            nextSummary.totTop30 = '';
+          }
+
+          return {
+            ...prev,
+            [selectedMonth]: nextSummary
+          };
+        });
+
+        showAlert(`${selectedMonth} Monthly ${subjectLabel} 성적 데이터가 초기화되었습니다.`);
+      }
+    );
+  };
+
   const processStudyTimeDailyRows = (rows, targetDayIdx) => {
     let headerRowIdx = -1;
   
@@ -2821,8 +3041,9 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
       const found = students.find(s => s.id === reportStudentId);
       if (found) return found;
     }
-    return filteredStudents.length > 0 ? filteredStudents[0] : null;
-  }, [reportStudentId, students, filteredStudents]);
+
+    return reportStudentsForList.length > 0 ? reportStudentsForList[0] : null;
+  }, [reportStudentId, students, reportStudentsForList]);
 
   return (
     <div className="min-h-screen flex w-full">
@@ -3507,12 +3728,55 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
                   {activeTestTab === 'monthly' && (
                     <>
-                      <button onClick={() => openImportModal(activeTestTab)} className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 border border-indigo-200 transition-colors">
-                         <UploadCloud size={18} /> {activeTestTab.toUpperCase()} 엑셀 연동
+                      <button
+                        onClick={() => openImportModal(activeTestTab)}
+                        className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 border border-indigo-200 transition-colors"
+                      >
+                         <UploadCloud size={18} /> MONTHLY 엑셀 연동
                       </button>
+
+                      <button
+                        onClick={() => handleResetMonthlyOmrScores('english')}
+                        className="bg-indigo-50 hover:bg-indigo-100 text-indigo-600 px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 border border-indigo-200 transition-colors"
+                      >
+                         <Trash2 size={18} /> {selectedMonth} 영어 초기화
+                      </button>
+
+                      <button
+                        onClick={() => handleResetMonthlyOmrScores('math')}
+                        className="bg-teal-50 hover:bg-teal-100 text-teal-600 px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 border border-teal-200 transition-colors"
+                      >
+                         <Trash2 size={18} /> {selectedMonth} 수학 초기화
+                      </button>
+
+                      <button
+                        onClick={() => handleResetMonthlyOmrScores('total')}
+                        className="bg-slate-50 hover:bg-slate-100 text-slate-600 px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 border border-slate-200 transition-colors"
+                      >
+                         <Trash2 size={18} /> {selectedMonth} 합산 초기화
+                      </button>
+
+                      <button
+                        onClick={() => handleResetMonthlyOmrScores('all')}
+                        className="bg-rose-50 hover:bg-rose-100 text-rose-600 px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 border border-rose-200 transition-colors"
+                      >
+                         <Trash2 size={18} /> {selectedMonth} 전체 초기화
+                      </button>
+
                       <div className="flex bg-slate-100 p-1 rounded-xl shadow-inner">
-                        <button onClick={()=>setTestViewMode('input')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${testViewMode === 'input' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-50 hover:text-slate-700'}`}>✏️ 성적 뷰/기입 모드</button>
-                        <button onClick={()=>setTestViewMode('report')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${testViewMode === 'report' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>📊 종합 리포트 출력</button>
+                        <button
+                          onClick={()=>setTestViewMode('input')}
+                          className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${testViewMode === 'input' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-50 hover:text-slate-700'}`}
+                        >
+                          ✏️ 성적 뷰/기입 모드
+                        </button>
+
+                        <button
+                          onClick={()=>setTestViewMode('report')}
+                          className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${testViewMode === 'report' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                        >
+                          📊 종합 리포트 출력
+                        </button>
                       </div>
                     </>
                   )}
@@ -3685,10 +3949,20 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                   {/* 주차 탭 */}
                   <div className="flex flex-wrap items-center gap-4 bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
                     <span className="font-bold text-slate-700 ml-2">{weeklyMonth}</span>
+
                     <div className="h-8 w-px bg-slate-200"></div>
+
                     <div className="flex gap-2">
-                      {[1, 2, 3, 4, 5].map(week => (
-                        <button key={week} onClick={() => setSelectedWeek(week)} className={`px-6 py-2.5 rounded-xl font-bold text-sm transition-all shadow-sm ${selectedWeek === week ? 'bg-indigo-600 text-white' : 'bg-white text-slate-500 hover:bg-slate-100 border border-slate-200'}`}>
+                      {weeklyWeekNumbers.map(week => (
+                        <button
+                          key={week}
+                          onClick={() => setSelectedWeek(week)}
+                          className={`px-6 py-2.5 rounded-xl font-bold text-sm transition-all shadow-sm ${
+                            selectedWeek === week
+                              ? 'bg-indigo-600 text-white'
+                              : 'bg-white text-slate-500 hover:bg-slate-100 border border-slate-200'
+                          }`}
+                        >
                           {week}주차
                         </button>
                       ))}
@@ -3840,52 +4114,133 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
                   {activeWeeklyTab === 'omr' && (
                     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-12 flex flex-col justify-center items-center">
-                        <h2 className="font-bold text-slate-800 mb-6 flex items-center gap-2 text-xl"><UploadCloud className="text-indigo-500" size={28}/> OMR 리딩 엑셀 업로드 [{weeklySubject === 'english' ? '영어' : '수학'}]</h2>
-                        <div className="border-2 border-dashed border-slate-300 rounded-xl p-16 text-center cursor-pointer hover:bg-indigo-50 hover:border-indigo-400 transition-colors w-full max-w-2xl" onClick={() => triggerDirectUpload('weekly')}>
+                        <h2 className="font-bold text-slate-800 mb-6 flex items-center gap-2 text-xl">
+                          <UploadCloud className="text-indigo-500" size={28}/>
+                          OMR 리딩 엑셀 업로드 [{weeklySubject === 'english' ? '영어' : '수학'}]
+                        </h2>
+
+                        <div
+                          className="border-2 border-dashed border-slate-300 rounded-xl p-16 text-center cursor-pointer hover:bg-indigo-50 hover:border-indigo-400 transition-colors w-full max-w-2xl"
+                          onClick={() => triggerDirectUpload('weekly')}
+                        >
                           <FileSpreadsheet size={64} className="mx-auto text-indigo-300 mb-6"/>
-                          <p className="text-lg font-bold text-indigo-600 mb-2">클릭하여 {weeklyMonth} {selectedWeek}주차 OMR 첨부</p>
-                          <p className="text-sm text-slate-500 leading-relaxed">수험번호 자동인식 후 설정된 정답과 대조하여 성적을 산출합니다.<br/>(※ 헤더 없이 A열 수험번호, B열부터 답안이 나열된 양식을 자동 지원합니다.)</p>
+                          <p className="text-lg font-bold text-indigo-600 mb-2">
+                            클릭하여 {weeklyMonth} {selectedWeek}주차 OMR 첨부
+                          </p>
+                          <p className="text-sm text-slate-500 leading-relaxed">
+                            수험번호 자동인식 후 설정된 정답과 대조하여 성적을 산출합니다.<br/>
+                            (※ 헤더 없이 A열 수험번호, B열부터 답안이 나열된 양식을 자동 지원합니다.)
+                          </p>
                         </div>
+
+                        <button
+                          onClick={handleResetWeeklyOmrScores}
+                          className="mt-6 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 px-5 py-2.5 rounded-xl text-sm font-extrabold transition-colors"
+                        >
+                          {weeklyMonth} {selectedWeek}주차 {weeklySubject === 'english' ? '영어' : '수학'} OMR 점수 초기화
+                        </button>
+
+                        <p className="text-xs text-slate-400 mt-3 font-medium">
+                          ※ OMR을 잘못 업로드한 경우, 해당 주차 점수를 초기화한 뒤 다시 업로드하세요.
+                        </p>
                     </div>
                   )}
 
                   {activeWeeklyTab === 'scores' && (
                     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
-                        <div className="bg-slate-50 p-4 border-b border-slate-200 font-bold text-sm text-slate-700 flex justify-between items-center">
-                           <span><FileText className="inline-block w-4 h-4 mr-2 text-indigo-500"/>{weeklyMonth} 위클리 학생별 종합 성적 조회 [{weeklySubject === 'english' ? '영어' : '수학'}]</span>
-                           <span className="text-xs font-normal text-slate-400">행을 클릭하면 해당 학생의 주차별 상세 분석 및 유형별 정답률을 볼 수 있습니다.</span>
+                        <div className="bg-slate-50 p-4 border-b border-slate-200 font-bold text-sm text-slate-700 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                           <span>
+                            <FileText className="inline-block w-4 h-4 mr-2 text-indigo-500"/>
+                            {weeklyMonth} 위클리 학생별 종합 성적 조회 [{weeklySubject === 'english' ? '영어' : '수학'}]
+                           </span>
+
+                           <div className="flex items-center gap-2">
+                             <div className="relative">
+                               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
+                               <input
+                                 type="text"
+                                 placeholder="이름/아이디 검색..."
+                                 value={weeklySearchTerm}
+                                 onChange={(e) => setWeeklySearchTerm(e.target.value)}
+                                 className="w-56 pl-9 pr-3 py-2 border border-slate-200 rounded-lg text-xs font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
+                               />
+                             </div>
+
+                             <span className="text-xs font-normal text-slate-400">
+                               행 클릭 시 상세 분석
+                             </span>
+                           </div>
                         </div>
+
                         <div className="overflow-x-auto">
                           <table className="w-full text-center text-sm border-collapse min-w-[800px]">
                             <thead className="bg-white border-b-2 border-slate-200 shadow-sm z-10">
                               <tr>
-                                <th className="py-4 text-slate-600 font-bold cursor-pointer hover:bg-slate-50" onClick={() => handleSort('name')}>이름 {sortKey === 'name' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}</th>
+                                <th className="py-4 text-slate-600 font-bold cursor-pointer hover:bg-slate-50" onClick={() => handleSort('name')}>
+                                  이름 {sortKey === 'name' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}
+                                </th>
                                 <th className="py-4 text-slate-500 text-xs font-medium">수험번호</th>
-                                <th className="py-4 text-slate-600 font-bold">1주차</th>
-                                <th className="py-4 text-slate-600 font-bold">2주차</th>
-                                <th className="py-4 text-slate-600 font-bold">3주차</th>
-                                <th className="py-4 text-slate-600 font-bold">4주차</th>
-                                <th className="py-4 text-slate-600 font-bold">5주차</th>
-                                <th className="py-4 text-indigo-600 font-bold cursor-pointer hover:bg-indigo-50" onClick={() => handleSort('weeklyAvg')}>월간 평균 {sortKey === 'weeklyAvg' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}</th>
+
+                                {weeklyWeekNumbers.map(w => (
+                                  <th
+                                    key={w}
+                                    className="py-4 text-slate-600 font-bold cursor-pointer hover:bg-indigo-50 transition-colors"
+                                    onClick={() => {
+                                      setWeeklyScoreSort(prev => {
+                                        if (prev.week === w) {
+                                          return {
+                                            week: w,
+                                            order: prev.order === 'asc' ? 'desc' : 'asc'
+                                          };
+                                        }
+                                
+                                        return {
+                                          week: w,
+                                          order: 'desc'
+                                        };
+                                      });
+                                    }}
+                                  >
+                                    {w}주차 {weeklyScoreSort.week === w ? (weeklyScoreSort.order === 'asc' ? '↑' : '↓') : ''}
+                                  </th>
+                                ))}
+
+                                <th className="py-4 text-indigo-600 font-bold cursor-pointer hover:bg-indigo-50" onClick={() => handleSort('weeklyAvg')}>
+                                  월간 평균 {sortKey === 'weeklyAvg' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}
+                                </th>
                                 <th className="py-4 text-emerald-600 font-bold">월간 정답률</th>
                               </tr>
                             </thead>
+
                             <tbody className="divide-y divide-slate-100">
-                              {filteredStudents.map(student => {
+                              {weeklyFilteredStudents.map(student => {
                                 const stats = getMonthlyWeeklyStats(student, weeklyMonth, weeklySubject);
                                 const scoreField = weeklySubject === 'english' ? 'weeklyEnglish' : 'weeklyMath';
+
                                 return (
-                                <tr key={student.id} className="hover:bg-slate-50 cursor-pointer transition-colors" onClick={() => setViewingWeeklySummary(student)}>
-                                  <td className="py-4 font-bold text-slate-800">{student.name}</td>
-                                  <td className="py-4 text-xs font-mono text-slate-400">{student.id}</td>
-                                  {[1, 2, 3, 4, 5].map(w => {
+                                  <tr key={student.id} className="hover:bg-slate-50 cursor-pointer transition-colors" onClick={() => setViewingWeeklySummary(student)}>
+                                    <td className="py-4 font-bold text-slate-800">{student.name}</td>
+                                    <td className="py-4 text-xs font-mono text-slate-400">{student.id}</td>
+
+                                    {weeklyWeekNumbers.map(w => {
                                       const score = student.scores[scoreField]?.[`${weeklyMonth}_w${w}`];
-                                      return <td key={w} className="py-4 text-slate-600 font-medium">{score !== undefined && score !== null ? `${score} 점` : '-'}</td>;
-                                  })}
-                                  <td className="py-4 font-extrabold text-indigo-600 text-base">{stats.avgScore !== '-' ? `${stats.avgScore} 점` : '-'}</td>
-                                  <td className="py-4 font-bold text-emerald-600">{stats.overallRate !== '-' ? `${stats.overallRate}%` : '-'}</td>
-                                </tr>
-                              )})}
+
+                                      return (
+                                        <td key={w} className="py-4 text-slate-600 font-medium">
+                                          {score !== undefined && score !== null ? `${score} 점` : '-'}
+                                        </td>
+                                      );
+                                    })}
+
+                                    <td className="py-4 font-extrabold text-indigo-600 text-base">
+                                      {stats.avgScore !== '-' ? `${stats.avgScore} 점` : '-'}
+                                    </td>
+                                    <td className="py-4 font-bold text-emerald-600">
+                                      {stats.overallRate !== '-' ? `${stats.overallRate}%` : '-'}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
                             </tbody>
                           </table>
                         </div>
@@ -3894,31 +4249,108 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
                   {activeWeeklyTab === 'monthlyView' && (
                     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
-                        <div className="bg-slate-50 p-4 border-b border-slate-200 font-bold text-sm text-slate-700 flex justify-between items-center">
-                           <span><FileText className="inline-block w-4 h-4 mr-2 text-indigo-500"/>전체 월별 위클리 평균 성적 조회 [{weeklySubject === 'english' ? '영어' : '수학'}]</span>
-                           <span className="text-xs font-normal text-slate-400">행을 클릭하면 해당 학생의 전체 월간 추이 그래프를 볼 수 있습니다.</span>
+                        <div className="bg-slate-50 p-4 border-b border-slate-200 font-bold text-sm text-slate-700 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                           <span>
+                            <FileText className="inline-block w-4 h-4 mr-2 text-indigo-500"/>
+                            전체 월별 위클리 평균 성적 조회 [영어 / 수학]
+                           </span>
+
+                           <div className="flex items-center gap-2">
+                             <div className="relative">
+                               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
+                               <input
+                                 type="text"
+                                 placeholder="이름/아이디 검색..."
+                                 value={weeklySearchTerm}
+                                 onChange={(e) => setWeeklySearchTerm(e.target.value)}
+                                 className="w-56 pl-9 pr-3 py-2 border border-slate-200 rounded-lg text-xs font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
+                               />
+                             </div>
+
+                             <div className="flex items-center gap-3 text-xs font-extrabold">
+                               <span className="flex items-center gap-1 text-indigo-600">
+                                 <span className="w-2 h-2 rounded-full bg-indigo-500 inline-block"></span>
+                                 영어
+                               </span>
+                               <span className="flex items-center gap-1 text-teal-600">
+                                 <span className="w-2 h-2 rounded-full bg-teal-500 inline-block"></span>
+                                 수학
+                               </span>
+                             </div>
+                           </div>
                         </div>
+
                         <div className="overflow-x-auto">
                           <table className="w-full text-center text-sm border-collapse min-w-[1200px]">
                             <thead className="bg-white border-b-2 border-slate-200 shadow-sm z-10">
                               <tr>
-                                <th className="py-4 text-slate-600 font-bold cursor-pointer hover:bg-slate-50" onClick={() => handleSort('name')}>이름 {sortKey === 'name' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}</th>
-                                {MONTHS.map(m => <th key={m} className="py-4 text-slate-500 font-bold text-xs">{m}</th>)}
-                                <th className="py-4 text-indigo-600 font-bold cursor-pointer hover:bg-indigo-50" onClick={() => handleSort('weeklyOverallAvg')}>총 평균 {sortKey === 'weeklyOverallAvg' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}</th>
+                                <th className="py-4 text-slate-600 font-bold cursor-pointer hover:bg-slate-50" onClick={() => handleSort('name')}>
+                                  이름 {sortKey === 'name' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}
+                                </th>
+
+                                {MONTHS.map(m => (
+                                  <th key={m} className="py-4 text-slate-500 font-bold text-xs">{m}</th>
+                                ))}
+
+                                <th className="py-4 text-indigo-600 font-bold cursor-pointer hover:bg-indigo-50" onClick={() => handleSort('weeklyEnglishOverallAvg')}>
+                                  영어 총 평균 {sortKey === 'weeklyEnglishOverallAvg' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}
+                                </th>
+
+                                <th className="py-4 text-teal-600 font-bold cursor-pointer hover:bg-teal-50" onClick={() => handleSort('weeklyMathOverallAvg')}>
+                                  수학 총 평균 {sortKey === 'weeklyMathOverallAvg' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}
+                                </th>
                               </tr>
                             </thead>
+
                             <tbody className="divide-y divide-slate-100">
-                              {filteredStudents.map(student => {
-                                const stats = getOverallWeeklyStats(student, weeklySubject);
+                              {weeklyFilteredStudents.map(student => {
+                                const engStats = getOverallWeeklyStats(student, 'english');
+                                const mathStats = getOverallWeeklyStats(student, 'math');
+
                                 return (
-                                <tr key={student.id} className="hover:bg-slate-50 cursor-pointer transition-colors" onClick={() => setViewingWeeklyMonthlySummary(student)}>
-                                  <td className="py-4 font-bold text-slate-800">{student.name}</td>
-                                  {MONTHS.map(m => (
-                                      <td key={m} className="py-4 text-slate-600 font-medium">{stats.monthlyScores[m] !== '-' ? `${stats.monthlyScores[m]} 점` : '-'}</td>
-                                  ))}
-                                  <td className="py-4 font-extrabold text-indigo-600 text-base">{stats.avgScore !== '-' ? `${stats.avgScore} 점` : '-'}</td>
-                                </tr>
-                              )})}
+                                  <tr
+                                    key={student.id}
+                                    className="hover:bg-slate-50 cursor-pointer transition-colors"
+                                    onClick={() => {
+                                      setWeeklySubject('english');
+                                      setViewingWeeklyMonthlySummary(student);
+                                    }}
+                                  >
+                                    <td className="py-4 font-bold text-slate-800">{student.name}</td>
+
+                                    {MONTHS.map(m => {
+                                      const engVal = engStats.monthlyScores[m];
+                                      const mathVal = mathStats.monthlyScores[m];
+
+                                      return (
+                                        <td key={m} className="py-4 text-slate-600 font-medium">
+                                          {engVal !== '-' ? (
+                                            <div className="text-indigo-600 font-bold">
+                                              {engVal}점
+                                            </div>
+                                          ) : (
+                                            mathVal === '-' ? <div>-</div> : null
+                                          )}
+
+                                          {mathVal !== '-' && (
+                                            <div className="text-teal-600 font-bold mt-1">
+                                              {mathVal}점
+                                            </div>
+                                          )}
+                                        </td>
+                                      );
+                                    })}
+
+                                    <td className="py-4 font-extrabold text-indigo-600 text-base">
+                                      {engStats.avgScore !== '-' ? `${engStats.avgScore} 점` : '-'}
+                                    </td>
+
+                                    <td className="py-4 font-extrabold text-teal-600 text-base">
+                                      {mathStats.avgScore !== '-' ? `${mathStats.avgScore} 점` : '-'}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
                             </tbody>
                           </table>
                         </div>
@@ -4052,8 +4484,16 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                         <th className="px-6 py-4 cursor-pointer hover:bg-slate-100 transition-colors" onClick={() => handleSort('dailyRate')}>
                            <div className="flex items-center justify-center gap-1">Daily 참석률 {sortKey === 'dailyRate' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}</div>
                         </th>
-                        <th className="px-6 py-4 cursor-pointer hover:bg-slate-100 transition-colors" onClick={() => handleSort('weeklyOverallAvg')}>
-                           <div className="flex items-center justify-center gap-1">Weekly 평균 {sortKey === 'weeklyOverallAvg' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}</div>
+                        <th className="px-6 py-4 cursor-pointer hover:bg-indigo-50 transition-colors" onClick={() => handleSort('weeklyEnglishOverallAvg')}>
+                           <div className="flex items-center justify-center gap-1">
+                             영어 Weekly 평균 {sortKey === 'weeklyEnglishOverallAvg' || sortKey === 'weeklyOverallAvg' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}
+                           </div>
+                        </th>
+
+                        <th className="px-6 py-4 cursor-pointer hover:bg-teal-50 transition-colors" onClick={() => handleSort('weeklyMathOverallAvg')}>
+                           <div className="flex items-center justify-center gap-1">
+                             수학 Weekly 평균 {sortKey === 'weeklyMathOverallAvg' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}
+                           </div>
                         </th>
                         <th className="px-6 py-4 bg-indigo-50/50 cursor-pointer hover:bg-indigo-100 transition-colors" onClick={() => handleSort('monthly_english')}>
                            <div className="flex items-center justify-center gap-1">영어 최근 성적 {sortKey === 'monthly_english' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}</div>
@@ -4074,7 +4514,8 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                         const mathMock = mData.math?.score ? mData.math : (student.scores.mockMath || {});
                         const totMock = mData.total?.score ? mData.total : { score: '', percent: '' };
                         const dailyStats = getDailyStats(student.dailyRecords[selectedMonth], selectedMonth);
-                        const weeklyStats = getMonthlyWeeklyStats(student, selectedMonth, weeklySubject);
+                        const engWeeklyOverallStats = getOverallWeeklyStats(student, 'english');
+                        const mathWeeklyOverallStats = getOverallWeeklyStats(student, 'math');
                         
                         return (
                           <tr key={student.id} className="hover:bg-indigo-50/40 transition-colors group">
@@ -4088,8 +4529,27 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                             <td className="px-6 py-4 cursor-pointer hover:bg-slate-100 transition-colors" onClick={() => setViewingDailySummary(student)}>
                                <span className="font-bold text-blue-600 bg-blue-50 px-3 py-1 rounded-full">{dailyStats.rate}%</span>
                             </td>
-                            <td className="px-6 py-4 cursor-pointer hover:bg-slate-100 transition-colors" onClick={() => setViewingWeeklyMonthlySummary(student)}>
-                               <span className="font-bold text-purple-600 bg-purple-50 px-3 py-1 rounded-full">{weeklyStats.avgScore !== '-' ? `${weeklyStats.avgScore}점` : '-'}</span>
+                            <td
+                              className="px-6 py-4 cursor-pointer hover:bg-indigo-50 transition-colors"
+                              onClick={() => {
+                                setWeeklySubject('english');
+                                setViewingWeeklyMonthlySummary(student);
+                              }}
+                            >
+                               <span className="font-bold text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full">
+                                {engWeeklyOverallStats.avgScore !== '-' ? `${engWeeklyOverallStats.avgScore}점` : '-'}
+                               </span>
+                            </td>
+                            <td
+                              className="px-6 py-4 cursor-pointer hover:bg-teal-50 transition-colors"
+                              onClick={() => {
+                                setWeeklySubject('math');
+                                setViewingWeeklyMonthlySummary(student);
+                              }}
+                            >
+                               <span className="font-bold text-teal-600 bg-teal-50 px-3 py-1 rounded-full">
+                                {mathWeeklyOverallStats.avgScore !== '-' ? `${mathWeeklyOverallStats.avgScore}점` : '-'}
+                               </span>
                             </td>
                             <td className="px-6 py-4 bg-indigo-50/10 cursor-pointer hover:bg-indigo-100 transition-colors" onClick={() => setViewingGradeId(student.id)}>
                                <div className="font-extrabold text-indigo-600 text-lg">
@@ -4149,20 +4609,29 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                      />
                    </div>
 
+                   <div className="flex gap-2 mb-2">
+                     <button
+                       onClick={() => setReportListSortOrder(prev => prev === 'asc' ? 'desc' : 'asc')}
+                       className="w-full bg-white border border-slate-200 text-slate-600 px-3 py-2 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors flex items-center justify-center gap-1"
+                     >
+                       명단 정렬 {reportListSortOrder === 'asc' ? '오름차순' : '내림차순'}
+                     </button>
+                   </div>
+
                    <div className="flex gap-2">
                      <button
                        onClick={() => {
-                         if (filteredStudents.length === 0) return;
+                         if (reportStudentsForList.length === 0) return;
 
-                         if (selectedReportIds.length === filteredStudents.length) {
+                         if (selectedReportIds.length === reportStudentsForList.length) {
                            setSelectedReportIds([]);
                          } else {
-                           setSelectedReportIds(filteredStudents.map(s => s.id));
+                           setSelectedReportIds(reportStudentsForList.map(s => s.id));
                          }
                        }}
                        className="flex-1 bg-white border border-slate-200 text-slate-600 px-3 py-2 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors"
                      >
-                       {filteredStudents.length > 0 && selectedReportIds.length === filteredStudents.length ? '전체 해제' : '전체 선택'}
+                       {reportStudentsForList.length > 0 && selectedReportIds.length === reportStudentsForList.length ? '전체 해제' : '전체 선택'}
                      </button>
 
                      <button
@@ -4174,7 +4643,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                    </div>
                  </div>
                  <div className="overflow-y-auto flex-1 p-2 space-y-1">
-                    {filteredStudents.map(student => {
+                    {reportStudentsForList.map(student => {
                       const isChecked = selectedReportIds.includes(student.id);
 
                       return (
