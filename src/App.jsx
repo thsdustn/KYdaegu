@@ -1515,13 +1515,15 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
     window.XLSX.writeFile(wb, `${attendanceMonth}_출결현황_${academicYear}.xlsx`);
   };
   
-  const [attendanceMonth, setAttendanceMonth] = useState('4월');
-  const [studyTimeMonth, setStudyTimeMonth] = useState('4월');
-  const [dailyMonth, setDailyMonth] = useState('4월');
-  const [weeklyMonth, setWeeklyMonth] = useState('4월');
-  const [selectedMonth, setSelectedMonth] = useState('4월'); 
-  const [detailSelectedMonth, setDetailSelectedMonth] = useState('4월');
-  const [dashboardMonth, setDashboardMonth] = useState('4월');
+  const currentMonthLabel = `${new Date().getMonth() + 1}월`;
+
+  const [attendanceMonth, setAttendanceMonth] = useState(currentMonthLabel);
+  const [studyTimeMonth, setStudyTimeMonth] = useState(currentMonthLabel);
+  const [dailyMonth, setDailyMonth] = useState(currentMonthLabel);
+  const [weeklyMonth, setWeeklyMonth] = useState(currentMonthLabel);
+  const [selectedMonth, setSelectedMonth] = useState(currentMonthLabel); 
+  const [detailSelectedMonth, setDetailSelectedMonth] = useState(currentMonthLabel);
+  const [dashboardMonth, setDashboardMonth] = useState(currentMonthLabel);
 
   const [dailySettings, setDailySettings] = useState(() => {
     const settings = {};
@@ -1927,16 +1929,16 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
         valB = getMonthlyWeeklyStats(b, weeklyMonth, weeklySubject).avgScore === '-' ? 0 : Number(getMonthlyWeeklyStats(b, weeklyMonth, weeklySubject).avgScore);
         return sortOrder === 'asc' ? valA - valB : valB - valA;
       } else if (sortKey === 'weeklyOverallAvg' || sortKey === 'weeklyEnglishOverallAvg') {
-        const aAvg = getOverallWeeklyStats(a, 'english').avgScore;
-        const bAvg = getOverallWeeklyStats(b, 'english').avgScore;
+        const aAvg = getMonthlyWeeklyStats(a, selectedMonth, 'english').avgScore;
+        const bAvg = getMonthlyWeeklyStats(b, selectedMonth, 'english').avgScore;
 
         valA = aAvg === '-' ? -1 : Number(aAvg);
         valB = bAvg === '-' ? -1 : Number(bAvg);
 
         return sortOrder === 'asc' ? valA - valB : valB - valA;
       } else if (sortKey === 'weeklyMathOverallAvg') {
-        const aAvg = getOverallWeeklyStats(a, 'math').avgScore;
-        const bAvg = getOverallWeeklyStats(b, 'math').avgScore;
+        const aAvg = getMonthlyWeeklyStats(a, selectedMonth, 'math').avgScore;
+        const bAvg = getMonthlyWeeklyStats(b, selectedMonth, 'math').avgScore;
 
         valA = aAvg === '-' ? -1 : Number(aAvg);
         valB = bAvg === '-' ? -1 : Number(bAvg);
@@ -4514,8 +4516,8 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                         const mathMock = mData.math?.score ? mData.math : (student.scores.mockMath || {});
                         const totMock = mData.total?.score ? mData.total : { score: '', percent: '' };
                         const dailyStats = getDailyStats(student.dailyRecords[selectedMonth], selectedMonth);
-                        const engWeeklyOverallStats = getOverallWeeklyStats(student, 'english');
-                        const mathWeeklyOverallStats = getOverallWeeklyStats(student, 'math');
+                        const engWeeklyMonthStats = getMonthlyWeeklyStats(student, selectedMonth, 'english');
+                        const mathWeeklyMonthStats = getMonthlyWeeklyStats(student, selectedMonth, 'math');
                         
                         return (
                           <tr key={student.id} className="hover:bg-indigo-50/40 transition-colors group">
@@ -4537,7 +4539,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                               }}
                             >
                                <span className="font-bold text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full">
-                                {engWeeklyOverallStats.avgScore !== '-' ? `${engWeeklyOverallStats.avgScore}점` : '-'}
+                                {engWeeklyMonthStats.avgScore !== '-' ? `${engWeeklyMonthStats.avgScore}점` : '-'}
                                </span>
                             </td>
                             <td
@@ -4548,7 +4550,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                               }}
                             >
                                <span className="font-bold text-teal-600 bg-teal-50 px-3 py-1 rounded-full">
-                                {mathWeeklyOverallStats.avgScore !== '-' ? `${mathWeeklyOverallStats.avgScore}점` : '-'}
+                                {mathWeeklyMonthStats.avgScore !== '-' ? `${mathWeeklyMonthStats.avgScore}점` : '-'}
                                </span>
                             </td>
                             <td className="px-6 py-4 bg-indigo-50/10 cursor-pointer hover:bg-indigo-100 transition-colors" onClick={() => setViewingGradeId(student.id)}>
