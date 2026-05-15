@@ -26,7 +26,10 @@ const db = getFirestore(app);
 const APP_ID = 'kydaegu-academy-v1';
 // ====================================================
 
-const ATTENDANCE_OPTIONS = ['출석', '결석', '지각', '조퇴', '사전통보', '병결', '알바', '가족사정', '개인사정', '컨디션 난조', '학교', '시험', '과제', '실습', '타학원', '독서실', '기타'];
+const ATTENDANCE_OPTIONS = ['출석', 'Live', '결석', '조퇴', '지각', '사전통보', '병결', '알바', '가족사정', '개인사정', '컨디션 난조', '학교', '시험', '과제', '실습', '타학원', '독서실', '기타'];
+const ATTENDANCE_SESSION_KEY = 'am';
+const ATTENDANCE_SESSION_LABEL = '출석확인';
+const ATTENDANCE_PRESENT_STATUSES = ['출석', 'Live'];
 const MONTHS = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8월', '9월', '10월', '11월', '12월'];
 const DISPLAY_MONTHS = MONTHS.slice(0, 11); 
 
@@ -84,7 +87,14 @@ const generateEmptyMonthlyData = () => {
 
 const generateEmptyMonthlyAttendance = () => {
     const data = {};
-    MONTHS.forEach(m => { data[m] = { am: Array(31).fill(''), pm: Array(31).fill(''), amMemo: Array(31).fill(''), pmMemo: Array(31).fill('') }; });
+    MONTHS.forEach(m => {
+        data[m] = {
+            am: Array(31).fill(''),
+            pm: Array(31).fill(''),
+            amMemo: Array(31).fill(''),
+            pmMemo: Array(31).fill('')
+        };
+    });
     return data;
 };
 
@@ -582,7 +592,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   // 6단계: 선택 학생 state 및 일괄 처리 로직 추가
   const [selectedStudents, setSelectedStudents] = useState([]);
   const [batchAttendanceDate, setBatchAttendanceDate] = useState(0);
-  const [batchAttendanceTimeOfDay, setBatchAttendanceTimeOfDay] = useState('am');
+  const [batchAttendanceTimeOfDay, setBatchAttendanceTimeOfDay] = useState(ATTENDANCE_SESSION_KEY);
   const [batchAttendanceStatus, setBatchAttendanceStatus] = useState('');
   
   const [batchStudyTimeDate, setBatchStudyTimeDate] = useState(0);
@@ -653,26 +663,31 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
       return;
     }
 
-    showConfirm(`선택한 ${selectedStudents.length}명의 ${attendanceMonth} ${Number(batchAttendanceDate) + 1}일 ${batchAttendanceTimeOfDay === 'am' ? '오전' : '오후'} 출결을 '${batchAttendanceStatus}'(으)로 변경하시겠습니까?`, () => {
+    showConfirm(`선택한 ${selectedStudents.length}명의 ${attendanceMonth} ${Number(batchAttendanceDate) + 1}일 ${ATTENDANCE_SESSION_LABEL}을 '${batchAttendanceStatus}'(으)로 변경하시겠습니까?`, () => {
       setStudents(prev => prev.map(student => {
         if (!selectedStudents.includes(student.id)) return student;
-        
-        const updatedAm = [...(student.attendance[attendanceMonth]?.am || Array(31).fill(''))]; 
-        const updatedPm = [...(student.attendance[attendanceMonth]?.pm || Array(31).fill(''))];
-        
-        if (batchAttendanceTimeOfDay === 'am') updatedAm[batchAttendanceDate] = batchAttendanceStatus;
-        if (batchAttendanceTimeOfDay === 'pm') updatedPm[batchAttendanceDate] = batchAttendanceStatus;
-        
-        return { 
-          ...student, 
-          attendance: { 
-            ...student.attendance, 
-            [attendanceMonth]: { ...student.attendance[attendanceMonth], am: updatedAm, pm: updatedPm } 
-          } 
+
+        const currentMonth = student.attendance?.[attendanceMonth] || generateEmptyMonthlyAttendance()[attendanceMonth];
+        const updatedAm = [...(currentMonth.am || Array(31).fill(''))];
+        const updatedPm = [...(currentMonth.pm || Array(31).fill(''))];
+
+        updatedAm[batchAttendanceDate] = batchAttendanceStatus;
+        updatedPm[batchAttendanceDate] = '';
+
+        return {
+          ...student,
+          attendance: {
+            ...student.attendance,
+            [attendanceMonth]: {
+              ...currentMonth,
+              am: updatedAm,
+              pm: updatedPm
+            }
+          }
         };
       }));
       showAlert(`출결 일괄 적용이 완료되었습니다.`);
-      setSelectedStudents([]); // 선택 초기화
+      setSelectedStudents([]);
     });
   };
 
@@ -711,18 +726,43 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
   const handleResetAttendance = (isAllMonth) => {
     if (selectedStudents.length === 0) { showAlert('초기화할 학생을 선택해주세요.'); return; }
-    const targetMsg = isAllMonth ? `${attendanceMonth} 전체 출결` : `${attendanceMonth} ${Number(batchAttendanceDate) + 1}일 ${batchAttendanceTimeOfDay === 'am' ? '오전' : '오후'} 출결`;
+    const targetMsg = isAllMonth ? `${attendanceMonth} 전체 출결` : `${attendanceMonth} ${Number(batchAttendanceDate) + 1}일 ${ATTENDANCE_SESSION_LABEL}`;
     showConfirm(`선택한 ${selectedStudents.length}명의 [${targetMsg}] 데이터를 초기화(삭제)하시겠습니까?`, () => {
       setStudents(prev => prev.map(student => {
         if (!selectedStudents.includes(student.id)) return student;
-        const updatedAm = [...(student.attendance[attendanceMonth]?.am || Array(31).fill(''))]; 
-        const updatedPm = [...(student.attendance[attendanceMonth]?.pm || Array(31).fill(''))];
+
+        const currentMonth = student.attendance?.[attendanceMonth] || generateEmptyMonthlyAttendance()[attendanceMonth];
+        const updatedAm = [...(currentMonth.am || Array(31).fill(''))];
+        const updatedPm = [...(currentMonth.pm || Array(31).fill(''))];
+
         if (isAllMonth) {
-          return { ...student, attendance: { ...student.attendance, [attendanceMonth]: { ...student.attendance[attendanceMonth], am: Array(31).fill(''), pm: Array(31).fill('') } } };
+          return {
+            ...student,
+            attendance: {
+              ...student.attendance,
+              [attendanceMonth]: {
+                ...currentMonth,
+                am: Array(31).fill(''),
+                pm: Array(31).fill(''),
+                amMemo: Array(31).fill(''),
+                pmMemo: Array(31).fill('')
+              }
+            }
+          };
         } else {
-          if (batchAttendanceTimeOfDay === 'am') updatedAm[batchAttendanceDate] = '';
-          if (batchAttendanceTimeOfDay === 'pm') updatedPm[batchAttendanceDate] = '';
-          return { ...student, attendance: { ...student.attendance, [attendanceMonth]: { ...student.attendance[attendanceMonth], am: updatedAm, pm: updatedPm } } };
+          updatedAm[batchAttendanceDate] = '';
+          updatedPm[batchAttendanceDate] = '';
+          return {
+            ...student,
+            attendance: {
+              ...student.attendance,
+              [attendanceMonth]: {
+                ...currentMonth,
+                am: updatedAm,
+                pm: updatedPm
+              }
+            }
+          };
         }
       }));
       showAlert(`출결 초기화가 완료되었습니다.`);
@@ -1495,18 +1535,22 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
     if (typeof window.XLSX === 'undefined') { showAlert("엑셀 모듈 로딩중입니다."); return; }
     const data = [];
     filteredStudents.forEach((s) => {
-      const amData = s.attendance[attendanceMonth]?.am || Array(31).fill('');
-      const pmData = s.attendance[attendanceMonth]?.pm || Array(31).fill('');
-      
-      const amRow = { "이름": s.name, "아이디": s.userId || s.id, "출석률": getAttendanceRate(s, attendanceMonth), "구분": "오전" };
-      const pmRow = { "이름": s.name, "아이디": s.userId || s.id, "출석률": getAttendanceRate(s, attendanceMonth), "구분": "오후", "벌점": getAttendancePenalty(s, attendanceMonth) };
-      
+      const monthData = s.attendance?.[attendanceMonth] || {};
+      const attendanceData = getUnifiedAttendanceArray(monthData);
+
+      const row = {
+        "이름": s.name,
+        "아이디": s.userId || s.id,
+        "출석률": getAttendanceRate(s, attendanceMonth),
+        "구분": ATTENDANCE_SESSION_LABEL,
+        "벌점": getAttendancePenalty(s, attendanceMonth)
+      };
+
       for(let i=0; i<31; i++) {
-         amRow[`${i+1}일`] = amData[i] || '';
-         pmRow[`${i+1}일`] = pmData[i] || '';
+         row[`${i+1}일`] = attendanceData[i] || '';
       }
-      data.push(amRow);
-      data.push(pmRow);
+
+      data.push(row);
     });
 
     const ws = window.XLSX.utils.json_to_sheet(data);
@@ -1525,25 +1569,86 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   const [detailSelectedMonth, setDetailSelectedMonth] = useState(currentMonthLabel);
   const [dashboardMonth, setDashboardMonth] = useState(currentMonthLabel);
 
-  const [dailySettings, setDailySettings] = useState(() => {
+  const createDefaultDailySettings = () => {
     const settings = {};
     MONTHS.forEach(m => settings[m] = { excludedDays: [] });
     return settings;
-  });
+  };
 
-  const [attendanceSettings, setAttendanceSettings] = useState(() => {
+  const createDefaultAttendanceSettings = () => {
     const settings = {};
     MONTHS.forEach(m => settings[m] = { excludedDays: [] });
     return settings;
-  });
+  };
 
-  const [penaltyRules, setPenaltyRules] = useState(() => {
+  const createDefaultPenaltyRules = () => {
       const rules = {};
-      ['출석', '결석', '지각', '조퇴', '사전통보', '병결', '알바', '가족사정', '개인사정', '컨디션 난조', '학교', '시험', '과제', '실습', '타학원', '독서실', '기타'].forEach(opt => {
-          rules[opt] = { apply: opt === '결석' || opt === '지각' || opt === '조퇴', score: opt === '결석' ? 2 : opt === '지각' || opt === '조퇴' ? 1 : 0 };
+      ATTENDANCE_OPTIONS.forEach(opt => {
+          rules[opt] = {
+              apply: opt === '결석' || opt === '지각' || opt === '조퇴',
+              score: opt === '결석' ? 2 : opt === '지각' || opt === '조퇴' ? 1 : 0
+          };
       });
       return { maxPenalty: 20, rules };
-  });
+  };
+
+  const getClassSettingsStorageKey = () => `academyClassSettings_${academicYear}_${className}`;
+
+  const loadClassSettings = () => {
+      const defaults = {
+          dailySettings: createDefaultDailySettings(),
+          attendanceSettings: createDefaultAttendanceSettings(),
+          penaltyRules: createDefaultPenaltyRules()
+      };
+
+      try {
+          const saved = localStorage.getItem(getClassSettingsStorageKey());
+          if (!saved) return defaults;
+
+          const parsed = JSON.parse(saved);
+
+          return {
+              dailySettings: {
+                  ...defaults.dailySettings,
+                  ...(parsed.dailySettings || {})
+              },
+              attendanceSettings: {
+                  ...defaults.attendanceSettings,
+                  ...(parsed.attendanceSettings || {})
+              },
+              penaltyRules: {
+                  ...defaults.penaltyRules,
+                  ...(parsed.penaltyRules || {}),
+                  rules: {
+                      ...defaults.penaltyRules.rules,
+                      ...(parsed.penaltyRules?.rules || {})
+                  }
+              }
+          };
+      } catch (e) {
+          console.error('반별 설정 불러오기 오류:', e);
+          return defaults;
+      }
+  };
+
+  const [dailySettings, setDailySettings] = useState(() => loadClassSettings().dailySettings);
+  const [attendanceSettings, setAttendanceSettings] = useState(() => loadClassSettings().attendanceSettings);
+  const [penaltyRules, setPenaltyRules] = useState(() => loadClassSettings().penaltyRules);
+
+  useEffect(() => {
+      try {
+          localStorage.setItem(
+              getClassSettingsStorageKey(),
+              JSON.stringify({
+                  dailySettings,
+                  attendanceSettings,
+                  penaltyRules
+              })
+          );
+      } catch (e) {
+          console.error('반별 설정 저장 오류:', e);
+      }
+  }, [academicYear, className, dailySettings, attendanceSettings, penaltyRules]);
 
   const handlePenaltyRuleChange = (opt, field, val) => {
       setPenaltyRules(prev => ({
@@ -1661,47 +1766,53 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
     return students.filter(s => (s.classNames || [s.className]).includes(className));
   }, [students, className]);
 
+  const getUnifiedAttendanceArray = (monthData = {}) => {
+      const am = monthData.am || Array(31).fill('');
+      const pm = monthData.pm || Array(31).fill('');
+      return Array.from({ length: 31 }, (_, i) => am[i] || pm[i] || '');
+  };
+
+  const getUnifiedAttendanceMemoArray = (monthData = {}) => {
+      const amMemo = monthData.amMemo || Array(31).fill('');
+      const pmMemo = monthData.pmMemo || Array(31).fill('');
+      return Array.from({ length: 31 }, (_, i) => amMemo[i] || pmMemo[i] || '');
+  };
+
+  const isAttendancePresent = (value) => ATTENDANCE_PRESENT_STATUSES.includes(value);
+
   const getAttendanceRate = (student, month) => {
       const excluded = attendanceSettings[month]?.excludedDays || [];
-      const am = student.attendance[month]?.am || [];
-      const pm = student.attendance[month]?.pm || [];
+      const attendanceData = getUnifiedAttendanceArray(student.attendance?.[month] || {});
       let totalDays = 0, attendedDays = 0;
+
       for(let i=0; i<31; i++) {
           if(!excluded.includes(i)) {
-              const hasAm = am[i] !== '';
-              const hasPm = pm[i] !== '';
-              if (hasAm || hasPm) {
+              const value = attendanceData[i];
+              if (value !== '') {
                   totalDays++;
-                  const isAmAttended = am[i] === '출석' || am[i] === '지각';
-                  const isPmAttended = pm[i] === '출석' || pm[i] === '지각';
-                  if (isAmAttended || isPmAttended) {
-                      attendedDays++;
-                  }
+                  if (isAttendancePresent(value)) attendedDays++;
               }
           }
       }
+
       return totalDays === 0 ? "0%" : `${Math.round((attendedDays / totalDays) * 100)}%`;
   }
 
   const getAttendanceRateNum = (student, month) => {
       const excluded = attendanceSettings[month]?.excludedDays || [];
-      const am = student.attendance[month]?.am || [];
-      const pm = student.attendance[month]?.pm || [];
+      const attendanceData = getUnifiedAttendanceArray(student.attendance?.[month] || {});
       let totalDays = 0, attendedDays = 0;
+
       for(let i=0; i<31; i++) {
           if(!excluded.includes(i)) {
-              const hasAm = am[i] !== '';
-              const hasPm = pm[i] !== '';
-              if (hasAm || hasPm) {
+              const value = attendanceData[i];
+              if (value !== '') {
                   totalDays++;
-                  const isAmAttended = am[i] === '출석' || am[i] === '지각';
-                  const isPmAttended = pm[i] === '출석' || pm[i] === '지각';
-                  if (isAmAttended || isPmAttended) {
-                      attendedDays++;
-                  }
+                  if (isAttendancePresent(value)) attendedDays++;
               }
           }
       }
+
       return totalDays === 0 ? 0 : Math.round((attendedDays / totalDays) * 100);
   }
 
@@ -1724,16 +1835,18 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
   const getAttendancePenalty = (student, month) => {
       const excluded = attendanceSettings[month]?.excludedDays || [];
-      const am = student.attendance[month]?.am || [];
-      const pm = student.attendance[month]?.pm || [];
+      const attendanceData = getUnifiedAttendanceArray(student.attendance?.[month] || {});
       let penalty = 0;
+
       for(let i=0; i<31; i++) {
           if(!excluded.includes(i)) {
-              const v1 = am[i]; const v2 = pm[i];
-              if (v1 && penaltyRules.rules[v1]?.apply) penalty += penaltyRules.rules[v1].score;
-              if (v2 && penaltyRules.rules[v2]?.apply) penalty += penaltyRules.rules[v2].score;
+              const value = attendanceData[i];
+              if (value && penaltyRules.rules[value]?.apply) {
+                  penalty += Number(penaltyRules.rules[value].score || 0);
+              }
           }
       }
+
       return penalty;
   }
 
@@ -1844,24 +1957,20 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   const classAvgAttendance = useMemo(() => {
     let totalDays = 0, attendedDays = 0;
     const excluded = attendanceSettings[attendanceMonth]?.excludedDays || [];
+
     classStudents.forEach(s => {
-      const am = s.attendance[attendanceMonth]?.am || [];
-      const pm = s.attendance[attendanceMonth]?.pm || [];
+      const attendanceData = getUnifiedAttendanceArray(s.attendance?.[attendanceMonth] || {});
       for(let i=0; i<31; i++) {
           if(!excluded.includes(i)) {
-              const hasAm = am[i] !== '';
-              const hasPm = pm[i] !== '';
-              if (hasAm || hasPm) {
+              const value = attendanceData[i];
+              if (value !== '') {
                   totalDays++;
-                  const isAmAttended = am[i] === '출석' || am[i] === '지각';
-                  const isPmAttended = pm[i] === '출석' || pm[i] === '지각';
-                  if (isAmAttended || isPmAttended) {
-                      attendedDays++;
-                  }
+                  if (isAttendancePresent(value)) attendedDays++;
               }
           }
       }
     });
+
     return totalDays === 0 ? 0 : Math.round((attendedDays / totalDays) * 100);
   }, [classStudents, attendanceMonth, attendanceSettings]);
 
@@ -2998,21 +3107,50 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   const handleAttendanceChange = (studentId, timeOfDay, dayIndex, value) => {
     setStudents(prev => prev.map(student => {
       if (student.id !== studentId) return student;
-      const updatedAm = [...student.attendance[attendanceMonth].am]; 
-      const updatedPm = [...student.attendance[attendanceMonth].pm];
-      if (timeOfDay === 'am') updatedAm[dayIndex] = value;
-      if (timeOfDay === 'pm') updatedPm[dayIndex] = value;
-      return { ...student, attendance: { ...student.attendance, [attendanceMonth]: { ...student.attendance[attendanceMonth], am: updatedAm, pm: updatedPm } } };
+
+      const currentMonth = student.attendance?.[attendanceMonth] || generateEmptyMonthlyAttendance()[attendanceMonth];
+      const updatedAm = [...(currentMonth.am || Array(31).fill(''))];
+      const updatedPm = [...(currentMonth.pm || Array(31).fill(''))];
+
+      updatedAm[dayIndex] = value;
+      updatedPm[dayIndex] = '';
+
+      return {
+        ...student,
+        attendance: {
+          ...student.attendance,
+          [attendanceMonth]: {
+            ...currentMonth,
+            am: updatedAm,
+            pm: updatedPm
+          }
+        }
+      };
     }));
   };
 
   const handleAttendanceMemoChange = (studentId, timeOfDay, dayIndex, value) => {
     setStudents(prev => prev.map(student => {
       if (student.id !== studentId) return student;
-      const memoField = timeOfDay === 'am' ? 'amMemo' : 'pmMemo';
-      const updatedMemo = [...(student.attendance[attendanceMonth][memoField] || Array(31).fill(''))];
-      updatedMemo[dayIndex] = value;
-      return { ...student, attendance: { ...student.attendance, [attendanceMonth]: { ...student.attendance[attendanceMonth], [memoField]: updatedMemo } } };
+
+      const currentMonth = student.attendance?.[attendanceMonth] || generateEmptyMonthlyAttendance()[attendanceMonth];
+      const updatedAmMemo = [...(currentMonth.amMemo || Array(31).fill(''))];
+      const updatedPmMemo = [...(currentMonth.pmMemo || Array(31).fill(''))];
+
+      updatedAmMemo[dayIndex] = value;
+      updatedPmMemo[dayIndex] = '';
+
+      return {
+        ...student,
+        attendance: {
+          ...student.attendance,
+          [attendanceMonth]: {
+            ...currentMonth,
+            amMemo: updatedAmMemo,
+            pmMemo: updatedPmMemo
+          }
+        }
+      };
     }));
   };
 
@@ -3276,7 +3414,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-6 border-l-4 border-l-emerald-500">
                 <div>
                   <h1 className="text-2xl font-extrabold text-slate-900 flex items-center gap-2"><CalendarCheck className="text-emerald-500" size={24} />31일 출결 관리</h1>
-                  <p className="text-slate-500 text-sm mt-1">오전/오후 출결을 기록하면 개인별/반 평균 출석률과 벌점이 자동 계산됩니다.</p>
+                  <p className="text-slate-500 text-sm mt-1">출석확인을 기록하면 개인별/반 평균 출석률과 벌점이 자동 계산됩니다.</p>
                 </div>
                 <div className="flex items-center gap-6">
                   <select className="border border-emerald-200 rounded-xl px-4 py-2.5 text-sm font-bold text-emerald-700 outline-none bg-emerald-50 shadow-sm mr-4" value={attendanceMonth} onChange={(e) => setAttendanceMonth(e.target.value)}>
@@ -3315,10 +3453,9 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                   <select className="border border-emerald-200 rounded-lg px-3 py-2 outline-none text-sm font-bold text-slate-700 bg-white" value={batchAttendanceDate} onChange={e => setBatchAttendanceDate(e.target.value)}>
                     {Array.from({length: 31}, (_, i) => <option key={i} value={i}>{i+1}일</option>)}
                   </select>
-                  <select className="border border-emerald-200 rounded-lg px-3 py-2 outline-none text-sm font-bold text-slate-700 bg-white" value={batchAttendanceTimeOfDay} onChange={e => setBatchAttendanceTimeOfDay(e.target.value)}>
-                    <option value="am">오전</option>
-                    <option value="pm">오후</option>
-                  </select>
+                  <div className="bg-white border border-emerald-200 rounded-lg px-3 py-2 text-sm font-bold text-emerald-700">
+                    {ATTENDANCE_SESSION_LABEL}
+                  </div>
                   <select className="border border-emerald-200 rounded-lg px-3 py-2 outline-none text-sm font-bold text-slate-700 bg-white" value={batchAttendanceStatus} onChange={e => setBatchAttendanceStatus(e.target.value)}>
                     <option value="">출결 사유 선택</option>
                     {ATTENDANCE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
@@ -3379,7 +3516,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                         <th rowSpan={2} className="px-4 py-3 border-r border-slate-700 sticky left-[40px] z-30 bg-slate-900 shadow-[2px_0_5px_rgba(0,0,0,0.1)] w-40 cursor-pointer hover:bg-slate-800 transition-colors" onClick={() => handleSort('name')}>
                           <div className="flex items-center justify-between">이름 (출석률) {sortKey === 'name' ? (sortOrder === 'asc' ? <ArrowDownAZ size={16}/> : <ArrowUpZA size={16}/>) : <ArrowDownAZ size={16} className="opacity-30"/>}</div>
                         </th>
-                        <th rowSpan={2} className="px-3 py-3 border-r border-slate-700 sticky left-[200px] z-30 bg-slate-900 shadow-[2px_0_5px_rgba(0,0,0,0.1)] w-16">구분</th>
+                        <th rowSpan={2} className="px-3 py-3 border-r border-slate-700 sticky left-[200px] z-30 bg-slate-900 shadow-[2px_0_5px_rgba(0,0,0,0.1)] w-20">구분</th>
                         <th colSpan={31} className="py-2 border-b border-slate-700 bg-slate-800">{attendanceMonth} 일별 출석 사유 (1일 ~ 31일)</th>
                         <th rowSpan={2} className="px-4 py-3 border-l border-slate-700 bg-slate-900 text-rose-300 w-24">벌점 현황<br/><span className="text-[10px] text-slate-400 font-normal text-rose-200/50">(자동계산)</span></th>
                       </tr>
@@ -3392,16 +3529,16 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                     </thead>
                     <tbody className="divide-y divide-slate-200 text-xs">
                       {filteredStudents.map((student) => {
-                        const amData = student.attendance[attendanceMonth]?.am || Array(31).fill('');
-                        const pmData = student.attendance[attendanceMonth]?.pm || Array(31).fill('');
+                        const attendanceData = getUnifiedAttendanceArray(student.attendance?.[attendanceMonth] || {});
+                        const memoData = getUnifiedAttendanceMemoArray(student.attendance?.[attendanceMonth] || {});
                         const isSelected = selectedStudents.includes(student.id);
                         return (
                           <React.Fragment key={student.id}>
                             <tr className={`hover:bg-emerald-50/50 group ${isSelected ? 'bg-emerald-50/30' : ''}`}>
-                              <td rowSpan={2} className="border-r border-slate-200 sticky left-0 z-10 bg-white group-hover:bg-emerald-50/50 shadow-[2px_0_5px_rgba(0,0,0,0.05)] text-center px-3 cursor-pointer" onClick={(e) => { e.stopPropagation(); toggleStudentSelection(student.id); }}>
+                              <td className="border-r border-slate-200 sticky left-0 z-10 bg-white group-hover:bg-emerald-50/50 shadow-[2px_0_5px_rgba(0,0,0,0.05)] text-center px-3 cursor-pointer" onClick={(e) => { e.stopPropagation(); toggleStudentSelection(student.id); }}>
                                  <input type="checkbox" className="cursor-pointer" checked={isSelected} onChange={() => {}} />
                               </td>
-                              <td rowSpan={2} className="border-r border-slate-200 sticky left-[40px] z-10 bg-white group-hover:bg-emerald-50/50 shadow-[2px_0_5px_rgba(0,0,0,0.05)] text-left px-4 cursor-pointer" onClick={() => setViewingAttendanceSummary(student)}>
+                              <td className="border-r border-slate-200 sticky left-[40px] z-10 bg-white group-hover:bg-emerald-50/50 shadow-[2px_0_5px_rgba(0,0,0,0.05)] text-left px-4 cursor-pointer" onClick={() => setViewingAttendanceSummary(student)}>
                                 <div className="flex flex-col w-full gap-1">
                                   <div className="flex items-center justify-between w-full">
                                     <span className="font-bold text-slate-900 text-[13px]">{student.name}</span>
@@ -3410,51 +3547,30 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                                   <div className="text-[10px] text-slate-400 font-mono text-left">{student.id} / {student.userId}</div>
                                 </div>
                               </td>
-                              <td className="border-r border-b-0 border-slate-200 sticky left-[200px] z-10 bg-slate-50 text-slate-500 font-semibold shadow-[2px_0_5px_rgba(0,0,0,0.05)]">오전</td>
-                              {amData.map((val, dayIdx) => {
+                              <td className="border-r border-slate-200 sticky left-[200px] z-10 bg-slate-50 text-slate-500 font-semibold shadow-[2px_0_5px_rgba(0,0,0,0.05)]">{ATTENDANCE_SESSION_LABEL}</td>
+                              {attendanceData.map((val, dayIdx) => {
                                 const isExcluded = attendanceSettings[attendanceMonth].excludedDays.includes(dayIdx);
-                                const memoVal = student.attendance[attendanceMonth]?.amMemo?.[dayIdx] || '';
+                                const memoVal = memoData[dayIdx] || '';
                                 return (
-                                <td key={`am-${dayIdx}`} className={`border-r border-slate-200 p-0 relative group/cell ${isExcluded ? 'bg-slate-100' : ''}`} onContextMenu={(e) => { if(isExcluded) return; e.preventDefault(); e.stopPropagation(); const newMemo = prompt(`${dayIdx+1}일 오전 메모 입력:`, memoVal); if (newMemo !== null) handleAttendanceMemoChange(student.id, 'am', dayIdx, newMemo); }}>
-                                  <select disabled={isExcluded} value={isExcluded ? '' : val} onChange={(e) => handleAttendanceChange(student.id, 'am', dayIdx, e.target.value)} className={`w-full h-full py-2.5 px-1 outline-none cursor-pointer appearance-none text-center font-medium tracking-tight ${isExcluded ? 'cursor-not-allowed opacity-0' : val === '출석' ? 'text-emerald-600 bg-emerald-50/30' : val === '결석' ? 'text-rose-600 bg-rose-100/50 font-bold' : val === '지각' ? 'text-amber-600 bg-amber-50/30' : val === '조퇴' ? 'text-orange-600 bg-orange-50/30' : val !== '' ? 'text-slate-600 bg-slate-100/50' : 'bg-transparent text-slate-400 hover:bg-slate-100 transition-colors'}`}>
+                                <td key={`attendance-${dayIdx}`} className={`border-r border-slate-200 p-0 relative group/cell ${isExcluded ? 'bg-slate-100' : ''}`} onContextMenu={(e) => { if(isExcluded) return; e.preventDefault(); e.stopPropagation(); const newMemo = prompt(`${dayIdx+1}일 ${ATTENDANCE_SESSION_LABEL} 메모 입력:`, memoVal); if (newMemo !== null) handleAttendanceMemoChange(student.id, ATTENDANCE_SESSION_KEY, dayIdx, newMemo); }}>
+                                  <select disabled={isExcluded} value={isExcluded ? '' : val} onChange={(e) => handleAttendanceChange(student.id, ATTENDANCE_SESSION_KEY, dayIdx, e.target.value)} className={`w-full h-full py-2.5 px-1 outline-none cursor-pointer appearance-none text-center font-medium tracking-tight ${isExcluded ? 'cursor-not-allowed opacity-0' : val === '출석' || val === 'Live' ? 'text-emerald-600 bg-emerald-50/30' : val === '결석' ? 'text-rose-600 bg-rose-100/50 font-bold' : val === '지각' ? 'text-amber-600 bg-amber-50/30' : val === '조퇴' ? 'text-orange-600 bg-orange-50/30' : val !== '' ? 'text-slate-600 bg-slate-100/50' : 'bg-transparent text-slate-400 hover:bg-slate-100 transition-colors'}`}>
                                     <option value=""></option>{ATTENDANCE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                                   </select>
                                   {!isExcluded && (
                                       <div className={`absolute top-0 right-0 w-3 h-3 z-10 cursor-pointer ${memoVal ? 'bg-red-500 rounded-bl-sm shadow-sm' : 'opacity-0 group-hover/cell:opacity-100 bg-slate-300 hover:bg-red-400 rounded-bl-sm'}`} onClick={(e) => {
                                           e.stopPropagation();
                                           e.preventDefault();
-                                          const newMemo = prompt(`${dayIdx+1}일 오전 메모 입력:`, memoVal);
-                                          if (newMemo !== null) handleAttendanceMemoChange(student.id, 'am', dayIdx, newMemo);
+                                          const newMemo = prompt(`${dayIdx+1}일 ${ATTENDANCE_SESSION_LABEL} 메모 입력:`, memoVal);
+                                          if (newMemo !== null) handleAttendanceMemoChange(student.id, ATTENDANCE_SESSION_KEY, dayIdx, newMemo);
                                       }} title={memoVal ? `메모: ${memoVal}` : "메모 추가 (우클릭 가능)"}></div>
                                   )}
                                 </td>
                               )})}
-                              <td rowSpan={2} className="border-l border-slate-200 align-middle bg-rose-50/40">
+                              <td className="border-l border-slate-200 align-middle bg-rose-50/40">
                                   <div className={`font-extrabold text-[14px] flex justify-center w-full ${(typeof penaltyRules !== 'undefined' ? getAttendancePenalty(student, attendanceMonth) >= penaltyRules.maxPenalty : false) ? 'text-white bg-red-500 py-1 rounded px-2 animate-pulse' : 'text-rose-500'}`}>
                                       {getAttendancePenalty(student, attendanceMonth)} 점
                                   </div>
                               </td>
-                            </tr>
-                            <tr className={`border-b-[3px] border-b-slate-200 hover:bg-emerald-50/50 ${isSelected ? 'bg-emerald-50/30' : ''}`}>
-                              <td className="border-r border-slate-200 sticky left-[200px] z-10 bg-slate-50 text-slate-500 font-semibold shadow-[2px_0_5px_rgba(0,0,0,0.05)]">오후</td>
-                              {pmData.map((val, dayIdx) => {
-                                const isExcluded = attendanceSettings[attendanceMonth].excludedDays.includes(dayIdx);
-                                const memoVal = student.attendance[attendanceMonth]?.pmMemo?.[dayIdx] || '';
-                                return (
-                                <td key={`pm-${dayIdx}`} className={`border-r border-slate-200 p-0 relative group/cell ${isExcluded ? 'bg-slate-100' : ''}`} onContextMenu={(e) => { if(isExcluded) return; e.preventDefault(); e.stopPropagation(); const newMemo = prompt(`${dayIdx+1}일 오후 메모 입력:`, memoVal); if (newMemo !== null) handleAttendanceMemoChange(student.id, 'pm', dayIdx, newMemo); }}>
-                                  <select disabled={isExcluded} value={isExcluded ? '' : val} onChange={(e) => handleAttendanceChange(student.id, 'pm', dayIdx, e.target.value)} className={`w-full h-full py-2.5 px-1 outline-none cursor-pointer appearance-none text-center font-medium tracking-tight ${isExcluded ? 'cursor-not-allowed opacity-0' : val === '출석' ? 'text-emerald-600 bg-emerald-50/30' : val === '결석' ? 'text-rose-600 bg-rose-100/50 font-bold' : val === '지각' ? 'text-amber-600 bg-amber-50/30' : val === '조퇴' ? 'text-orange-600 bg-orange-50/30' : val !== '' ? 'text-slate-600 bg-slate-100/50' : 'bg-transparent text-slate-400 hover:bg-slate-100 transition-colors'}`}>
-                                    <option value=""></option>{ATTENDANCE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                                  </select>
-                                  {!isExcluded && (
-                                      <div className={`absolute top-0 right-0 w-3 h-3 z-10 cursor-pointer ${memoVal ? 'bg-red-500 rounded-bl-sm shadow-sm' : 'opacity-0 group-hover/cell:opacity-100 bg-slate-300 hover:bg-red-400 rounded-bl-sm'}`} onClick={(e) => {
-                                          e.stopPropagation();
-                                          e.preventDefault();
-                                          const newMemo = prompt(`${dayIdx+1}일 오후 메모 입력:`, memoVal);
-                                          if (newMemo !== null) handleAttendanceMemoChange(student.id, 'pm', dayIdx, newMemo);
-                                      }} title={memoVal ? `메모: ${memoVal}` : "메모 추가 (우클릭 가능)"}></div>
-                                  )}
-                                </td>
-                              )})}
                             </tr>
                           </React.Fragment>
                         );
