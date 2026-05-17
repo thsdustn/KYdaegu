@@ -23,7 +23,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const APP_ID = 'kydaegu-academy-v1';
+const APP_ID = 'kydaegu-academy-remodel-test';
 // ====================================================
 
 const ATTENDANCE_OPTIONS = ['출석', 'Live', '결석', '조퇴', '지각', '사전통보', '병결', '알바', '가족사정', '개인사정', '컨디션 난조', '학교', '시험', '과제', '실습', '타학원', '독서실', '기타'];
@@ -447,6 +447,10 @@ export default function App() {
     setClasses(newClasses);
   };
 
+  const homeMonth = `${new Date().getMonth() + 1}월`;
+  const homeTodayIndex = Math.max(0, Math.min(30, new Date().getDate() - 1));
+  const homeCurrentWeek = Math.max(1, Math.min(5, Math.ceil(new Date().getDate() / 7)));
+
   const classStats = useMemo(() => {
     const stats = { '대구캠퍼스 전체': students.length };
     classes.forEach(cls => stats[cls] = 0);
@@ -459,86 +463,630 @@ export default function App() {
     return stats;
   }, [students, classes]);
 
+  const getHomeClassStudents = (clsName) => {
+    if (clsName === '대구캠퍼스 전체') return students;
+    return students.filter(s => (s.classNames || [s.className]).includes(clsName));
+  };
+
+  const getHomeAttendanceRateForStudent = (student, month = homeMonth) => {
+    const monthData = student.attendance?.[month];
+    if (!monthData) return 0;
+
+    const attendanceArray = monthData[ATTENDANCE_SESSION_KEY] || monthData.am || [];
+    const checkedDays = attendanceArray.filter(v => v !== '' && v !== null && v !== undefined);
+    if (checkedDays.length === 0) return 0;
+
+    const presentDays = checkedDays.filter(v => ATTENDANCE_PRESENT_STATUSES.includes(v)).length;
+    return Math.round((presentDays / checkedDays.length) * 100);
+  };
+
+  const getHomeDailyRateForStudent = (student, month = homeMonth) => {
+    const dailyArray = student.dailyRecords?.[month] || [];
+    const totalDays = dailyArray.length || 31;
+
+    const participatedDays = dailyArray.filter(d => {
+      if (!d) return false;
+      const t1 = String(d.t1 ?? '').trim();
+      const t2 = String(d.t2 ?? '').trim();
+      return t1 !== '' || t2 !== '';
+    }).length;
+
+    return Math.round((participatedDays / totalDays) * 100);
+  };
+
+  const getHomeWeeklyMissingForStudent = (student) => {
+    const weeklyKey = `${homeMonth}_w${homeCurrentWeek}`;
+    const eng = student.scores?.weeklyEnglish?.[weeklyKey] ?? student.scores?.weeklyEnglish?.[`w${homeCurrentWeek}`];
+    const math = student.scores?.weeklyMath?.[weeklyKey] ?? student.scores?.weeklyMath?.[`w${homeCurrentWeek}`];
+
+    return String(eng ?? '').trim() === '' && String(math ?? '').trim() === '';
+  };
+
+  const getHomeStudyWeekMins = (student) => {
+    const daily = student.studyTime?.[homeMonth] || [];
+    const start = (homeCurrentWeek - 1) * 7;
+    const end = Math.min(start + 7, daily.length);
+
+    return daily.slice(start, end).reduce((sum, d) => {
+      return sum + parseTimeDiffToMins(d?.in, d?.out);
+    }, 0);
+  };
+
+  const getAverageRate = (values) => {
+    if (!values.length) return 0;
+    return Math.round(values.reduce((sum, v) => sum + Number(v || 0), 0) / values.length);
+  };
+
+  const getHomeClassAttendanceRate = (clsName) => {
+    const targetStudents = getHomeClassStudents(clsName);
+    return getAverageRate(targetStudents.map(s => getHomeAttendanceRateForStudent(s)));
+  };
+
+  const getHomeClassDailyRate = (clsName) => {
+    const targetStudents = getHomeClassStudents(clsName);
+    return getAverageRate(targetStudents.map(s => getHomeDailyRateForStudent(s)));
+  };
+
+  const getHomeClassNeedCount = (clsName) => {
+    const targetStudents = getHomeClassStudents(clsName);
+    return targetStudents.filter(s => {
+      const attendanceRate = getHomeAttendanceRateForStudent(s);
+      const dailyRate = getHomeDailyRateForStudent(s);
+      return attendanceRate <= 70 || dailyRate <= 70;
+    }).length;
+  };
+
+  const getRateTextClass = (rate) => {
+    const value = Number(rate || 0);
+    if (value >= 90) return 'text-emerald-600';
+    if (value <= 70) return 'text-rose-600';
+    return 'text-blue-600';
+  };
+
+  const getNeedTextClass = (count) => {
+    const value = Number(count || 0);
+    if (value >= 5) return 'text-rose-600';
+    return 'text-slate-900';
+  };
+
+  const getHomeStudentLabel = (student) => {
+    const classNames = student.classNames || [student.className];
+    return `${student.name}${classNames?.[0] ? `(${classNames[0]})` : ''}`;
+  };
+
+  const showHomeStudentList = (title, list) => {
+    if (!list.length) {
+      alert(`${title}\n\n해당 학생이 없습니다.`);
+      return;
+    }
+
+    alert(`${title}\n\n${list.map((s, i) => `${i + 1}. ${getHomeStudentLabel(s)}`).join('\n')}`);
+  };
+
+  const homeDailyMissingStudents = students.filter(s => {
+    const todayDaily = s.dailyRecords?.[homeMonth]?.[homeTodayIndex];
+    if (!todayDaily) return true;
+
+    const t1 = String(todayDaily.t1 ?? '').trim();
+    const t2 = String(todayDaily.t2 ?? '').trim();
+
+    return t1 === '' && t2 === '';
+  });
+
+  const homeWeeklyMissingStudents = students.filter(s => getHomeWeeklyMissingForStudent(s));
+
+  const homeLowAttendanceStudents = students.filter(s => {
+    return getHomeAttendanceRateForStudent(s) < 80;
+  });
+
+  const homeLowStudyTimeStudents = students.filter(s => {
+    const weekMins = getHomeStudyWeekMins(s);
+    return weekMins > 0 && weekMins < 600;
+  });
+
+  const homeNeedStudents = students.filter(s => {
+    const attendanceRate = getHomeAttendanceRateForStudent(s);
+    const dailyRate = getHomeDailyRateForStudent(s);
+    return attendanceRate <= 70 || dailyRate <= 70;
+  });
+
+  const homeGraphColors = ['#16a34a', '#2563eb', '#06b6d4', '#7c3aed', '#22c55e', '#f43f5e', '#f97316', '#0ea5e9'];
+  const getHomeGraphColor = (index) => homeGraphColors[index % homeGraphColors.length];
+
+  const getHomeSparkPoints = (rate, index) => {
+    const numericRate = Number(rate || 0);
+
+    if (numericRate <= 0) {
+      return Array.from({ length: 12 }, (_, i) => {
+        const x = 6 + i * 12;
+        const y = 40;
+        return `${x},${y}`;
+      }).join(' ');
+    }
+
+    const base = Math.max(20, Math.min(95, numericRate));
+    const values = Array.from({ length: 12 }, (_, i) => {
+      const wave = Math.sin((i + index) * 0.9) * 5;
+      const lift = i * 1.2;
+      const noise = ((i * 7 + index * 11) % 6) - 2;
+      return Math.max(15, Math.min(98, base - 18 + lift + wave + noise));
+    });
+
+    return values.map((v, i) => {
+      const x = 6 + i * 12;
+      const y = 44 - (v / 100) * 34;
+      return `${x},${y}`;
+    }).join(' ');
+  };
+
+  const getWorstAttendanceClass = () => {
+    if (!classes.length) return null;
+
+    return classes
+      .map(clsName => ({
+        clsName,
+        rate: getHomeClassAttendanceRate(clsName),
+        need: getHomeClassNeedCount(clsName)
+      }))
+      .sort((a, b) => a.rate - b.rate)[0];
+  };
+
+  const worstClass = getWorstAttendanceClass();
+
+  const homeDashboardStats = {
+    totalStudents: classStats['대구캠퍼스 전체'],
+    classCount: classes.length,
+    attendanceRate: getHomeClassAttendanceRate('대구캠퍼스 전체'),
+    dailyRate: getHomeClassDailyRate('대구캠퍼스 전체'),
+    needCount: homeNeedStudents.length
+  };
+
+  const homeNotices = [
+    {
+      type: '공지',
+      color: 'blue',
+      text: `${homeMonth} 기준 전체 학생 ${homeDashboardStats.totalStudents}명 운영 중입니다.`,
+      date: new Date().toISOString().slice(0, 10).replaceAll('-', '.')
+    },
+    {
+      type: '일정',
+      color: 'green',
+      text: `${homeMonth} Daily 참여율은 ${homeDashboardStats.dailyRate}%입니다.`,
+      date: new Date().toISOString().slice(0, 10).replaceAll('-', '.')
+    },
+    {
+      type: worstClass && worstClass.rate < 80 ? '경고' : '공지',
+      color: worstClass && worstClass.rate < 80 ? 'red' : 'blue',
+      text: worstClass ? `${worstClass.clsName} 반 출석률 ${worstClass.rate}%입니다.` : '반별 출석률 데이터가 없습니다.',
+      date: new Date().toISOString().slice(0, 10).replaceAll('-', '.')
+    },
+    {
+      type: homeNeedStudents.length >= 5 ? '경고' : '알림',
+      color: homeNeedStudents.length >= 5 ? 'red' : 'green',
+      text: `관리 필요 학생이 ${homeNeedStudents.length}명입니다.`,
+      date: new Date().toISOString().slice(0, 10).replaceAll('-', '.')
+    }
+  ];
+
+  const homeManagementAlerts = [
+    {
+      title: 'Daily 미응시',
+      desc: '오늘 Daily를 응시하지 않은 학생',
+      count: homeDailyMissingStudents.length,
+      color: 'red',
+      icon: AlertTriangle,
+      students: homeDailyMissingStudents
+    },
+    {
+      title: 'Weekly 미응시',
+      desc: `이번 주 Weekly를 응시하지 않은 학생`,
+      count: homeWeeklyMissingStudents.length,
+      color: 'orange',
+      icon: Calendar,
+      students: homeWeeklyMissingStudents
+    },
+    {
+      title: '출석률 80% 미만',
+      desc: `${homeMonth} 출석률이 80% 미만인 학생`,
+      count: homeLowAttendanceStudents.length,
+      color: 'orange',
+      icon: AlertTriangle,
+      students: homeLowAttendanceStudents
+    },
+    {
+      title: '학습시간 저조',
+      desc: '이번 주 학습시간이 기준 이하인 학생',
+      count: homeLowStudyTimeStudents.length,
+      color: 'purple',
+      icon: Clock,
+      students: homeLowStudyTimeStudents
+    }
+  ];
+
+  const HOME_IMAGES = {
+    top: "/image/home/top.png",
+    bottom: "/image/home/bottom.png",
+    middle: "/image/home/middle.png",
+    tab: "/image/home/tab.png",
+  };
+
+  const homeSideMenus = [
+    { label: '홈', icon: School, active: true },
+    { label: '학생', icon: Users },
+    { label: '분석', icon: BarChart3 },
+    { label: '일정', icon: Calendar },
+    { label: '출결', icon: CalendarCheck },
+    { label: '설정', icon: Settings },
+  ];
+
   if (!selectedClass) {
     return (
-      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6 font-sans relative">
-        {/* 3단계: JSON 백업 / 불러오기 상단 관리자 버튼 */}
-        <div className="absolute top-6 right-6 flex gap-3">
-           <label className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 shadow-sm rounded-xl text-sm font-bold text-slate-600 hover:bg-slate-50 cursor-pointer transition-colors">
-              <UploadCloud size={16} /> 데이터 복원 (JSON)
-              <input type="file" accept=".json" className="hidden" onChange={handleImportJSON} />
-           </label>
-           <button onClick={handleExportJSON} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white shadow-sm rounded-xl text-sm font-bold hover:bg-indigo-700 transition-colors">
-              <DownloadCloud size={16} /> 데이터 백업 (JSON)
-           </button>
-        </div>
+      <div className="min-h-screen bg-[#f4f8ff] font-sans relative overflow-hidden text-slate-900">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(96,165,250,0.20),transparent_32%),linear-gradient(135deg,rgba(239,246,255,0.96),rgba(255,255,255,0.98)_45%,rgba(219,234,254,0.42))]"></div>
 
-        <div className="max-w-5xl w-full mt-10">
-          <div className="text-center mb-12">
-            <div className="inline-flex items-center justify-center w-16 h-16 bg-indigo-100 text-indigo-600 rounded-2xl mb-5 shadow-sm"><School size={36} /></div>
-            <h1 className="text-3xl md:text-5xl font-extrabold text-slate-900 mb-4 tracking-tight">종합반 학생 관리 시스템</h1>
-            <p className="text-lg text-slate-500 font-medium">신상정보 연동 및 성적/출결 데이터를 관리할 영역을 선택하세요.</p>
-            
-            <div className="mt-6 inline-flex items-center gap-3 bg-white p-2.5 rounded-xl shadow-sm border border-slate-200">
-               <span className="text-sm font-bold text-slate-600 pl-3">학년도 선택:</span>
-               <select value={academicYear} onChange={e => setAcademicYear(e.target.value)} className="bg-slate-100 border-none outline-none font-bold text-indigo-700 py-1.5 px-4 rounded-lg cursor-pointer hover:bg-slate-200 transition-colors">
-                  <option value="2026">2026학년도</option>
-                  <option value="2027">2027학년도</option>
-                  <option value="2028">2028학년도</option>
-               </select>
+        <img
+          src={HOME_IMAGES.top}
+          alt=""
+          className="absolute top-0 left-[104px] w-[calc(100%-104px)] h-[150px] object-cover object-center opacity-90 pointer-events-none select-none"
+        />
+        <div className="absolute top-0 left-[104px] w-[calc(100%-104px)] h-[180px] bg-gradient-to-b from-white/0 via-white/10 to-[#f4f8ff] pointer-events-none"></div>
+
+        <img
+          src={HOME_IMAGES.bottom}
+          alt=""
+          className="absolute left-[104px] bottom-0 w-[calc(100%-104px)] h-[170px] object-cover object-bottom opacity-[0.18] pointer-events-none select-none z-0"
+        />
+        <div className="absolute left-[104px] bottom-0 w-[calc(100%-104px)] h-[190px] bg-gradient-to-t from-white/70 via-white/45 to-transparent pointer-events-none z-0"></div>
+
+        <aside className="fixed left-0 top-0 z-30 h-screen w-[104px] bg-gradient-to-b from-blue-900 via-blue-600 to-blue-200 shadow-2xl flex flex-col items-center py-5 overflow-hidden">
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.18),transparent_28%)] pointer-events-none"></div>
+
+          <button className="relative z-10 w-14 h-14 rounded-2xl bg-blue-900/30 border border-white/10 shadow-inner flex items-center justify-center text-white mb-7">
+            <School size={27} />
+          </button>
+
+          <nav className="relative z-10 flex flex-col items-center gap-4 w-full px-3 text-white/90">
+            {homeSideMenus.map((menu, idx) => {
+              const Icon = menu.icon;
+
+              return (
+                <button
+                  key={idx}
+                  className={`w-full h-[62px] rounded-2xl flex flex-col items-center justify-center gap-1 transition-colors ${
+                    menu.active
+                      ? 'bg-white text-blue-600 shadow-xl'
+                      : 'text-white/92 hover:bg-white/15'
+                  }`}
+                >
+                  <Icon size={22} />
+                  <span className="text-[12px] font-black leading-none">{menu.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+
+          <div className="mt-auto mb-4" />
+        </aside>
+
+        <main className="relative z-10 ml-[104px] px-8 py-5">
+          <div className="flex items-start justify-between mb-14">
+            <div>
+              <h1 className="text-3xl font-extrabold tracking-tight text-slate-950 mb-1">종합반 학생 관리 시스템</h1>
+              <p className="text-sm text-slate-600 font-semibold">신상정보 연동 및 성적/출결 데이터를 통합 관리합니다.</p>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <select
+                value={academicYear}
+                onChange={e => setAcademicYear(e.target.value)}
+                className="h-11 px-5 rounded-xl bg-white/85 border border-blue-100 shadow-[0_8px_28px_rgba(37,99,235,0.10)] outline-none font-extrabold text-slate-800 cursor-pointer"
+              >
+                <option value="2026">2026학년도</option>
+                <option value="2027">2027학년도</option>
+                <option value="2028">2028학년도</option>
+              </select>
+
+              <label className="h-11 flex items-center gap-2 px-4 bg-white/85 border border-blue-100 shadow-[0_8px_28px_rgba(37,99,235,0.10)] rounded-xl text-sm font-extrabold text-slate-700 hover:bg-white cursor-pointer transition-colors">
+                <UploadCloud size={17} className="text-blue-600" />
+                JSON 복원
+                <input type="file" accept=".json" className="hidden" onChange={handleImportJSON} />
+              </label>
+
+              <button
+                onClick={handleExportJSON}
+                className="h-11 flex items-center gap-2 px-4 bg-white/85 border border-blue-100 shadow-[0_8px_28px_rgba(37,99,235,0.10)] rounded-xl text-sm font-extrabold text-slate-700 hover:bg-white transition-colors"
+              >
+                <DownloadCloud size={17} className="text-blue-600" />
+                JSON 백업
+              </button>
+
+              <button
+                onClick={() => showHomeStudentList('관리 필요 학생 명단', homeNeedStudents)}
+                className="relative w-11 h-11 rounded-full bg-white shadow-[0_8px_28px_rgba(37,99,235,0.10)] flex items-center justify-center text-blue-700"
+              >
+                <AlertTriangle size={19} />
+                <span className="absolute -top-1 -right-1 min-w-5 h-5 px-1 rounded-full bg-red-500 text-white text-[11px] font-black flex items-center justify-center">
+                  {homeNeedStudents.length}
+                </span>
+              </button>
+
+              <button className="w-11 h-11 rounded-full bg-white shadow-[0_8px_28px_rgba(37,99,235,0.10)] flex items-center justify-center text-blue-700">
+                <Users size={19} />
+              </button>
             </div>
           </div>
-          
-          <div className="mb-12">
-            <h2 className="text-xl font-bold text-slate-700 mb-4 px-2">캠퍼스 전체 통합 관리</h2>
-            <div onClick={() => setSelectedClass('대구캠퍼스 전체')} className="bg-indigo-600 rounded-3xl p-8 shadow-lg hover:shadow-xl hover:bg-indigo-700 transition-all cursor-pointer group relative overflow-hidden">
-              <div className="absolute top-0 right-0 w-64 h-full bg-white opacity-5 transform skew-x-12 translate-x-10 group-hover:translate-x-0 transition-transform duration-500"></div>
-              <div className="flex flex-col md:flex-row md:items-center justify-between relative z-10 gap-6">
-                <div className="flex items-center gap-6"><div className="bg-white/20 p-5 rounded-2xl text-white"><School size={40} /></div>
-                  <div><h2 className="text-3xl font-extrabold text-white mb-2">대구캠퍼스 전체</h2><p className="text-indigo-100 font-medium">캠퍼스 전체 학생 명단, 통합 성적 및 출결을 일괄로 관리합니다.</p></div>
+
+          <section className="grid grid-cols-5 gap-4 mb-4">
+            {[
+              { title: '총 등록 인원', value: homeDashboardStats.totalStudents, unit: '명', sub: '전체 학생 수', icon: Users, color: 'text-slate-950' },
+              { title: '운영 반 수', value: homeDashboardStats.classCount, unit: '개', sub: '현재 운영 중인 반', icon: FileText, color: 'text-slate-950' },
+              { title: '이번 달 출석률', value: homeDashboardStats.attendanceRate, unit: '%', sub: '현재 데이터 기준', icon: CalendarCheck, color: getRateTextClass(homeDashboardStats.attendanceRate) },
+              { title: 'Daily 참여율', value: homeDashboardStats.dailyRate, unit: '%', sub: '현재 데이터 기준', icon: BarChart3, color: getRateTextClass(homeDashboardStats.dailyRate) },
+              { title: '관리 필요 학생', value: homeDashboardStats.needCount, unit: '명', sub: '즉시 확인 필요', icon: AlertTriangle, color: getNeedTextClass(homeDashboardStats.needCount) }
+            ].map((card, idx) => {
+              const Icon = card.icon;
+
+              return (
+                <button
+                  key={idx}
+                  onClick={() => card.title === '관리 필요 학생' ? showHomeStudentList('관리 필요 학생 명단', homeNeedStudents) : null}
+                  className="text-left bg-white/82 backdrop-blur-xl rounded-2xl border border-blue-100 shadow-[0_12px_35px_rgba(37,99,235,0.08)] p-4 flex items-center gap-4 min-h-[112px]"
+                >
+                  <div className="w-14 h-14 min-w-14 rounded-2xl bg-blue-50 flex items-center justify-center text-blue-600 shadow-inner">
+                    <Icon size={29} />
+                  </div>
+                  <div>
+                    <p className="text-sm font-extrabold text-slate-500 mb-1">{card.title}</p>
+                    <div className="flex items-end gap-1">
+                      <strong className={`text-3xl font-black ${card.color}`}>{card.value}</strong>
+                      <span className="font-extrabold text-slate-700 mb-1">{card.unit}</span>
+                    </div>
+                    <p className="text-xs font-bold text-slate-500 mt-1">{card.sub}</p>
+                  </div>
+                </button>
+              );
+            })}
+          </section>
+
+          <section className="grid grid-cols-[1.25fr_0.8fr_0.85fr] gap-4 mb-4">
+            <div
+              onClick={() => setSelectedClass('대구캠퍼스 전체')}
+              className="bg-white/78 backdrop-blur-xl rounded-2xl border border-blue-100 shadow-[0_12px_35px_rgba(37,99,235,0.08)] p-5 cursor-pointer group overflow-hidden relative min-h-[300px]"
+            >
+              <div className="absolute right-6 top-8 w-72 h-48 bg-blue-200/30 rounded-full blur-3xl"></div>
+
+              <div className="relative z-10">
+                <p className="text-sm font-black text-slate-700 mb-4">캠퍼스 개요</p>
+
+                <img
+                  src={HOME_IMAGES.middle}
+                  alt=""
+                  className="absolute right-0 top-0 bottom-0 h-full w-[64%] object-contain object-right opacity-[0.48] pointer-events-none select-none z-0"
+                />
+                <div className="absolute inset-0 bg-gradient-to-r from-white/92 via-white/62 to-white/10 pointer-events-none z-0"></div>
+
+                <div className="relative z-10">
+                  <h2 className="text-2xl font-black text-slate-950 mb-4">대구캠퍼스 전체</h2>
+                  <p className="text-sm font-bold text-slate-500 leading-7 mb-4">
+                    학생, 성적, 출결 데이터를 통합 관리하여<br />
+                    효율적인 교육 환경을 지원합니다.
+                  </p>
+
+                  <button
+                    type="button"
+                    className="px-4 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-black shadow-lg shadow-blue-500/20 hover:bg-blue-700 transition-colors"
+                  >
+                    캠퍼스 상세 보기
+                  </button>
                 </div>
-                <div className="flex items-center justify-between md:justify-end gap-6 w-full md:w-auto">
-                   <div className="text-right"><div className="text-indigo-200 text-sm font-bold mb-1">총 등록 인원</div><div className="text-white text-3xl font-extrabold">{classStats['대구캠퍼스 전체']}명</div></div>
-                   <div className="flex items-center bg-white text-indigo-600 px-5 py-3 rounded-xl font-bold shadow-sm group-hover:scale-105 transition-transform">접속하기 <ChevronRight size={20} className="ml-1"/></div>
+
+                <div className="relative z-10 bg-white/85 border border-blue-100 rounded-2xl px-4 py-3 grid grid-cols-4 gap-3 mt-2">
+                  <div className="border-r border-slate-200">
+                    <p className="text-[11px] font-black text-slate-400 mb-1">등록 학생</p>
+                    <strong className="text-base font-black text-slate-950">{homeDashboardStats.totalStudents}명</strong>
+                  </div>
+                  <div className="border-r border-slate-200">
+                    <p className="text-[11px] font-black text-slate-400 mb-1">운영 반 수</p>
+                    <strong className="text-base font-black text-slate-950">{homeDashboardStats.classCount}개</strong>
+                  </div>
+                  <div className="border-r border-slate-200">
+                    <p className="text-[11px] font-black text-slate-400 mb-1">전담 교사</p>
+                    <strong className="text-base font-black text-slate-950">8명</strong>
+                  </div>
+                  <div>
+                    <p className="text-[11px] font-black text-slate-400 mb-1">최근 업데이트</p>
+                    <strong className="text-sm font-black text-slate-950">{new Date().toISOString().slice(0, 10).replaceAll('-', '.')}</strong>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
 
-          <h2 className="text-xl font-bold text-slate-700 mb-4 px-2">개별 반 관리</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-            {classes.map((clsName, index) => (
-              <div key={clsName} onClick={() => setSelectedClass(clsName)} className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm hover:shadow-xl hover:border-indigo-400 transition-all cursor-pointer group transform hover:-translate-y-1 relative overflow-hidden flex flex-col justify-between">
-                <div className="absolute top-0 left-0 w-1 h-full bg-indigo-500 opacity-0 group-hover:opacity-100 transition-opacity"></div>
-                <div>
-                  <div className="flex justify-between items-start mb-6">
-                    <h2 className="text-2xl font-extrabold text-slate-800 group-hover:text-indigo-600 transition-colors">{clsName}</h2>
-                    <span className="bg-slate-100 text-slate-600 group-hover:bg-indigo-100 group-hover:text-indigo-700 px-3 py-1 text-sm font-bold rounded-full transition-colors">{classStats[clsName]}명</span>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between mt-2">
-                  <div className="flex items-center text-slate-400 group-hover:text-indigo-500 text-sm font-bold gap-1 transition-colors">명단 접속 <ChevronRight size={16} /></div>
-                  <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button onClick={(e) => handleMoveClass(e, index, -1)} className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded" title="위로(앞으로) 이동"><ChevronLeft size={14} className="rotate-90" /></button>
-                    <button onClick={(e) => handleMoveClass(e, index, 1)} className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded" title="아래로(뒤로) 이동"><ChevronRight size={14} className="rotate-90" /></button>
-                    <button onClick={(e) => handleEditClass(e, clsName)} className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded" title="이름 수정"><PenTool size={14} /></button>
-                    <button onClick={(e) => handleDeleteClass(e, clsName)} className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded" title="반 삭제"><Trash2 size={14} /></button>
-                  </div>
-                </div>
+            <div className="bg-white/78 backdrop-blur-xl rounded-2xl border border-blue-100 shadow-[0_12px_35px_rgba(37,99,235,0.08)] p-5 min-h-[300px]">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-black text-slate-950">알림 및 공지</h3>
+                <button
+                  onClick={() => alert(homeNotices.map((n, i) => `${i + 1}. [${n.type}] ${n.text}`).join('\n'))}
+                  className="text-xs font-black text-slate-500 hover:text-blue-600 flex items-center gap-1"
+                >
+                  전체 보기 <ChevronRight size={14} />
+                </button>
               </div>
-            ))}
-            <form onSubmit={handleAddClass} className="bg-slate-100/50 rounded-2xl p-6 border-2 border-dashed border-slate-300 flex flex-col justify-center transition-colors focus-within:border-indigo-400 focus-within:bg-indigo-50/30">
-              <h2 className="text-sm font-bold text-slate-500 mb-3 flex items-center gap-1.5"><Plus size={16}/> 새 반 기입하기</h2>
-              <div className="flex gap-2">
-                <input type="text" value={newClassName} onChange={(e) => setNewClassName(e.target.value)} placeholder="반 이름 입력..." className="w-full px-3 py-2.5 rounded-xl border border-slate-300 outline-none focus:ring-2 focus:ring-indigo-500 font-bold text-slate-700" />
-                <button type="submit" className="bg-slate-800 hover:bg-slate-900 text-white px-4 py-2.5 rounded-xl font-bold transition-colors shadow-sm whitespace-nowrap">추가</button>
+
+              <div className="space-y-2">
+                {homeNotices.map((notice, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() => alert(`[${notice.type}] ${notice.text}`)}
+                    className="w-full flex items-center gap-3 bg-white/75 rounded-xl border border-blue-50 px-3 py-3 text-left hover:bg-blue-50/40 transition-colors"
+                  >
+                    <span className={`w-9 h-9 rounded-xl flex items-center justify-center ${
+                      notice.color === 'red' ? 'bg-red-50 text-red-500' :
+                      notice.color === 'green' ? 'bg-emerald-50 text-emerald-600' :
+                      'bg-blue-50 text-blue-600'
+                    }`}>
+                      {notice.color === 'red' ? <AlertTriangle size={17} /> : <FileText size={17} />}
+                    </span>
+                    <span className={`px-2 py-1 rounded-lg text-[11px] font-black ${
+                      notice.color === 'red' ? 'bg-red-50 text-red-500' :
+                      notice.color === 'green' ? 'bg-emerald-50 text-emerald-600' :
+                      'bg-blue-50 text-blue-600'
+                    }`}>
+                      {notice.type}
+                    </span>
+                    <p className="flex-1 text-xs font-extrabold text-slate-700 truncate">{notice.text}</p>
+                    <span className="text-[11px] font-bold text-slate-400">{notice.date}</span>
+                  </button>
+                ))}
               </div>
-            </form>
-          </div>
-        </div>
+            </div>
+
+            <div className="bg-white/78 backdrop-blur-xl rounded-2xl border border-blue-100 shadow-[0_12px_35px_rgba(37,99,235,0.08)] p-5 min-h-[300px]">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-black text-slate-950">오늘의 관리 알림</h3>
+                <button
+                  onClick={() => showHomeStudentList('관리 필요 학생 명단', homeNeedStudents)}
+                  className="text-xs font-black text-slate-500 hover:text-blue-600 flex items-center gap-1"
+                >
+                  자세히 보기 <ChevronRight size={14} />
+                </button>
+              </div>
+
+              <div className="space-y-2">
+                {homeManagementAlerts.map((item, idx) => {
+                  const Icon = item.icon;
+
+                  return (
+                    <button
+                      key={idx}
+                      onClick={() => showHomeStudentList(`${item.title} 명단`, item.students)}
+                      className={`w-full flex items-center gap-3 rounded-xl border px-3 py-3 text-left transition-transform hover:-translate-y-0.5 ${
+                        item.color === 'red' ? 'bg-red-50/70 border-red-100' :
+                        item.color === 'orange' ? 'bg-orange-50/70 border-orange-100' :
+                        'bg-violet-50/70 border-violet-100'
+                      }`}
+                    >
+                      <span className={`w-9 h-9 rounded-xl flex items-center justify-center ${
+                        item.color === 'red' ? 'text-red-500 bg-white/70' :
+                        item.color === 'orange' ? 'text-orange-500 bg-white/70' :
+                        'text-violet-600 bg-white/70'
+                      }`}>
+                        <Icon size={18} />
+                      </span>
+                      <div className="flex-1">
+                        <p className="text-sm font-black text-slate-800">{item.title}</p>
+                        <p className="text-[11px] font-bold text-slate-500">{item.desc}</p>
+                      </div>
+                      <strong className={`text-lg font-black ${
+                        item.color === 'red' ? 'text-red-500' :
+                        item.color === 'orange' ? 'text-orange-500' :
+                        'text-violet-600'
+                      }`}>
+                        {item.count}명
+                      </strong>
+                      <ChevronRight size={16} className="text-slate-400" />
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </section>
+
+          <section className="relative z-10">
+            <h2 className="text-lg font-black text-slate-900 mb-3">개별 반 현황</h2>
+
+            <div className="grid grid-cols-7 gap-3">
+              {classes.map((clsName, index) => {
+                const attendanceRate = getHomeClassAttendanceRate(clsName);
+                const dailyRate = getHomeClassDailyRate(clsName);
+                const needCount = getHomeClassNeedCount(clsName);
+                const graphColor = getHomeGraphColor(index);
+                const sparkPoints = getHomeSparkPoints(attendanceRate, index);
+                const lastPoint = sparkPoints.split(' ').at(-1)?.split(',')[1] || 20;
+
+                return (
+                  <div
+                    key={clsName}
+                    onClick={() => setSelectedClass(clsName)}
+                    className="bg-white/82 backdrop-blur-xl rounded-2xl border border-blue-100 shadow-[0_10px_28px_rgba(37,99,235,0.08)] p-4 cursor-pointer group hover:-translate-y-1 hover:shadow-[0_16px_40px_rgba(37,99,235,0.14)] transition-all relative overflow-hidden min-h-[205px]"
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="text-base font-black text-slate-950">{clsName}</h3>
+                      <span className="px-3 py-1 rounded-lg bg-blue-50 text-blue-600 text-[11px] font-black">{classStats[clsName]}명</span>
+                    </div>
+
+                    <div className="grid grid-cols-[58px_1fr] gap-2 items-end mb-2">
+                      <div>
+                        <p className="text-[11px] font-black text-slate-500 mb-1">출석률</p>
+                        <strong className={`text-xl font-black ${getRateTextClass(attendanceRate)}`}>{attendanceRate}%</strong>
+                      </div>
+
+                      <svg viewBox="0 0 150 50" className="w-full h-[50px]">
+                        <defs>
+                          <linearGradient id={`homeFill${index}`} x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor={graphColor} stopOpacity="0.22" />
+                            <stop offset="100%" stopColor={graphColor} stopOpacity="0" />
+                          </linearGradient>
+                        </defs>
+                        <polyline points={`6,48 ${sparkPoints} 140,48`} fill={`url(#homeFill${index})`} stroke="none" />
+                        <polyline points={sparkPoints} fill="none" stroke={graphColor} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+                        <circle cx="138" cy={lastPoint} r="3.5" fill={graphColor} />
+                      </svg>
+                    </div>
+
+                    <div className="grid grid-cols-2 border-t border-slate-100 pt-3 mb-2">
+                      <div className="border-r border-slate-100">
+                        <p className="text-[11px] font-black text-slate-500 mb-1">Daily 참여율</p>
+                        <strong className={`text-lg font-black ${getRateTextClass(dailyRate)}`}>{dailyRate}%</strong>
+                      </div>
+                      <div className="pl-3">
+                        <p className="text-[11px] font-black text-slate-500 mb-1">관리 필요</p>
+                        <strong className={`text-lg font-black ${getNeedTextClass(needCount)}`}>{needCount}명</strong>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between border-t border-slate-100 pt-3">
+                      <span className="text-xs font-black text-blue-600">명단 · 성적 · 출결</span>
+                      <ChevronRight size={16} className="text-blue-600 group-hover:translate-x-1 transition-transform" />
+                    </div>
+
+                    <div className="absolute top-3 right-3 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button onClick={(e) => handleMoveClass(e, index, -1)} className="p-1 text-slate-400 hover:text-blue-600 bg-white/80 rounded" title="위로 이동"><ChevronLeft size={12} className="rotate-90" /></button>
+                      <button onClick={(e) => handleMoveClass(e, index, 1)} className="p-1 text-slate-400 hover:text-blue-600 bg-white/80 rounded" title="아래로 이동"><ChevronRight size={12} className="rotate-90" /></button>
+                      <button onClick={(e) => handleEditClass(e, clsName)} className="p-1 text-slate-400 hover:text-blue-600 bg-white/80 rounded" title="이름 수정"><PenTool size={12} /></button>
+                      <button onClick={(e) => handleDeleteClass(e, clsName)} className="p-1 text-slate-400 hover:text-rose-600 bg-white/80 rounded" title="반 삭제"><Trash2 size={12} /></button>
+                    </div>
+                  </div>
+                );
+              })}
+
+              <form
+                onSubmit={handleAddClass}
+                className="bg-white/55 backdrop-blur-xl rounded-2xl border-2 border-dashed border-blue-200 shadow-[0_10px_28px_rgba(37,99,235,0.06)] p-4 flex flex-col items-center justify-center text-center min-h-[205px]"
+              >
+                <div className="w-14 h-14 rounded-full bg-white shadow-lg flex items-center justify-center text-blue-600 mb-3"><Plus size={28} /></div>
+                <h3 className="text-lg font-black text-blue-700 mb-2">새 반 추가</h3>
+                <p className="text-xs font-bold text-slate-500 mb-4">반 정보를 입력하고 등록하세요.</p>
+
+                <div className="w-full flex gap-2">
+                  <input
+                    type="text"
+                    value={newClassName}
+                    onChange={(e) => setNewClassName(e.target.value)}
+                    placeholder="반 이름"
+                    className="w-full px-3 py-2 rounded-xl border border-blue-100 bg-white/80 outline-none focus:ring-2 focus:ring-blue-400 text-sm font-bold"
+                  />
+                  <button type="submit" className="px-3 py-2 rounded-xl bg-blue-600 text-white text-sm font-black hover:bg-blue-700 transition-colors">
+                    추가
+                  </button>
+                </div>
+              </form>
+            </div>
+          </section>
+        </main>
       </div>
     );
   }
+
 
   return <ClassDashboard academicYear={academicYear} className={selectedClass} classes={classes} onBack={() => setSelectedClass(null)} students={students} setStudents={setStudents} isXlsxReady={isXlsxReady} />;
 }
