@@ -30,6 +30,18 @@ const ATTENDANCE_OPTIONS = ['출석', 'Live', '결석', '조퇴', '지각', '사
 const ATTENDANCE_SESSION_KEY = 'am';
 const ATTENDANCE_SESSION_LABEL = '출석확인';
 const ATTENDANCE_PRESENT_STATUSES = ['출석', 'Live'];
+const ATTENDANCE_ABSENT_STATUSES = ['결석'];
+const ATTENDANCE_NEUTRAL_STATUSES = [
+  '조퇴', '지각', '사전통보', '병결', '알바', '가족사정', '개인사정',
+  '컨디션 난조', '학교', '시험', '과제', '실습', '타학원', '독서실', '기타'
+];
+const getAttendanceValueType = (value) => {
+  const status = String(value ?? '').trim();
+  if (ATTENDANCE_PRESENT_STATUSES.includes(status)) return 'present';
+  if (ATTENDANCE_ABSENT_STATUSES.includes(status)) return 'absent';
+  if (ATTENDANCE_NEUTRAL_STATUSES.includes(status)) return 'neutral';
+  return 'empty';
+};
 const MONTHS = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8월', '9월', '10월', '11월', '12월'];
 const DISPLAY_MONTHS = MONTHS.slice(0, 11); 
 
@@ -106,7 +118,9 @@ const generateEmptyMonthlyStudyTime = () => {
 
 const generateEmptyMonthlyDaily = () => {
     const data = {};
-    MONTHS.forEach(m => { data[m] = Array.from({length: 31}, () => ({ t1: '', t2: '' })); });
+    MONTHS.forEach(m => {
+        data[m] = Array.from({ length: 31 }, () => ({ t1: '', t2: '', math: '' }));
+    });
     return data;
 }
 
@@ -448,14 +462,46 @@ export default function App() {
   };
 
   const homeMonth = `${new Date().getMonth() + 1}월`;
-  const homeTodayIndex = Math.max(0, Math.min(30, new Date().getDate() - 1));
-  const homeCurrentWeek = Math.max(1, Math.min(5, Math.ceil(new Date().getDate() / 7)));
+  const [homeSelectedMonth, setHomeSelectedMonth] = useState(homeMonth);
+  const [homeActiveTab, setHomeActiveTab] = useState('home');
+
+  const getHomeClassSavedSettings = (clsName) => {
+    if (!clsName || clsName === '대구캠퍼스 전체') return null;
+
+    try {
+      const saved = localStorage.getItem(`academyClassSettings_${academicYear}_${clsName}`);
+      return saved ? JSON.parse(saved) : null;
+    } catch (error) {
+      return null;
+    }
+  };
+
+  const getHomeAttendanceExcludedDays = (clsName, month = homeSelectedMonth) => {
+    return getHomeClassSavedSettings(clsName)?.attendanceSettings?.[month]?.excludedDays || [];
+  };
+
+  const getHomeDailyExcludedDays = (clsName, month = homeSelectedMonth) => {
+    return getHomeClassSavedSettings(clsName)?.dailySettings?.[month]?.excludedDays || [];
+  };
+
+  const getHomeMonthDayLimit = (month = homeSelectedMonth) => {
+    const currentMonth = `${new Date().getMonth() + 1}월`;
+
+    if (month === currentMonth) {
+      return Math.max(1, Math.min(31, new Date().getDate()));
+    }
+
+    return 31;
+  };
+
+  const homeTodayIndex = Math.max(0, Math.min(30, getHomeMonthDayLimit(homeSelectedMonth) - 1));
+  const homeCurrentWeek = Math.max(1, Math.min(5, Math.ceil(getHomeMonthDayLimit(homeSelectedMonth) / 7)));
 
   const classStats = useMemo(() => {
     const stats = { '대구캠퍼스 전체': students.length };
     classes.forEach(cls => stats[cls] = 0);
     students.forEach(s => {
-      const cNames = s.classNames || [s.className];
+      const cNames = Array.isArray(s.classNames) ? s.classNames : [s.className].filter(Boolean);
       cNames.forEach(cName => {
         if (stats[cName] !== undefined) stats[cName]++;
       });
@@ -465,45 +511,66 @@ export default function App() {
 
   const getHomeClassStudents = (clsName) => {
     if (clsName === '대구캠퍼스 전체') return students;
-    return students.filter(s => (s.classNames || [s.className]).includes(clsName));
+
+    return students.filter(s => {
+      const classList = Array.isArray(s.classNames)
+        ? s.classNames
+        : [s.className].filter(Boolean);
+
+      return classList.includes(clsName);
+    });
   };
 
-  const getHomeAttendanceRateForStudent = (student, month = homeMonth) => {
-    const monthData = student.attendance?.[month];
-    if (!monthData) return 0;
-
+  const getHomeAttendanceRateForStudent = (student, month = homeSelectedMonth) => {
+    const monthData = student.attendance?.[month] || {};
     const attendanceArray = monthData[ATTENDANCE_SESSION_KEY] || monthData.am || [];
-    const checkedDays = attendanceArray.filter(v => v !== '' && v !== null && v !== undefined);
-    if (checkedDays.length === 0) return 0;
+    const dayLimit = getHomeMonthDayLimit(month);
 
-    const presentDays = checkedDays.filter(v => ATTENDANCE_PRESENT_STATUSES.includes(v)).length;
-    return Math.round((presentDays / checkedDays.length) * 100);
+    let denominator = 0;
+    let presentCount = 0;
+
+    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      const value = attendanceArray?.[dayIndex];
+      const type = getAttendanceValueType(value);
+
+      if (type === 'neutral') continue;
+
+      denominator += 1;
+      if (type === 'present') presentCount += 1;
+    }
+
+    return denominator === 0 ? 0 : Math.round((presentCount / denominator) * 100);
   };
 
-  const getHomeDailyRateForStudent = (student, month = homeMonth) => {
+  const getHomeDailyRateForStudent = (student, month = homeSelectedMonth) => {
     const dailyArray = student.dailyRecords?.[month] || [];
-    const totalDays = dailyArray.length || 31;
+    const dayLimit = getHomeMonthDayLimit(month);
 
-    const participatedDays = dailyArray.filter(d => {
-      if (!d) return false;
-      const t1 = String(d.t1 ?? '').trim();
-      const t2 = String(d.t2 ?? '').trim();
-      return t1 !== '' || t2 !== '';
-    }).length;
+    let denominator = 0;
+    let participatedCount = 0;
 
-    return Math.round((participatedDays / totalDays) * 100);
+    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      denominator += 1;
+      const day = dailyArray[dayIndex] || {};
+      const t1 = String(day?.t1 ?? '').trim();
+      const t2 = String(day?.t2 ?? '').trim();
+      const math = String(day?.math ?? '').trim();
+      if (t1 !== '' || t2 !== '' || math !== '') participatedCount += 1;
+    }
+
+    return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
   };
 
-  const getHomeWeeklyMissingForStudent = (student) => {
-    const weeklyKey = `${homeMonth}_w${homeCurrentWeek}`;
+  const getHomeWeeklyMissingForStudent = (student, month = homeSelectedMonth) => {
+    const weeklyKey = `${month}_w${homeCurrentWeek}`;
     const eng = student.scores?.weeklyEnglish?.[weeklyKey] ?? student.scores?.weeklyEnglish?.[`w${homeCurrentWeek}`];
     const math = student.scores?.weeklyMath?.[weeklyKey] ?? student.scores?.weeklyMath?.[`w${homeCurrentWeek}`];
 
     return String(eng ?? '').trim() === '' && String(math ?? '').trim() === '';
   };
 
-  const getHomeStudyWeekMins = (student) => {
-    const daily = student.studyTime?.[homeMonth] || [];
+  const getHomeStudyWeekMins = (student, month = homeSelectedMonth) => {
+    const daily = student.studyTime?.[month] || [];
     const start = (homeCurrentWeek - 1) * 7;
     const end = Math.min(start + 7, daily.length);
 
@@ -519,19 +586,64 @@ export default function App() {
 
   const getHomeClassAttendanceRate = (clsName) => {
     const targetStudents = getHomeClassStudents(clsName);
-    return getAverageRate(targetStudents.map(s => getHomeAttendanceRateForStudent(s)));
+    if (targetStudents.length === 0) return 0;
+
+    const dayLimit = getHomeMonthDayLimit(homeSelectedMonth);
+    const excluded = clsName === '대구캠퍼스 전체' ? [] : getHomeAttendanceExcludedDays(clsName, homeSelectedMonth);
+    let denominator = 0;
+    let presentTotal = 0;
+
+    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      if (excluded.includes(dayIndex)) continue;
+
+      targetStudents.forEach(student => {
+        const monthData = student.attendance?.[homeSelectedMonth] || {};
+        const attendanceArray = monthData[ATTENDANCE_SESSION_KEY] || monthData.am || [];
+        const value = attendanceArray?.[dayIndex];
+        const type = getAttendanceValueType(value);
+
+        if (type === 'neutral') return;
+
+        denominator += 1;
+        if (type === 'present') presentTotal += 1;
+      });
+    }
+
+    return denominator === 0 ? 0 : Math.round((presentTotal / denominator) * 100);
   };
 
   const getHomeClassDailyRate = (clsName) => {
     const targetStudents = getHomeClassStudents(clsName);
-    return getAverageRate(targetStudents.map(s => getHomeDailyRateForStudent(s)));
+    if (targetStudents.length === 0) return 0;
+
+    const dayLimit = getHomeMonthDayLimit(homeSelectedMonth);
+    const excluded = clsName === '대구캠퍼스 전체' ? [] : getHomeDailyExcludedDays(clsName, homeSelectedMonth);
+    let denominator = 0;
+    let participatedCount = 0;
+
+    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      if (excluded.includes(dayIndex)) continue;
+
+      targetStudents.forEach(student => {
+        denominator += 1;
+        const dailyArray = student.dailyRecords?.[homeSelectedMonth] || [];
+        const day = dailyArray[dayIndex] || {};
+        const t1 = String(day?.t1 ?? '').trim();
+        const t2 = String(day?.t2 ?? '').trim();
+        const math = String(day?.math ?? '').trim();
+        if (t1 !== '' || t2 !== '' || math !== '') participatedCount += 1;
+      });
+    }
+
+    return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
   };
 
   const getHomeClassNeedCount = (clsName) => {
     const targetStudents = getHomeClassStudents(clsName);
-    return targetStudents.filter(s => {
-      const attendanceRate = getHomeAttendanceRateForStudent(s);
-      const dailyRate = getHomeDailyRateForStudent(s);
+
+    return targetStudents.filter(student => {
+      const attendanceRate = getHomeAttendanceRateForStudent(student, homeSelectedMonth);
+      const dailyRate = getHomeDailyRateForStudent(student, homeSelectedMonth);
       return attendanceRate <= 70 || dailyRate <= 70;
     }).length;
   };
@@ -550,7 +662,7 @@ export default function App() {
   };
 
   const getHomeStudentLabel = (student) => {
-    const classNames = student.classNames || [student.className];
+    const classNames = Array.isArray(student.classNames) ? student.classNames : [student.className].filter(Boolean);
     return `${student.name}${classNames?.[0] ? `(${classNames[0]})` : ''}`;
   };
 
@@ -564,39 +676,72 @@ export default function App() {
   };
 
   const homeDailyMissingStudents = students.filter(s => {
-    const todayDaily = s.dailyRecords?.[homeMonth]?.[homeTodayIndex];
+    const todayDaily = s.dailyRecords?.[homeSelectedMonth]?.[homeTodayIndex];
     if (!todayDaily) return true;
 
     const t1 = String(todayDaily.t1 ?? '').trim();
     const t2 = String(todayDaily.t2 ?? '').trim();
+    const math = String(todayDaily.math ?? '').trim();
 
-    return t1 === '' && t2 === '';
+    return t1 === '' && t2 === '' && math === '';
   });
 
-  const homeWeeklyMissingStudents = students.filter(s => getHomeWeeklyMissingForStudent(s));
+  const homeWeeklyMissingStudents = students.filter(s => getHomeWeeklyMissingForStudent(s, homeSelectedMonth));
 
   const homeLowAttendanceStudents = students.filter(s => {
-    return getHomeAttendanceRateForStudent(s) < 80;
+    return getHomeAttendanceRateForStudent(s, homeSelectedMonth) < 80;
   });
 
   const homeLowStudyTimeStudents = students.filter(s => {
-    const weekMins = getHomeStudyWeekMins(s);
+    const weekMins = getHomeStudyWeekMins(s, homeSelectedMonth);
     return weekMins > 0 && weekMins < 600;
   });
 
   const homeNeedStudents = students.filter(s => {
-    const attendanceRate = getHomeAttendanceRateForStudent(s);
-    const dailyRate = getHomeDailyRateForStudent(s);
+    const attendanceRate = getHomeAttendanceRateForStudent(s, homeSelectedMonth);
+    const dailyRate = getHomeDailyRateForStudent(s, homeSelectedMonth);
     return attendanceRate <= 70 || dailyRate <= 70;
   });
 
   const homeGraphColors = ['#16a34a', '#2563eb', '#06b6d4', '#7c3aed', '#22c55e', '#f43f5e', '#f97316', '#0ea5e9'];
   const getHomeGraphColor = (index) => homeGraphColors[index % homeGraphColors.length];
 
-  const getHomeSparkPoints = (rate, index) => {
-    const numericRate = Number(rate || 0);
+  const getHomeClassDailyAttendanceTrend = (clsName, month = homeSelectedMonth) => {
+    const targetStudents = getHomeClassStudents(clsName);
+    const dayLimit = getHomeMonthDayLimit(month);
+    const excluded = clsName === '대구캠퍼스 전체' ? [] : getHomeAttendanceExcludedDays(clsName, month);
+    const trend = [];
 
-    if (numericRate <= 0) {
+    if (targetStudents.length === 0) return [0];
+
+    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      if (excluded.includes(dayIndex)) continue;
+
+      let denominator = 0;
+      let presentCount = 0;
+
+      targetStudents.forEach(student => {
+        const monthData = student.attendance?.[month] || {};
+        const attendanceArray = monthData?.[ATTENDANCE_SESSION_KEY] || monthData?.am || [];
+        const value = attendanceArray?.[dayIndex];
+        const type = getAttendanceValueType(value);
+
+        if (type === 'neutral') return;
+
+        denominator += 1;
+        if (type === 'present') presentCount += 1;
+      });
+
+      if (denominator > 0) trend.push(Math.round((presentCount / denominator) * 100));
+    }
+
+    return trend.length ? trend : [0];
+  };
+
+  const getHomeSparkPointsFromTrend = (trend = []) => {
+    const values = trend.length ? trend : [0];
+
+    if (values.every(v => Number(v || 0) <= 0)) {
       return Array.from({ length: 12 }, (_, i) => {
         const x = 6 + i * 12;
         const y = 40;
@@ -604,17 +749,15 @@ export default function App() {
       }).join(' ');
     }
 
-    const base = Math.max(20, Math.min(95, numericRate));
-    const values = Array.from({ length: 12 }, (_, i) => {
-      const wave = Math.sin((i + index) * 0.9) * 5;
-      const lift = i * 1.2;
-      const noise = ((i * 7 + index * 11) % 6) - 2;
-      return Math.max(15, Math.min(98, base - 18 + lift + wave + noise));
+    const maxPoints = 12;
+    const sampled = Array.from({ length: maxPoints }, (_, i) => {
+      const sourceIndex = Math.round((i / (maxPoints - 1)) * (values.length - 1));
+      return Number(values[sourceIndex] || 0);
     });
 
-    return values.map((v, i) => {
+    return sampled.map((v, i) => {
       const x = 6 + i * 12;
-      const y = 44 - (v / 100) * 34;
+      const y = 44 - (Math.max(0, Math.min(100, v)) / 100) * 34;
       return `${x},${y}`;
     }).join(' ');
   };
@@ -641,37 +784,39 @@ export default function App() {
     needCount: homeNeedStudents.length
   };
 
+  const homeTodayText = new Date().toISOString().slice(0, 10).replaceAll('-', '.');
+
   const homeNotices = [
     {
       type: '공지',
       color: 'blue',
-      text: `${homeMonth} 기준 전체 학생 ${homeDashboardStats.totalStudents}명 운영 중입니다.`,
-      date: new Date().toISOString().slice(0, 10).replaceAll('-', '.')
+      text: `${homeSelectedMonth} 기준 전체 학생 ${homeDashboardStats.totalStudents}명 운영 중입니다.`,
+      date: homeTodayText
     },
     {
       type: '일정',
       color: 'green',
-      text: `${homeMonth} Daily 참여율은 ${homeDashboardStats.dailyRate}%입니다.`,
-      date: new Date().toISOString().slice(0, 10).replaceAll('-', '.')
+      text: `${homeSelectedMonth} Daily 참여율은 ${homeDashboardStats.dailyRate}%입니다.`,
+      date: homeTodayText
     },
     {
       type: worstClass && worstClass.rate < 80 ? '경고' : '공지',
       color: worstClass && worstClass.rate < 80 ? 'red' : 'blue',
       text: worstClass ? `${worstClass.clsName} 반 출석률 ${worstClass.rate}%입니다.` : '반별 출석률 데이터가 없습니다.',
-      date: new Date().toISOString().slice(0, 10).replaceAll('-', '.')
+      date: homeTodayText
     },
     {
       type: homeNeedStudents.length >= 5 ? '경고' : '알림',
       color: homeNeedStudents.length >= 5 ? 'red' : 'green',
       text: `관리 필요 학생이 ${homeNeedStudents.length}명입니다.`,
-      date: new Date().toISOString().slice(0, 10).replaceAll('-', '.')
+      date: homeTodayText
     }
   ];
 
   const homeManagementAlerts = [
     {
       title: 'Daily 미응시',
-      desc: '오늘 Daily를 응시하지 않은 학생',
+      desc: `${homeSelectedMonth} ${homeTodayIndex + 1}일 Daily를 응시하지 않은 학생`,
       count: homeDailyMissingStudents.length,
       color: 'red',
       icon: AlertTriangle,
@@ -679,7 +824,7 @@ export default function App() {
     },
     {
       title: 'Weekly 미응시',
-      desc: `이번 주 Weekly를 응시하지 않은 학생`,
+      desc: `${homeSelectedMonth} ${homeCurrentWeek}주차 Weekly를 응시하지 않은 학생`,
       count: homeWeeklyMissingStudents.length,
       color: 'orange',
       icon: Calendar,
@@ -687,7 +832,7 @@ export default function App() {
     },
     {
       title: '출석률 80% 미만',
-      desc: `${homeMonth} 출석률이 80% 미만인 학생`,
+      desc: `${homeSelectedMonth} 출석률이 80% 미만인 학생`,
       count: homeLowAttendanceStudents.length,
       color: 'orange',
       icon: AlertTriangle,
@@ -695,7 +840,7 @@ export default function App() {
     },
     {
       title: '학습시간 저조',
-      desc: '이번 주 학습시간이 기준 이하인 학생',
+      desc: `${homeSelectedMonth} ${homeCurrentWeek}주차 학습시간이 기준 이하인 학생`,
       count: homeLowStudyTimeStudents.length,
       color: 'purple',
       icon: Clock,
@@ -711,12 +856,12 @@ export default function App() {
   };
 
   const homeSideMenus = [
-    { label: '홈', icon: School, active: true },
-    { label: '학생', icon: Users },
-    { label: '분석', icon: BarChart3 },
-    { label: '일정', icon: Calendar },
-    { label: '출결', icon: CalendarCheck },
-    { label: '설정', icon: Settings },
+    { key: 'home', label: '홈', icon: School },
+    { key: 'students', label: '학생', icon: Users },
+    { key: 'attendance', label: '출결', icon: CalendarCheck },
+    { key: 'test', label: '시험', icon: FileText },
+    { key: 'analysis', label: '분석', icon: BarChart3 },
+    { key: 'settings', label: '설정', icon: Settings },
   ];
 
   if (!selectedClass) {
@@ -746,14 +891,15 @@ export default function App() {
           </button>
 
           <nav className="relative z-10 flex flex-col items-center gap-4 w-full px-3 text-white/90">
-            {homeSideMenus.map((menu, idx) => {
+            {homeSideMenus.map((menu) => {
               const Icon = menu.icon;
 
               return (
                 <button
-                  key={idx}
+                  key={menu.key}
+                  onClick={() => setHomeActiveTab(menu.key)}
                   className={`w-full h-[62px] rounded-2xl flex flex-col items-center justify-center gap-1 transition-colors ${
-                    menu.active
+                    homeActiveTab === menu.key
                       ? 'bg-white text-blue-600 shadow-xl'
                       : 'text-white/92 hover:bg-white/15'
                   }`}
@@ -816,7 +962,179 @@ export default function App() {
             </div>
           </div>
 
-          <section className="grid grid-cols-5 gap-4 mb-4">
+          {homeActiveTab !== 'home' && (
+            <section className="bg-white/82 backdrop-blur-xl rounded-2xl border border-blue-100 shadow-[0_12px_35px_rgba(37,99,235,0.08)] p-4 mb-3">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <h2 className="text-xl font-black text-slate-950">
+                    {homeSideMenus.find(menu => menu.key === homeActiveTab)?.label} 요약
+                  </h2>
+                  <p className="text-sm font-bold text-slate-500 mt-1">
+                    {homeSelectedMonth} 기준 전체 홈 화면 요약입니다.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setHomeActiveTab('home')}
+                  className="px-4 py-2 rounded-xl bg-blue-600 text-white text-sm font-black shadow-lg shadow-blue-500/20 hover:bg-blue-700 transition-colors"
+                >
+                  홈으로 돌아가기
+                </button>
+              </div>
+
+              {homeActiveTab === 'students' && (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                  <div className="rounded-2xl bg-blue-50/60 border border-blue-100 p-4">
+                    <p className="text-sm font-black text-slate-600 mb-1">전체 학생 수</p>
+                    <strong className="text-3xl font-black text-blue-600">{homeDashboardStats.totalStudents}명</strong>
+                  </div>
+
+                  <div className="rounded-2xl bg-white border border-blue-100 p-4">
+                    <p className="text-sm font-black text-slate-700 mb-3">반별 학생 수</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      {classes.map(clsName => (
+                        <button
+                          key={clsName}
+                          onClick={() => setSelectedClass(clsName)}
+                          className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm font-black hover:bg-blue-50"
+                        >
+                          <span>{clsName}</span>
+                          <span className="text-blue-600">{classStats[clsName]}명</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {homeActiveTab === 'attendance' && (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                  <div className="rounded-2xl bg-blue-50/60 border border-blue-100 p-4">
+                    <p className="text-sm font-black text-slate-600 mb-1">{homeSelectedMonth} 전체 출석률</p>
+                    <strong className={`text-3xl font-black ${getRateTextClass(homeDashboardStats.attendanceRate)}`}>
+                      {homeDashboardStats.attendanceRate}%
+                    </strong>
+                  </div>
+
+                  <button
+                    onClick={() => showHomeStudentList('출석률 80% 미만 학생', homeLowAttendanceStudents)}
+                    className="rounded-2xl bg-orange-50/70 border border-orange-100 p-4 text-left"
+                  >
+                    <p className="text-sm font-black text-slate-600 mb-1">출석률 80% 미만</p>
+                    <strong className="text-3xl font-black text-orange-500">{homeLowAttendanceStudents.length}명</strong>
+                  </button>
+
+                  <div className="rounded-2xl bg-white border border-blue-100 p-4">
+                    <p className="text-sm font-black text-slate-700 mb-3">반별 출석률</p>
+                    <div className="space-y-2">
+                      {classes.map(clsName => (
+                        <div key={clsName} className="flex items-center justify-between text-sm font-black">
+                          <span>{clsName}</span>
+                          <span className={getRateTextClass(getHomeClassAttendanceRate(clsName))}>
+                            {getHomeClassAttendanceRate(clsName)}%
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {homeActiveTab === 'test' && (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                  <div className="rounded-2xl bg-blue-50/60 border border-blue-100 p-4">
+                    <p className="text-sm font-black text-slate-600 mb-1">{homeSelectedMonth} Daily 참여율</p>
+                    <strong className={`text-3xl font-black ${getRateTextClass(homeDashboardStats.dailyRate)}`}>
+                      {homeDashboardStats.dailyRate}%
+                    </strong>
+                  </div>
+
+                  <button
+                    onClick={() => showHomeStudentList('Daily 미응시 학생', homeDailyMissingStudents)}
+                    className="rounded-2xl bg-red-50/70 border border-red-100 p-4 text-left"
+                  >
+                    <p className="text-sm font-black text-slate-600 mb-1">Daily 미응시</p>
+                    <strong className="text-3xl font-black text-red-500">{homeDailyMissingStudents.length}명</strong>
+                  </button>
+
+                  <button
+                    onClick={() => showHomeStudentList('Weekly 미응시 학생', homeWeeklyMissingStudents)}
+                    className="rounded-2xl bg-orange-50/70 border border-orange-100 p-4 text-left"
+                  >
+                    <p className="text-sm font-black text-slate-600 mb-1">Weekly 미응시</p>
+                    <strong className="text-3xl font-black text-orange-500">{homeWeeklyMissingStudents.length}명</strong>
+                  </button>
+                </div>
+              )}
+
+              {homeActiveTab === 'analysis' && (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                  <div className="rounded-2xl bg-white border border-blue-100 p-4">
+                    <p className="text-sm font-black text-slate-700 mb-3">출석률 최저 반</p>
+                    <strong className="text-2xl font-black text-rose-600">
+                      {worstClass ? `${worstClass.clsName} ${worstClass.rate}%` : '데이터 없음'}
+                    </strong>
+                  </div>
+
+                  <div className="rounded-2xl bg-white border border-blue-100 p-4">
+                    <p className="text-sm font-black text-slate-700 mb-3">Daily 참여율 비교</p>
+                    <div className="space-y-2">
+                      {classes.map(clsName => (
+                        <div key={clsName} className="flex items-center justify-between text-sm font-black">
+                          <span>{clsName}</span>
+                          <span className={getRateTextClass(getHomeClassDailyRate(clsName))}>
+                            {getHomeClassDailyRate(clsName)}%
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => showHomeStudentList('관리 필요 학생', homeNeedStudents)}
+                    className="rounded-2xl bg-red-50/70 border border-red-100 p-4 text-left"
+                  >
+                    <p className="text-sm font-black text-slate-600 mb-1">관리 필요 학생</p>
+                    <strong className="text-3xl font-black text-red-500">{homeNeedStudents.length}명</strong>
+                  </button>
+                </div>
+              )}
+
+              {homeActiveTab === 'settings' && (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                  <div className="rounded-2xl bg-white border border-blue-100 p-4">
+                    <p className="text-sm font-black text-slate-700 mb-2">학년도</p>
+                    <select
+                      value={academicYear}
+                      onChange={e => setAcademicYear(e.target.value)}
+                      className="w-full h-11 px-4 rounded-xl bg-white border border-blue-100 outline-none font-extrabold text-slate-800 cursor-pointer"
+                    >
+                      <option value="2026">2026학년도</option>
+                      <option value="2027">2027학년도</option>
+                      <option value="2028">2028학년도</option>
+                    </select>
+                  </div>
+
+                  <label className="rounded-2xl bg-blue-50/70 border border-blue-100 p-4 cursor-pointer hover:bg-blue-100/60">
+                    <p className="text-sm font-black text-slate-700 mb-1">JSON 복원</p>
+                    <p className="text-xs font-bold text-slate-500">백업 파일을 불러옵니다.</p>
+                    <input type="file" accept=".json" className="hidden" onChange={handleImportJSON} />
+                  </label>
+
+                  <button
+                    onClick={handleExportJSON}
+                    className="rounded-2xl bg-blue-600 text-white p-4 text-left hover:bg-blue-700"
+                  >
+                    <p className="text-sm font-black mb-1">JSON 백업</p>
+                    <p className="text-xs font-bold text-white/80">현재 데이터를 저장합니다.</p>
+                  </button>
+                </div>
+              )}
+            </section>
+          )}
+
+          <section className="grid grid-cols-5 gap-3 mb-3">
             {[
               { title: '총 등록 인원', value: homeDashboardStats.totalStudents, unit: '명', sub: '전체 학생 수', icon: Users, color: 'text-slate-950' },
               { title: '운영 반 수', value: homeDashboardStats.classCount, unit: '개', sub: '현재 운영 중인 반', icon: FileText, color: 'text-slate-950' },
@@ -830,7 +1148,7 @@ export default function App() {
                 <button
                   key={idx}
                   onClick={() => card.title === '관리 필요 학생' ? showHomeStudentList('관리 필요 학생 명단', homeNeedStudents) : null}
-                  className="text-left bg-white/82 backdrop-blur-xl rounded-2xl border border-blue-100 shadow-[0_12px_35px_rgba(37,99,235,0.08)] p-4 flex items-center gap-4 min-h-[112px]"
+                  className="text-left bg-white/82 backdrop-blur-xl rounded-2xl border border-blue-100 shadow-[0_10px_28px_rgba(37,99,235,0.08)] p-3.5 flex items-center gap-3 min-h-[96px]"
                 >
                   <div className="w-14 h-14 min-w-14 rounded-2xl bg-blue-50 flex items-center justify-center text-blue-600 shadow-inner">
                     <Icon size={29} />
@@ -848,10 +1166,10 @@ export default function App() {
             })}
           </section>
 
-          <section className="grid grid-cols-[1.25fr_0.8fr_0.85fr] gap-4 mb-4">
+          <section className="grid grid-cols-[1.25fr_0.8fr_0.85fr] gap-3 mb-3">
             <div
               onClick={() => setSelectedClass('대구캠퍼스 전체')}
-              className="bg-white/78 backdrop-blur-xl rounded-2xl border border-blue-100 shadow-[0_12px_35px_rgba(37,99,235,0.08)] p-5 cursor-pointer group overflow-hidden relative min-h-[300px]"
+              className="bg-white/78 backdrop-blur-xl rounded-2xl border border-blue-100 shadow-[0_12px_35px_rgba(37,99,235,0.08)] p-5 cursor-pointer group overflow-hidden relative min-h-[250px]"
             >
               <div className="absolute right-6 top-8 w-72 h-48 bg-blue-200/30 rounded-full blur-3xl"></div>
 
@@ -901,7 +1219,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="bg-white/78 backdrop-blur-xl rounded-2xl border border-blue-100 shadow-[0_12px_35px_rgba(37,99,235,0.08)] p-5 min-h-[300px]">
+            <div className="bg-white/78 backdrop-blur-xl rounded-2xl border border-blue-100 shadow-[0_10px_28px_rgba(37,99,235,0.08)] p-4 min-h-[220px]">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-black text-slate-950">알림 및 공지</h3>
                 <button
@@ -940,7 +1258,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="bg-white/78 backdrop-blur-xl rounded-2xl border border-blue-100 shadow-[0_12px_35px_rgba(37,99,235,0.08)] p-5 min-h-[300px]">
+            <div className="bg-white/78 backdrop-blur-xl rounded-2xl border border-blue-100 shadow-[0_10px_28px_rgba(37,99,235,0.08)] p-4 min-h-[220px]">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-black text-slate-950">오늘의 관리 알림</h3>
                 <button
@@ -992,7 +1310,24 @@ export default function App() {
           </section>
 
           <section className="relative z-10">
-            <h2 className="text-lg font-black text-slate-900 mb-3">개별 반 현황</h2>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-3">
+                <h2 className="text-lg font-black text-slate-900">개별 반 현황</h2>
+                <span className="text-xs font-bold text-slate-400">
+                  선택 월 기준 출석률 · Daily 참여율
+                </span>
+              </div>
+
+              <select
+                value={homeSelectedMonth}
+                onChange={(e) => setHomeSelectedMonth(e.target.value)}
+                className="h-9 px-3 rounded-xl bg-white/85 border border-blue-100 shadow-sm outline-none text-xs font-black text-slate-700"
+              >
+                {MONTHS.map(month => (
+                  <option key={month} value={month}>{month}</option>
+                ))}
+              </select>
+            </div>
 
             <div className="grid grid-cols-7 gap-3">
               {classes.map((clsName, index) => {
@@ -1000,8 +1335,9 @@ export default function App() {
                 const dailyRate = getHomeClassDailyRate(clsName);
                 const needCount = getHomeClassNeedCount(clsName);
                 const graphColor = getHomeGraphColor(index);
-                const sparkPoints = getHomeSparkPoints(attendanceRate, index);
-                const lastPoint = sparkPoints.split(' ').at(-1)?.split(',')[1] || 20;
+                const attendanceTrend = getHomeClassDailyAttendanceTrend(clsName, homeSelectedMonth);
+                const sparkPoints = getHomeSparkPointsFromTrend(attendanceTrend);
+                const lastPoint = sparkPoints.split(' ').at(-1)?.split(',')[1] || 40;
 
                 return (
                   <div
@@ -1095,11 +1431,15 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   const [activeTab, setActiveTab] = useState('dashboard'); 
   const [activeTestTab, setActiveTestTab] = useState('monthly'); 
   const [activeDailyTab, setActiveDailyTab] = useState('input'); 
+  const [dailySubject, setDailySubject] = useState('english'); 
   const [activeWeeklyTab, setActiveWeeklyTab] = useState('setup'); 
   const [testViewMode, setTestViewMode] = useState('input'); 
   const [activeAttendanceTab, setActiveAttendanceTab] = useState('studyTime'); 
   const [activeStudyTimeTab, setActiveStudyTimeTab] = useState('input'); 
   const [weeklySubject, setWeeklySubject] = useState('english'); 
+  const [activeNeedTab, setActiveNeedTab] = useState('all');
+  const [showTrendAnalysis, setShowTrendAnalysis] = useState(false);
+  const [hoveredTrendIndex, setHoveredTrendIndex] = useState(null);
   
   // Custom Alert/Confirm State
   const [toast, useStateToast] = useState(null);
@@ -1149,40 +1489,69 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   const [batchDailyDate, setBatchDailyDate] = useState(0);
   const [batchDailyT1, setBatchDailyT1] = useState('');
   const [batchDailyT2, setBatchDailyT2] = useState('');
+  const [batchDailyMath, setBatchDailyMath] = useState('');
 
   const handleBatchDailyChange = () => {
     if (selectedStudents.length === 0) { showAlert('일괄 적용할 학생을 선택해주세요.'); return; }
-    showConfirm(`선택한 ${selectedStudents.length}명의 ${dailyMonth} ${Number(batchDailyDate) + 1}일 Daily 성적을 일괄 변경하시겠습니까?`, () => {
+    const subjectLabel = dailySubject === 'math' ? '수학 Daily' : '영어 Daily';
+
+    showConfirm(`선택한 ${selectedStudents.length}명의 ${dailyMonth} ${Number(batchDailyDate) + 1}일 ${subjectLabel} 성적을 일괄 변경하시겠습니까?`, () => {
       setStudents(prev => prev.map(student => {
         if (!selectedStudents.includes(student.id)) return student;
-        const newDaily = [...(student.dailyRecords[dailyMonth] || Array(31).fill({t1:'', t2:''}))];
-        newDaily[batchDailyDate] = { 
-          t1: batchDailyT1 !== '' ? batchDailyT1 : newDaily[batchDailyDate].t1, 
-          t2: batchDailyT2 !== '' ? batchDailyT2 : newDaily[batchDailyDate].t2 
-        };
+
+        const baseDaily = student.dailyRecords?.[dailyMonth] || generateEmptyMonthlyDaily()[dailyMonth];
+        const newDaily = baseDaily.map(d => ({ t1: '', t2: '', math: '', ...(d || {}) }));
+        const currentDay = { t1: '', t2: '', math: '', ...(newDaily[batchDailyDate] || {}) };
+
+        if (dailySubject === 'math') {
+          newDaily[batchDailyDate] = {
+            ...currentDay,
+            math: batchDailyMath !== '' ? batchDailyMath : currentDay.math
+          };
+        } else {
+          newDaily[batchDailyDate] = {
+            ...currentDay,
+            t1: batchDailyT1 !== '' ? batchDailyT1 : currentDay.t1,
+            t2: batchDailyT2 !== '' ? batchDailyT2 : currentDay.t2
+          };
+        }
+
         return { ...student, dailyRecords: { ...student.dailyRecords, [dailyMonth]: newDaily } };
       }));
-      showAlert(`Daily 성적 일괄 적용이 완료되었습니다.`);
+      showAlert(`${subjectLabel} 성적 일괄 적용이 완료되었습니다.`);
       setSelectedStudents([]);
-      setBatchDailyT1(''); setBatchDailyT2('');
+      setBatchDailyT1('');
+      setBatchDailyT2('');
+      setBatchDailyMath('');
     });
   };
 
   const handleResetDaily = (isAllMonth) => {
     if (selectedStudents.length === 0) { showAlert('초기화할 학생을 선택해주세요.'); return; }
-    const targetMsg = isAllMonth ? `${dailyMonth} 전체 Daily` : `${dailyMonth} ${Number(batchDailyDate) + 1}일 Daily`;
+    const subjectLabel = dailySubject === 'math' ? '수학 Daily' : '영어 Daily';
+    const targetMsg = isAllMonth ? `${dailyMonth} 전체 ${subjectLabel}` : `${dailyMonth} ${Number(batchDailyDate) + 1}일 ${subjectLabel}`;
+
     showConfirm(`선택한 ${selectedStudents.length}명의 [${targetMsg}] 데이터를 초기화(삭제)하시겠습니까?`, () => {
       setStudents(prev => prev.map(student => {
         if (!selectedStudents.includes(student.id)) return student;
-        const newDaily = [...(student.dailyRecords[dailyMonth] || Array(31).fill({t1:'', t2:''}))];
+        const baseDaily = student.dailyRecords?.[dailyMonth] || generateEmptyMonthlyDaily()[dailyMonth];
+        const newDaily = baseDaily.map(d => ({ t1: '', t2: '', math: '', ...(d || {}) }));
+
         if (isAllMonth) {
-          return { ...student, dailyRecords: { ...student.dailyRecords, [dailyMonth]: Array(31).fill({t1:'', t2:''}) } };
+          const resetDaily = newDaily.map(day => {
+            if (dailySubject === 'math') return { ...day, math: '' };
+            return { ...day, t1: '', t2: '' };
+          });
+          return { ...student, dailyRecords: { ...student.dailyRecords, [dailyMonth]: resetDaily } };
         } else {
-          newDaily[batchDailyDate] = { t1: '', t2: '' };
+          const currentDay = { t1: '', t2: '', math: '', ...(newDaily[batchDailyDate] || {}) };
+          newDaily[batchDailyDate] = dailySubject === 'math'
+            ? { ...currentDay, math: '' }
+            : { ...currentDay, t1: '', t2: '' };
           return { ...student, dailyRecords: { ...student.dailyRecords, [dailyMonth]: newDaily } };
         }
       }));
-      showAlert(`Daily 성적 초기화가 완료되었습니다.`);
+      showAlert(`${subjectLabel} 초기화가 완료되었습니다.`);
       setSelectedStudents([]);
     });
   };
@@ -2370,7 +2739,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
       const attRate = getAttendanceRateNum(s, dashboardMonth);
       if(attRate > 0 && attRate < 80) alerts.attendance.push({name: s.name, val: `${attRate}%`});
       
-      const dRecords = s.dailyRecords[dashboardMonth] || Array(31).fill({t1:'', t2:''});
+      const dRecords = s.dailyRecords[dashboardMonth] || Array(31).fill({t1:'', t2:'', math:''});
       const dStats = getDailyStats(dRecords, dashboardMonth);
       if(dStats.count > 0 && Number(dStats.avg) < 60) alerts.dailyScore.push({name: s.name, val: `${dStats.avg}점`});
     });
@@ -2403,25 +2772,31 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
       return calculateTotalStudyTime(daily);
   }
 
-  const getDailyStats = (records, month) => {
+  const getDailyStats = (records, month, subject = 'english') => {
     const excluded = dailySettings[month]?.excludedDays || [];
-    let sum = 0, count = 0; 
+    let sum = 0, count = 0;
     const validDays = 31 - excluded.length;
-    const MAX_POSSIBLE = validDays * 2; 
+    const testsPerDay = subject === 'math' ? 1 : 2;
+    const MAX_POSSIBLE = validDays * testsPerDay;
 
     if(!records) return { sum: 0, avg: 0, rate: 0, missedRate: 0, count: 0, MAX_POSSIBLE };
 
-    records.forEach((r, idx) => { 
+    records.forEach((r, idx) => {
         if(!excluded.includes(idx)) {
-            if (r.t1 !== '') { sum += Number(r.t1); count++; } 
-            if (r.t2 !== '') { sum += Number(r.t2); count++; } 
+            const row = { t1: '', t2: '', math: '', ...(r || {}) };
+            if (subject === 'math') {
+                if (row.math !== '') { sum += Number(row.math); count++; }
+            } else {
+                if (row.t1 !== '') { sum += Number(row.t1); count++; }
+                if (row.t2 !== '') { sum += Number(row.t2); count++; }
+            }
         }
     });
-    
-    const avg = count > 0 ? (sum / count).toFixed(1) : 0; 
+
+    const avg = count > 0 ? (sum / count).toFixed(1) : 0;
     const rate = MAX_POSSIBLE > 0 ? Math.round((count / MAX_POSSIBLE) * 100) : 0;
     const missedRate = MAX_POSSIBLE > 0 ? Math.round(((MAX_POSSIBLE - count) / MAX_POSSIBLE) * 100) : 0;
-    
+
     return { sum, avg, rate, missedRate, count, MAX_POSSIBLE };
   };
 
@@ -2492,7 +2867,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
       MONTHS.forEach((m, idx) => {
           if (idx < startIdx) return;
-          const dRecords = student.dailyRecords[m] || Array(31).fill({t1:'', t2:''});
+          const dRecords = student.dailyRecords[m] || Array(31).fill({t1:'', t2:'', math:''});
           const stats = getDailyStats(dRecords, m);
           totalSum += stats.sum; totalCount += stats.count; totalMax += stats.MAX_POSSIBLE;
       });
@@ -2503,23 +2878,32 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   }
 
   const classAvgAttendance = useMemo(() => {
-    let totalDays = 0, attendedDays = 0;
+    if (classStudents.length === 0) return 0;
+
     const excluded = attendanceSettings[attendanceMonth]?.excludedDays || [];
+    const currentMonth = `${new Date().getMonth() + 1}월`;
+    const dayLimit = attendanceMonth === currentMonth
+      ? Math.max(1, Math.min(31, new Date().getDate()))
+      : 31;
 
-    classStudents.forEach(s => {
-      const attendanceData = getUnifiedAttendanceArray(s.attendance?.[attendanceMonth] || {});
-      for(let i=0; i<31; i++) {
-          if(!excluded.includes(i)) {
-              const value = attendanceData[i];
-              if (value !== '') {
-                  totalDays++;
-                  if (isAttendancePresent(value)) attendedDays++;
-              }
-          }
-      }
-    });
+    let denominator = 0;
+    let presentCount = 0;
 
-    return totalDays === 0 ? 0 : Math.round((attendedDays / totalDays) * 100);
+    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      if (excluded.includes(dayIndex)) continue;
+
+      classStudents.forEach(student => {
+        const attendanceData = getUnifiedAttendanceArray(student.attendance?.[attendanceMonth] || {});
+        const type = getAttendanceValueType(attendanceData?.[dayIndex]);
+
+        if (type === 'neutral') return;
+
+        denominator += 1;
+        if (type === 'present') presentCount += 1;
+      });
+    }
+
+    return denominator === 0 ? 0 : Math.round((presentCount / denominator) * 100);
   }, [classStudents, attendanceMonth, attendanceSettings]);
 
   const classAvgStudyTime = useMemo(() => {
@@ -2533,14 +2917,442 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   const dailyClassStats = useMemo(() => {
     let totalSum = 0, totalCount = 0, totalMax = 0;
     classStudents.forEach(s => {
-        const dRecords = s.dailyRecords[dailyMonth] || Array(31).fill({t1:'', t2:''});
-        const stats = getDailyStats(dRecords, dailyMonth);
+        const dRecords = s.dailyRecords[dailyMonth] || Array(31).fill({t1:'', t2:'', math:''});
+        const stats = getDailyStats(dRecords, dailyMonth, dailySubject);
         totalSum += stats.sum; totalCount += stats.count; totalMax += stats.MAX_POSSIBLE;
     });
     const avgScore = totalCount > 0 ? (totalSum / totalCount).toFixed(1) : 0;
     const avgRate = totalMax > 0 ? Math.round((totalCount / totalMax) * 100) : 0;
     return { avgScore, avgRate };
-  }, [classStudents, dailyMonth, dailySettings]);
+  }, [classStudents, dailyMonth, dailySettings, dailySubject]);
+
+
+  const getDashboardPrevMonth = (month) => {
+    const index = MONTHS.indexOf(month);
+    if (index <= 0) return null;
+    return MONTHS[index - 1];
+  };
+
+  const formatDashboardDelta = (current, prev, suffix = '') => {
+    const currentNum = Number(current);
+    const prevNum = Number(prev);
+
+    if (!Number.isFinite(currentNum) || !Number.isFinite(prevNum) || prevNum <= 0) {
+      return {
+        text: '비교 데이터 없음',
+        className: 'text-slate-400'
+      };
+    }
+
+    const diff = Number((currentNum - prevNum).toFixed(1));
+    const isUp = diff >= 0;
+
+    return {
+      text: `${isUp ? '▲' : '▼'} ${Math.abs(diff)}${suffix} (전월 대비)`,
+      className: isUp ? 'text-emerald-600' : 'text-rose-600'
+    };
+  };
+
+  const getClassAttendanceRateForMonth = (month = dashboardMonth) => {
+    if (classStudents.length === 0) return 0;
+
+    const excluded = attendanceSettings[month]?.excludedDays || [];
+    const dayLimit = getClassMonthDayLimit(month);
+
+    let denominator = 0;
+    let presentCount = 0;
+
+    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      if (excluded.includes(dayIndex)) continue;
+
+      classStudents.forEach(student => {
+        const attendanceData = getUnifiedAttendanceArray(student.attendance?.[month] || {});
+        const type = getAttendanceValueType(attendanceData?.[dayIndex]);
+
+        if (type === 'neutral') return;
+
+        denominator += 1;
+
+        if (type === 'present') {
+          presentCount += 1;
+        }
+      });
+    }
+
+    return denominator === 0 ? 0 : Math.round((presentCount / denominator) * 100);
+  };
+
+  const getClassDailyRateForMonth = (month = dashboardMonth, subject = 'all') => {
+    if (classStudents.length === 0) return 0;
+    const excluded = dailySettings[month]?.excludedDays || [];
+    const dayLimit = getClassMonthDayLimit ? getClassMonthDayLimit(month) : 31;
+    let denominator = 0;
+    let participatedCount = 0;
+
+    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      if (excluded.includes(dayIndex)) continue;
+      classStudents.forEach(student => {
+        denominator += 1;
+        const dRecords = student.dailyRecords?.[month] || [];
+        const row = { t1: '', t2: '', math: '', ...(dRecords[dayIndex] || {}) };
+        const hasEnglish = String(row.t1 ?? '').trim() !== '' || String(row.t2 ?? '').trim() !== '';
+        const hasMath = String(row.math ?? '').trim() !== '';
+        if (subject === 'math' ? hasMath : subject === 'english' ? hasEnglish : (hasEnglish || hasMath)) {
+          participatedCount += 1;
+        }
+      });
+    }
+
+    return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
+  };
+
+  const getClassDailyAvgScoreForMonth = (month = dashboardMonth, subject = dailySubject) => {
+    let totalSum = 0;
+    let totalCount = 0;
+
+    classStudents.forEach(student => {
+      const dRecords = student.dailyRecords?.[month] || Array(31).fill({ t1: '', t2: '', math: '' });
+      const stats = getDailyStats(dRecords, month, subject);
+      totalSum += stats.sum;
+      totalCount += stats.count;
+    });
+
+    return totalCount > 0 ? Number((totalSum / totalCount).toFixed(1)) : 0;
+  };
+
+  const getStudentMonthlyScoreValues = (student, month = dashboardMonth) => {
+    const monthly = student.scores?.monthly?.[month] || {};
+    const totalScore = Number(monthly?.total?.score || 0);
+    const englishScore = Number(monthly?.english?.score || 0);
+    const mathScore = Number(monthly?.math?.score || 0);
+
+    // total 점수가 있으면 total만 사용
+    if (Number.isFinite(totalScore) && totalScore > 0) {
+      return [totalScore];
+    }
+
+    // 점수 없는 학생은 평균 계산에서 제외
+    return [englishScore, mathScore].filter(value => Number.isFinite(value) && value > 0);
+  };
+
+  const getClassAvgMonthlyScoreForMonth = (month = dashboardMonth) => {
+    const values = classStudents.flatMap(student => getStudentMonthlyScoreValues(student, month));
+
+    if (values.length === 0) return 0;
+
+    return Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(1));
+  };
+
+  
+  const getClassMonthDayLimit = (month = dashboardMonth) => {
+    const currentMonth = `${new Date().getMonth() + 1}월`;
+
+    // 현재 월은 오늘 날짜까지만 계산
+    if (month === currentMonth) {
+      return Math.max(1, Math.min(31, new Date().getDate()));
+    }
+
+    // 과거 월은 전체 날짜 기준
+    return 31;
+  };
+
+  const getClassAttendanceRate = (month = dashboardMonth) => {
+    return getClassAttendanceRateForMonth(month);
+  };
+
+  const getClassDailyRate = (month = dashboardMonth) => {
+    if (classStudents.length === 0) return 0;
+    const excluded = dailySettings[month]?.excludedDays || [];
+    const dayLimit = getClassMonthDayLimit(month);
+    let denominator = 0;
+    let participatedCount = 0;
+
+    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      if (excluded.includes(dayIndex)) continue;
+      classStudents.forEach(student => {
+        denominator += 1;
+        const records = student.dailyRecords?.[month] || [];
+        const row = { t1: '', t2: '', math: '', ...(records[dayIndex] || {}) };
+        if (String(row.t1 ?? '').trim() !== '' || String(row.t2 ?? '').trim() !== '' || String(row.math ?? '').trim() !== '') {
+          participatedCount += 1;
+        }
+      });
+    }
+
+    return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
+  };
+
+const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
+    const excluded = attendanceSettings[month]?.excludedDays || [];
+    const attendanceData = getUnifiedAttendanceArray(student.attendance?.[month] || {});
+    const dayLimit = getClassMonthDayLimit(month);
+
+    let denominator = 0;
+    let presentCount = 0;
+
+    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      if (excluded.includes(dayIndex)) continue;
+
+      const type = getAttendanceValueType(attendanceData?.[dayIndex]);
+
+      // 조퇴/지각/사전통보/병결 등 중립 유형은 출석률 계산 제외
+      if (type === 'neutral') continue;
+
+      // 출석/Live, 결석, 빈 값은 정상 출석일 기준 분모 포함
+      denominator += 1;
+
+      if (type === 'present') {
+        presentCount += 1;
+      }
+    }
+
+    return denominator === 0 ? 0 : Math.round((presentCount / denominator) * 100);
+  };
+
+  const getClassStudentDailyRate = (student, month = dashboardMonth, subject = 'all') => {
+    const records = student.dailyRecords?.[month] || Array(31).fill({ t1: '', t2: '', math: '' });
+    const excluded = dailySettings[month]?.excludedDays || [];
+    const dayLimit = getClassMonthDayLimit ? getClassMonthDayLimit(month) : 31;
+    let denominator = 0;
+    let participatedCount = 0;
+
+    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      if (excluded.includes(dayIndex)) continue;
+      denominator += 1;
+      const row = { t1: '', t2: '', math: '', ...(records[dayIndex] || {}) };
+      const hasEnglish = String(row.t1 ?? '').trim() !== '' || String(row.t2 ?? '').trim() !== '';
+      const hasMath = String(row.math ?? '').trim() !== '';
+      if (subject === 'math' ? hasMath : subject === 'english' ? hasEnglish : (hasEnglish || hasMath)) {
+        participatedCount += 1;
+      }
+    }
+
+    return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
+  };
+
+  const getClassStudentAvgScore = (student, month = dashboardMonth) => {
+    const monthly = student.scores?.monthly?.[month];
+    const totalScore = Number(monthly?.total?.score || 0);
+    const englishScore = Number(monthly?.english?.score || 0);
+    const mathScore = Number(monthly?.math?.score || 0);
+
+    if (totalScore > 0) return Math.round(totalScore);
+
+    const values = [englishScore, mathScore].filter(value => value > 0);
+    return values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : 0;
+  };
+
+  const getClassStudentWeekStudyMins = (student, month = dashboardMonth) => {
+    const currentMonth = `${new Date().getMonth() + 1}월`;
+    const dayLimit = month === currentMonth ? Math.max(1, Math.min(31, new Date().getDate())) : 31;
+    const currentWeek = Math.max(1, Math.min(5, Math.ceil(dayLimit / 7)));
+    const daily = student.studyTime?.[month] || [];
+    const start = (currentWeek - 1) * 7;
+    const end = Math.min(start + 7, daily.length);
+
+    return daily.slice(start, end).reduce((sum, day) => {
+      return sum + parseTimeDiffToMins(day?.in, day?.out);
+    }, 0);
+  };
+
+  const getClassAvgStudyHoursForMonth = (month = dashboardMonth) => {
+    if (classStudents.length === 0) return '0.0';
+
+    const totalMins = classStudents.reduce((sum, student) => {
+      return sum + getClassStudentWeekStudyMins(student, month);
+    }, 0);
+
+    return ((totalMins / classStudents.length) / 60).toFixed(1);
+  };
+
+  const getNeedSeverityByRate = (rate) => {
+    const value = Number(rate || 0);
+    if (value <= 50) return { key: 'danger', label: '위험', className: 'bg-red-50 text-red-600 border-red-100' };
+    if (value <= 60) return { key: 'warning', label: '경고', className: 'bg-orange-50 text-orange-600 border-orange-100' };
+    if (value <= 70) return { key: 'caution', label: '주의', className: 'bg-yellow-50 text-yellow-600 border-yellow-100' };
+    return null;
+  };
+
+  const getScoreSeverityByGap = (gap) => {
+    const value = Number(gap || 0);
+    if (value >= 30) return { key: 'danger', label: '위험', className: 'bg-red-50 text-red-600 border-red-100' };
+    if (value >= 20) return { key: 'warning', label: '경고', className: 'bg-orange-50 text-orange-600 border-orange-100' };
+    if (value >= 10) return { key: 'caution', label: '주의', className: 'bg-yellow-50 text-yellow-600 border-yellow-100' };
+    return null;
+  };
+
+  const getStudySeverityByRatio = (ratio) => {
+    const value = Number(ratio || 0);
+    if (value < 60) return { key: 'danger', label: '위험', className: 'bg-red-50 text-red-600 border-red-100' };
+    if (value < 80) return { key: 'warning', label: '경고', className: 'bg-orange-50 text-orange-600 border-orange-100' };
+    if (value < 100) return { key: 'caution', label: '주의', className: 'bg-yellow-50 text-yellow-600 border-yellow-100' };
+    return null;
+  };
+
+  const getClassStudentMonthlyScore = (student, month = dashboardMonth) => {
+    const values = getStudentMonthlyScoreValues(student, month);
+
+    if (values.length === 0) return 0;
+
+    return Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(1));
+  };
+
+  const getClassMonthlyScoreAverage = (month = dashboardMonth) => {
+    return getClassAvgMonthlyScoreForMonth(month);
+  };
+
+  const getMonthlySubjectScore = (student, month, subject) => {
+    const value = Number(student.scores?.monthly?.[month]?.[subject]?.score || 0);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  };
+
+  const getMonthlySubjectGlobalAverage = (month = dashboardMonth, subject = 'english') => {
+    const candidates = students
+      .map(student => {
+        const subjectData = student.scores?.monthly?.[month]?.[subject] || {};
+        return Number(
+          subjectData.trackAvg ||
+          subjectData.totalAvg ||
+          subjectData.classAvg ||
+          subjectData.avg ||
+          0
+        );
+      })
+      .filter(value => Number.isFinite(value) && value > 0);
+
+    if (candidates.length > 0) {
+      return Number((candidates.reduce((sum, value) => sum + value, 0) / candidates.length).toFixed(1));
+    }
+
+    const fallbackScores = students
+      .map(student => getMonthlySubjectScore(student, month, subject))
+      .filter(value => value > 0);
+
+    if (fallbackScores.length === 0) return 0;
+
+    return Number((fallbackScores.reduce((sum, value) => sum + value, 0) / fallbackScores.length).toFixed(1));
+  };
+
+  const isNaturalTrack = (student) => {
+    const track = String(student.targetTrack || student.track || '').trim();
+    return track.includes('자연') || track.includes('이공') || track.includes('공학') || track.includes('수학');
+  };
+
+  const getStudentSubjectScoreNeeds = (student, month = dashboardMonth) => {
+    const needs = [];
+    const subjects = isNaturalTrack(student)
+      ? [
+          { key: 'english', label: '영어' },
+          { key: 'math', label: '수학' }
+        ]
+      : [
+          { key: 'english', label: '영어' }
+        ];
+
+    subjects.forEach(subject => {
+      const studentScore = getMonthlySubjectScore(student, month, subject.key);
+      const globalAvg = getMonthlySubjectGlobalAverage(month, subject.key);
+
+      if (studentScore <= 0 || globalAvg <= 0) return;
+
+      const gap = Number((globalAvg - studentScore).toFixed(1));
+      const severity = getScoreSeverityByGap(gap);
+
+      if (severity) {
+        needs.push({
+          type: 'score',
+          label: '성적',
+          subject: subject.label,
+          severity,
+          text: `${subject.label}: 전체 평균 ${globalAvg}점 대비 ${gap}점 낮음`
+        });
+      }
+    });
+
+    return needs;
+  };
+
+  const getClassStudentMonthlyStudyMins = (student, month = dashboardMonth) => {
+    const daily = student.studyTime?.[month] || [];
+    return daily.reduce((sum, day) => sum + parseTimeDiffToMins(day?.in, day?.out), 0);
+  };
+
+  const getClassMonthlyStudyAverage = (month = dashboardMonth) => {
+    const values = classStudents.map(student => getClassStudentMonthlyStudyMins(student, month)).filter(value => value > 0);
+    return values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : 0;
+  };
+
+  const getNeedStudentsByType = (type = 'all', month = dashboardMonth) => {
+    const studyAvg = getClassMonthlyStudyAverage(month);
+
+    return classStudents.map(student => {
+      const attendanceRate = getClassStudentAttendanceRate(student, month);
+      const dailyRate = getClassStudentDailyRate(student, month, 'all');
+      const monthlyScore = getClassStudentMonthlyScore(student, month);
+      const studyMins = getClassStudentMonthlyStudyMins(student, month);
+      const studyRatio = studyAvg > 0 && studyMins > 0 ? Math.round((studyMins / studyAvg) * 100) : 0;
+      const reasons = [];
+
+      const attendanceSeverity = getNeedSeverityByRate(attendanceRate);
+      if (attendanceSeverity) {
+        reasons.push({
+          type: 'attendance',
+          label: '출석',
+          severity: attendanceSeverity,
+          text: `출석률 ${attendanceRate}%`
+        });
+      }
+
+      const dailySeverity = getNeedSeverityByRate(dailyRate);
+      if (dailySeverity) {
+        reasons.push({
+          type: 'daily',
+          label: 'Daily',
+          severity: dailySeverity,
+          text: `Daily 참여율 ${dailyRate}%`
+        });
+      }
+
+      // 성적은 반 평균이 아니라 Monthly 전체 평균 기준으로 판단
+      const scoreNeeds = getStudentSubjectScoreNeeds(student, month);
+      scoreNeeds.forEach(reason => reasons.push(reason));
+
+      if (studyAvg > 0 && studyMins > 0) {
+        const studySeverity = getStudySeverityByRatio(studyRatio);
+
+        if (studySeverity) {
+          reasons.push({
+            type: 'study',
+            label: '학습시간',
+            severity: studySeverity,
+            text: `월 평균의 ${studyRatio}%`
+          });
+        }
+      }
+
+      return {
+        student,
+        attendanceRate,
+        dailyRate,
+        monthlyScore,
+        avgScore: monthlyScore,
+        studyMins,
+        studyText: formatMinsToTime(studyMins),
+        studyRatio,
+        reasons
+      };
+    }).filter(item => {
+      if (type === 'all') return item.reasons.length > 0;
+      return item.reasons.some(reason => reason.type === type);
+    });
+  };
+
+  const allNeedStudents = getNeedStudentsByType('all', dashboardMonth);
+  const attendanceNeedStudents = getNeedStudentsByType('attendance', dashboardMonth);
+  const dailyNeedStudents = getNeedStudentsByType('daily', dashboardMonth);
+  const scoreNeedStudents = getNeedStudentsByType('score', dashboardMonth);
+  const studyNeedStudents = getNeedStudentsByType('study', dashboardMonth);
+  const managementNeedStudents = allNeedStudents;
 
   const studyTimeRankings = useMemo(() => {
     const sorted = [...classStudents].sort((a,b) => getStudyTimeStats(b).totalMins - getStudyTimeStats(a).totalMins);
@@ -3714,7 +4526,8 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   const handleDailyScoreChange = (studentId, dayIndex, testIndex, value) => {
     setStudents(prev => prev.map(student => {
       if (student.id !== studentId) return student;
-      const newDaily = [...student.dailyRecords[dailyMonth]]; 
+      const baseDaily = student.dailyRecords?.[dailyMonth] || generateEmptyMonthlyDaily()[dailyMonth];
+      const newDaily = baseDaily.map(d => ({ t1: '', t2: '', math: '', ...(d || {}) }));
       newDaily[dayIndex] = { ...newDaily[dayIndex], [testIndex]: value };
       return { ...student, dailyRecords: { ...student.dailyRecords, [dailyMonth]: newDaily } };
     }));
@@ -3742,7 +4555,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
       {confirmDialog && (
         <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-[100]">
           <div className="bg-white p-6 rounded-2xl shadow-2xl max-w-sm w-full text-center">
-            <p className="text-slate-800 font-bold mb-6 whitespace-pre-wrap">{confirmDialog.msg}</p>
+            <p className="text-slate-800 font-bold mb-4 whitespace-pre-wrap">{confirmDialog.msg}</p>
             <div className="flex gap-3 justify-center">
               <button onClick={() => setConfirmDialog(null)} className="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg font-bold hover:bg-slate-200 transition-colors">취소</button>
               <button onClick={() => { confirmDialog.onConfirm(); setConfirmDialog(null); }} className="px-4 py-2 bg-indigo-600 text-white rounded-lg font-bold hover:bg-indigo-700 transition-colors">확인</button>
@@ -3752,47 +4565,216 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
       )}
 
       {/* ---------------- 사이드바 영역 ---------------- */}
-      <aside className="w-full md:w-64 bg-slate-900 text-white flex flex-col print:hidden shadow-2xl z-20 shrink-0 h-screen overflow-y-auto custom-scrollbar">
-        <div className="p-6 border-b border-slate-800 sticky top-0 bg-slate-900 z-10 flex items-center gap-3">
-          <button onClick={onBack} className="p-2 hover:bg-slate-800 rounded-lg transition-colors text-slate-400 hover:text-white"><ChevronLeft size={20} /></button>
-          <div><div className="text-xs text-indigo-400 font-bold mb-0.5">{academicYear} Academic</div><h1 className="text-xl font-extrabold tracking-tight truncate w-40" title={className}>{className} 관리</h1></div>
+      <aside className="w-[210px] shrink-0 min-h-screen bg-gradient-to-b from-[#0054d8] via-[#0b7cf4] to-[#61c5ff] text-white rounded-r-[34px] shadow-[12px_0_35px_rgba(37,99,235,0.22)] relative overflow-hidden p-5 flex flex-col print:hidden z-20">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.22),transparent_30%),radial-gradient(circle_at_bottom_right,rgba(255,255,255,0.20),transparent_34%)] pointer-events-none"></div>
+        <div className="absolute -bottom-16 -left-10 w-44 h-44 rounded-full border border-white/25"></div>
+        <div className="absolute -bottom-6 -right-14 w-44 h-44 rounded-full border border-white/20"></div>
+
+        <div className="relative z-10 mb-8">
+          <button
+            type="button"
+            onClick={onBack}
+            className="mb-7 w-11 h-11 rounded-2xl bg-white/12 border border-white/20 flex items-center justify-center hover:bg-white/20 transition-colors"
+            title="홈으로"
+          >
+            <School size={24} />
+          </button>
+
+          <h2 className="text-4xl font-black tracking-tight">{className}</h2>
+          <p className="text-sm font-bold text-white/82 mt-1">영어 기초반 1A</p>
         </div>
-        
-        <nav className="flex-1 px-4 py-6 space-y-6">
-          <div><SidebarButton icon={LayoutDashboard} label="대시보드" tabName="dashboard" activeTab={activeTab} onClick={() => setActiveTab('dashboard')} /></div>
-          
-          <div className="border-t border-slate-800 pt-4"><SidebarButton icon={Users} label="학생 관리" tabName="students" activeTab={activeTab} onClick={() => setActiveTab('students')} /></div>
-          
-          <div>
-            <button onClick={() => setActiveTab('attendance')} className={`w-full flex items-center justify-between px-4 py-3.5 rounded-xl transition-all font-bold text-sm ${activeTab === 'attendance' ? 'bg-emerald-600 text-white shadow-md' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
-              <div className="flex items-center gap-3"><CalendarCheck size={18} /><span>출석 관리</span></div>
-              <ChevronDown size={16} className={`transition-transform duration-200 ${activeTab === 'attendance' ? 'rotate-180' : ''}`} />
+
+        <nav className="relative z-10 flex flex-col gap-2">
+          <button
+            type="button"
+            onClick={() => setActiveTab('dashboard')}
+            className={`w-full h-[52px] px-4 rounded-2xl flex items-center gap-3 text-sm font-black transition-all ${
+              activeTab === 'dashboard'
+                ? 'bg-white text-blue-600 shadow-xl'
+                : 'text-white/90 hover:bg-white/14'
+            }`}
+          >
+            <LayoutDashboard size={22} />
+            <span>대시보드</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('students')}
+            className={`w-full h-[52px] px-4 rounded-2xl flex items-center gap-3 text-sm font-black transition-all ${
+              activeTab === 'students'
+                ? 'bg-white text-blue-600 shadow-xl'
+                : 'text-white/90 hover:bg-white/14'
+            }`}
+          >
+            <Users size={22} />
+            <span>학생 관리</span>
+          </button>
+
+          <div className="space-y-2">
+            <button
+              type="button"
+              onClick={() => setActiveTab('attendance')}
+              className={`w-full h-[52px] px-4 rounded-2xl flex items-center justify-between text-sm font-black transition-all ${
+                activeTab === 'attendance'
+                  ? 'bg-white text-blue-600 shadow-xl'
+                  : 'text-white/90 hover:bg-white/14'
+              }`}
+            >
+              <span className="flex items-center gap-3">
+                <CalendarCheck size={22} />
+                출석 관리
+              </span>
+              <ChevronDown size={16} className={activeTab === 'attendance' ? 'rotate-180 transition-transform' : 'transition-transform'} />
             </button>
+
             {activeTab === 'attendance' && (
-              <div className="flex flex-col gap-1 px-3 pb-2 pt-2 bg-slate-900/50 rounded-b-xl -mt-2 border-x border-b border-slate-800 shadow-inner">
-                <SubTabButton label="• 출석" subTab="calendar" activeSubTab={activeAttendanceTab} onClick={() => setActiveAttendanceTab('calendar')} />
-                <SubTabButton label="• 학습시간" subTab="studyTime" activeSubTab={activeAttendanceTab} onClick={() => setActiveAttendanceTab('studyTime')} />
+              <div className="ml-4 pl-4 border-l border-white/30 space-y-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('attendance');
+                    setActiveAttendanceTab('calendar');
+                  }}
+                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black ${
+                    activeAttendanceTab === 'calendar'
+                      ? 'bg-white/24 text-white'
+                      : 'text-white/72 hover:bg-white/12'
+                  }`}
+                >
+                  출석
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('attendance');
+                    setActiveAttendanceTab('studyTime');
+                  }}
+                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black ${
+                    activeAttendanceTab === 'studyTime'
+                      ? 'bg-white/24 text-white'
+                      : 'text-white/72 hover:bg-white/12'
+                  }`}
+                >
+                  학습시간
+                </button>
               </div>
             )}
           </div>
 
-          <div>
-            <button onClick={() => setActiveTab('test')} className={`w-full flex items-center justify-between px-4 py-3.5 rounded-xl transition-all font-bold text-sm ${activeTab === 'test' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
-              <div className="flex items-center gap-3"><PenTool size={18} /><span>시험 관리</span></div>
-              <ChevronDown size={16} className={`transition-transform duration-200 ${activeTab === 'test' ? 'rotate-180' : ''}`} />
+          <div className="space-y-2">
+            <button
+              type="button"
+              onClick={() => setActiveTab('test')}
+              className={`w-full h-[52px] px-4 rounded-2xl flex items-center justify-between text-sm font-black transition-all ${
+                activeTab === 'test'
+                  ? 'bg-white text-blue-600 shadow-xl'
+                  : 'text-white/90 hover:bg-white/14'
+              }`}
+            >
+              <span className="flex items-center gap-3">
+                <PenTool size={22} />
+                시험 관리
+              </span>
+              <ChevronDown size={16} className={activeTab === 'test' ? 'rotate-180 transition-transform' : 'transition-transform'} />
             </button>
+
             {activeTab === 'test' && (
-              <div className="flex flex-col gap-1 px-3 pb-2 pt-2 bg-slate-900/50 rounded-b-xl -mt-2 border-x border-b border-slate-800 shadow-inner">
-                <SubTabButton label="• Daily" subTab="daily" activeSubTab={activeTestTab} onClick={() => {setActiveTestTab('daily'); setActiveDailyTab('input');}} />
-                <SubTabButton label="• Weekly" subTab="weekly" activeSubTab={activeTestTab} onClick={() => {setActiveTestTab('weekly'); setActiveWeeklyTab('setup');}} />
-                <SubTabButton label="• Monthly" subTab="monthly" activeSubTab={activeTestTab} onClick={() => {setActiveTestTab('monthly'); setTestViewMode('input');}} />
+              <div className="ml-4 pl-4 border-l border-white/30 space-y-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('test');
+                    setActiveTestTab('daily');
+                    setActiveDailyTab('input');
+                  }}
+                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black ${
+                    activeTestTab === 'daily'
+                      ? 'bg-white/24 text-white'
+                      : 'text-white/72 hover:bg-white/12'
+                  }`}
+                >
+                  Daily
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('test');
+                    setActiveTestTab('weekly');
+                    setActiveWeeklyTab('setup');
+                  }}
+                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black ${
+                    activeTestTab === 'weekly'
+                      ? 'bg-white/24 text-white'
+                      : 'text-white/72 hover:bg-white/12'
+                  }`}
+                >
+                  Weekly
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('test');
+                    setActiveTestTab('monthly');
+                    setTestViewMode('input');
+                  }}
+                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black ${
+                    activeTestTab === 'monthly'
+                      ? 'bg-white/24 text-white'
+                      : 'text-white/72 hover:bg-white/12'
+                  }`}
+                >
+                  Monthly
+                </button>
               </div>
             )}
           </div>
 
-          <div><SidebarButton icon={BarChart3} label="학습 데이터" tabName="grades" activeTab={activeTab} onClick={() => setActiveTab('grades')} highlight="indigo" /></div>
-          <div className="pt-4 border-t border-slate-800"><SidebarButton icon={Printer} label="월간 리포트 생성" tabName="report" activeTab={activeTab} onClick={() => setActiveTab('report')} /></div>
+          <button
+            onClick={() => setActiveTab('grades')}
+            className={`w-full h-[52px] px-4 rounded-2xl flex items-center gap-3 text-sm font-black transition-all ${
+              activeTab === 'grades'
+                ? 'bg-white text-blue-600 shadow-xl'
+                : 'text-white/90 hover:bg-white/14'
+            }`}
+          >
+            <BarChart3 size={22} />
+            <span>학습 데이터</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('needs')}
+            className={`w-full h-[52px] px-4 rounded-2xl flex items-center gap-3 text-sm font-black transition-all ${
+              activeTab === 'needs'
+                ? 'bg-white text-blue-600 shadow-xl'
+                : 'text-white/90 hover:bg-white/14'
+            }`}
+          >
+            <AlertTriangle size={22} />
+            <span>관리 필요 학생</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('report')}
+            className={`w-full h-[52px] px-4 rounded-2xl flex items-center gap-3 text-sm font-black transition-all ${
+              activeTab === 'report'
+                ? 'bg-white text-blue-600 shadow-xl'
+                : 'text-white/90 hover:bg-white/14'
+            }`}
+          >
+            <Printer size={22} />
+            <span>월간 리포트 생성</span>
+          </button>
         </nav>
+
+        <div className="relative z-10 mt-auto rounded-2xl border border-white/25 bg-white/14 backdrop-blur-md p-4 flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-white/90 text-blue-600 flex items-center justify-center">
+            <Users size={20} />
+          </div>
+          <div>
+            <p className="text-sm font-black">김지혜 선생님</p>
+            <p className="text-xs font-bold text-white/75">담임교사</p>
+          </div>
+        </div>
       </aside>
 
       {/* ---------------- 메인 컨텐츠 영역 ---------------- */}
@@ -3800,78 +4782,681 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
         <div className="flex-1 overflow-auto p-4 md:p-8 print:p-0">
           
           {/* [0] 대시보드 탭 (Feature 1) */}
-          {activeTab === 'dashboard' && (
-            <div className="max-w-6xl mx-auto animate-in fade-in duration-300">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-6 border-l-4 border-l-slate-800">
-                <div>
-                  <h1 className="text-2xl font-extrabold text-slate-900 flex items-center gap-2"><LayoutDashboard className="text-slate-800" size={24} /> {className} 오늘 요약 (Dashboard)</h1>
-                  <p className="text-slate-500 text-sm mt-1">학생들의 핵심 데이터 및 주의 요망 대상을 한눈에 파악하세요.</p>
-                </div>
-                <div>
-                  <select className="border border-slate-200 rounded-xl px-4 py-2 text-sm font-bold text-slate-700 outline-none shadow-sm" value={dashboardMonth} onChange={(e) => setDashboardMonth(e.target.value)}>
-                    {MONTHS.map(m => <option key={m} value={m}>{m}</option>)}
-                  </select>
-                </div>
-              </div>
+          {activeTab === 'dashboard' && (() => {
+            const alerts = getDashboardAlerts();
 
-              {/* Quick Stats */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col items-center justify-center relative overflow-hidden">
-                   <div className="absolute -right-4 -top-4 opacity-5 text-indigo-500"><Users size={100}/></div>
-                   <span className="text-sm font-bold text-slate-500 mb-2 z-10">총 재원생</span>
-                   <span className="text-4xl font-extrabold text-slate-800 z-10">{classStudents.length} <span className="text-xl text-slate-400 font-medium">명</span></span>
-                </div>
-                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col items-center justify-center relative overflow-hidden">
-                   <div className="absolute -right-4 -top-4 opacity-5 text-emerald-500"><CalendarCheck size={100}/></div>
-                   <span className="text-sm font-bold text-slate-500 mb-2 z-10">{dashboardMonth} 평균 출석률</span>
-                   <span className="text-4xl font-extrabold text-emerald-600 z-10">{classAvgAttendance}%</span>
-                </div>
-                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col items-center justify-center relative overflow-hidden">
-                   <div className="absolute -right-4 -top-4 opacity-5 text-indigo-500"><Clock size={100}/></div>
-                   <span className="text-sm font-bold text-slate-500 mb-2 z-10">{dashboardMonth} 평균 학습시간</span>
-                   <span className="text-4xl font-extrabold text-indigo-600 z-10">{classAvgStudyTime.split('시간')[0]}<span className="text-xl font-bold">h</span></span>
-                </div>
-              </div>
+            const getStudentInitial = (name = '') => {
+              const value = String(name || '').trim();
+              return value ? value.slice(-2) : '학생';
+            };
 
-              {/* Alerts */}
-              {(() => {
-                const alerts = getDashboardAlerts();
-                return (
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                    <div className="bg-rose-50/50 rounded-2xl border border-rose-100 p-6">
-                       <h3 className="font-bold text-rose-800 flex items-center gap-2 mb-4 pb-2 border-b border-rose-100"><AlertTriangle size={18}/> 출결 요주의 (80% 미만)</h3>
-                       {alerts.attendance.length > 0 ? (
-                         <ul className="space-y-2">
-                           {alerts.attendance.map((s, i) => <li key={i} className="flex justify-between text-sm font-bold text-slate-700 bg-white p-2 rounded shadow-sm"><span>{s.name}</span><span className="text-rose-600">{s.val}</span></li>)}
-                         </ul>
-                       ) : <div className="text-sm text-slate-400 text-center py-4">해당 학생이 없습니다.</div>}
+            const getDashboardDailyRate = () => {
+              return getClassDailyRateForMonth(dashboardMonth, 'all');
+            };
+
+            const getDashboardAvgScore = () => {
+              return getClassAvgMonthlyScoreForMonth(dashboardMonth).toFixed(1);
+            };
+
+            const getDashboardAvgStudyHours = () => {
+              return getClassAvgStudyHoursForMonth(dashboardMonth);
+            };
+
+            const getManagementCount = () => {
+              return managementNeedStudents.length;
+            };
+
+            const getScoreAlertStudents = () => {
+              return classStudents
+                .map(student => {
+                  const monthly = student.scores?.monthly?.[dashboardMonth];
+                  const totalScore = Number(monthly?.total?.score || 0);
+                  const englishScore = Number(monthly?.english?.score || 0);
+                  const mathScore = Number(monthly?.math?.score || 0);
+                  const values = [totalScore, englishScore, mathScore].filter(v => v > 0);
+                  const avg = values.length ? Math.round(values.reduce((sum, v) => sum + v, 0) / values.length) : 0;
+                  return { name: student.name, val: avg ? `평균 ${avg}점` : '점수 미입력', score: avg };
+                })
+                .filter(item => item.score === 0 || item.score < 70)
+                .slice(0, 4);
+            };
+
+            const normalizeAlertList = (list = [], fallbackText = '데이터 없음') => {
+              if (list.length > 0) return list.slice(0, 4);
+              return classStudents.slice(0, 4).map(student => ({ name: student.name, val: fallbackText }));
+            };
+
+            const attendanceList = normalizeAlertList(alerts.attendance, '출석 데이터 부족');
+            const dailyList = normalizeAlertList(alerts.dailyScore, 'Daily 데이터 부족');
+            const scoreList = normalizeAlertList(getScoreAlertStudents(), '성적 데이터 부족');
+            const studyList = normalizeAlertList(alerts.studyTime, '학습시간 데이터 부족');
+
+            const dashboardAttendanceRate = getClassAttendanceRateForMonth(dashboardMonth);
+            const dailyRate = getDashboardDailyRate();
+            const avgScore = getDashboardAvgScore();
+            const avgStudyHours = getDashboardAvgStudyHours();
+            const managementCount = getManagementCount();
+
+            const prevDashboardMonth = getDashboardPrevMonth(dashboardMonth);
+            const attendanceDelta = formatDashboardDelta(
+              dashboardAttendanceRate,
+              prevDashboardMonth ? getClassAttendanceRateForMonth(prevDashboardMonth) : null,
+              '%p'
+            );
+            const dailyDelta = formatDashboardDelta(
+              dailyRate,
+              prevDashboardMonth ? getClassDailyRateForMonth(prevDashboardMonth, 'all') : null,
+              '%p'
+            );
+            const scoreDelta = formatDashboardDelta(
+              avgScore,
+              prevDashboardMonth ? getClassAvgMonthlyScoreForMonth(prevDashboardMonth) : null,
+              '점'
+            );
+            const studyDelta = formatDashboardDelta(
+              avgStudyHours,
+              prevDashboardMonth ? getClassAvgStudyHoursForMonth(prevDashboardMonth) : null,
+              '시간'
+            );
+
+            const getStudentWeeklyScoreForIndex = (student, weekIndex) => {
+              const weekNumber = weekIndex + 1;
+
+              const englishValue = Number(
+                student.scores?.weeklyEnglish?.[`${dashboardMonth}_w${weekNumber}`] ??
+                student.scores?.weeklyEnglish?.[`w${weekNumber}`] ??
+                0
+              );
+
+              const mathValue = Number(
+                student.scores?.weeklyMath?.[`${dashboardMonth}_w${weekNumber}`] ??
+                student.scores?.weeklyMath?.[`w${weekNumber}`] ??
+                0
+              );
+
+              const values = [];
+
+              if (englishValue > 0) values.push(englishValue);
+
+              if (isNaturalTrack(student) && mathValue > 0) {
+                values.push(mathValue);
+              }
+
+              if (values.length === 0) return null;
+
+              return Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(1));
+            };
+
+            const getWeeklyAverageScoreForIndex = (weekIndex) => {
+              const values = classStudents
+                .map(student => getStudentWeeklyScoreForIndex(student, weekIndex))
+                .filter(value => value !== null && Number.isFinite(value) && value > 0);
+
+              if (values.length === 0) return null;
+
+              return Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(1));
+            };
+
+            const trendData = Array.from({ length: 8 }, (_, index) => {
+              const labelPool = ['1주차', '2주차', '3주차', '4주차', '5주차', '6주차', '7주차', '8주차'];
+              const weeklyScore = getWeeklyAverageScoreForIndex(index);
+
+              return {
+                label: labelPool[index],
+                attendance: dashboardAttendanceRate,
+                daily: dailyRate,
+                score: weeklyScore,
+                scoreText: weeklyScore === null ? '데이터 없음' : `${weeklyScore}점`,
+                study: Math.max(0, Math.min(100, Number(avgStudyHours || 0) * 8))
+              };
+            });
+
+            const makeLinePoints = (key) => {
+              return trendData
+                .map((item, index) => {
+                  const rawValue = item[key];
+
+                  if (rawValue === null || rawValue === undefined || rawValue === '') {
+                    return null;
+                  }
+
+                  const x = 52 + index * 92;
+                  const value = Math.max(0, Math.min(100, Number(rawValue || 0)));
+                  const y = 178 - (value / 100) * 145;
+
+                  return `${x},${y}`;
+                })
+                .filter(Boolean)
+                .join(' ');
+            };
+
+            const managementCards = [
+              {
+                key: 'attendance',
+                title: '출석 관리 필요',
+                count: attendanceNeedStudents.length,
+                icon: CalendarCheck,
+                iconClass: 'text-emerald-600',
+                badgeClass: 'bg-emerald-500 text-white',
+                list: attendanceNeedStudents.slice(0, 4),
+                empty: '출석 관리 대상이 없습니다.',
+                onViewAll: () => { setActiveTab('needs'); setActiveNeedTab('attendance'); }
+              },
+              {
+                key: 'daily',
+                title: 'Daily 관리 필요',
+                count: dailyNeedStudents.length,
+                icon: AlertTriangle,
+                iconClass: 'text-orange-500',
+                badgeClass: 'bg-orange-500 text-white',
+                list: dailyNeedStudents.slice(0, 4),
+                empty: 'Daily 관리 대상이 없습니다.',
+                onViewAll: () => { setActiveTab('needs'); setActiveNeedTab('daily'); }
+              },
+              {
+                key: 'score',
+                title: '성적 관리 필요',
+                count: scoreNeedStudents.length,
+                icon: Trophy,
+                iconClass: 'text-violet-600',
+                badgeClass: 'bg-violet-600 text-white',
+                list: scoreNeedStudents.slice(0, 4),
+                empty: '성적 관리 대상이 없습니다.',
+                onViewAll: () => { setActiveTab('needs'); setActiveNeedTab('score'); }
+              },
+              {
+                key: 'study',
+                title: '학습시간 관리 필요',
+                count: studyNeedStudents.length,
+                icon: Clock,
+                iconClass: 'text-blue-600',
+                badgeClass: 'bg-blue-600 text-white',
+                list: studyNeedStudents.slice(0, 4),
+                empty: '학습시간 관리 대상이 없습니다.',
+                onViewAll: () => { setActiveTab('needs'); setActiveNeedTab('study'); }
+              }
+            ];
+
+            const quickLinks = [
+              {
+                title: '학생 관리',
+                desc: '학생 정보 및 이력',
+                icon: Users,
+                onClick: () => setActiveTab('students')
+              },
+              {
+                title: '출석 관리',
+                desc: '출석 현황 및 통계',
+                icon: CalendarCheck,
+                onClick: () => {
+                  setActiveTab('attendance');
+                  setActiveAttendanceTab('calendar');
+                }
+              },
+              {
+                title: 'Daily 관리',
+                desc: 'Daily 참여 및 통계',
+                icon: PenTool,
+                onClick: () => {
+                  setActiveTab('test');
+                  setActiveTestTab('daily');
+                  setActiveDailyTab('input');
+                }
+              },
+              {
+                title: '성적 관리',
+                desc: '성적 입력 및 분석',
+                icon: Trophy,
+                onClick: () => setActiveTab('grades')
+              },
+              {
+                title: '학습시간 관리',
+                desc: '학습시간 확인 및 분석',
+                icon: Clock,
+                onClick: () => {
+                  setActiveTab('attendance');
+                  setActiveAttendanceTab('studyTime');
+                }
+              },
+              {
+                title: '보고서',
+                desc: '클래스 리포트 생성',
+                icon: FileText,
+                onClick: () => setActiveTab('report')
+              }
+            ];
+
+            const kpiCards = [
+              {
+                title: '등록 학생 수',
+                value: classStudents.length,
+                unit: '명',
+                sub: '현재 선택 반 기준',
+                link: '학생 목록',
+                icon: Users,
+                iconBox: 'bg-blue-50 text-blue-600',
+                valueClass: 'text-slate-950',
+                onClick: () => setActiveTab('students')
+              },
+              {
+                title: '이번 달 출석률',
+                value: dashboardAttendanceRate,
+                unit: '%',
+                sub: attendanceDelta.text,
+                link: '상세 보기',
+                icon: CalendarCheck,
+                iconBox: 'bg-blue-50 text-blue-600',
+                valueClass: 'text-slate-950',
+                subClass: attendanceDelta.className,
+                onClick: () => {
+                  setActiveTab('attendance');
+                  setActiveAttendanceTab('calendar');
+                }
+              },
+              {
+                title: 'Daily 참여율',
+                value: dailyRate,
+                unit: '%',
+                sub: dailyDelta.text,
+                link: '상세 보기',
+                icon: PenTool,
+                iconBox: 'bg-blue-50 text-blue-600',
+                valueClass: 'text-slate-950',
+                subClass: dailyDelta.className,
+                onClick: () => {
+                  setActiveTab('test');
+                  setActiveTestTab('daily');
+                  setActiveDailyTab('input');
+                }
+              },
+              {
+                title: '이번 달 평균 점수',
+                value: avgScore,
+                unit: '점',
+                sub: scoreDelta.text,
+                link: '성적 분석',
+                icon: Trophy,
+                iconBox: 'bg-violet-50 text-violet-600',
+                valueClass: 'text-slate-950',
+                subClass: scoreDelta.className,
+                onClick: () => setActiveTab('grades')
+              },
+              {
+                title: '이번 달 평균 학습시간',
+                value: avgStudyHours,
+                unit: '시간',
+                sub: studyDelta.text,
+                link: '상세 보기',
+                icon: Clock,
+                iconBox: 'bg-blue-50 text-blue-600',
+                valueClass: 'text-slate-950',
+                subClass: studyDelta.className,
+                onClick: () => {
+                  setActiveTab('attendance');
+                  setActiveAttendanceTab('studyTime');
+                }
+              },
+              {
+                title: '관리 필요 학생',
+                value: managementCount,
+                unit: '명',
+                sub: '즉시 확인 필요',
+                link: '학생 목록',
+                icon: AlertTriangle,
+                iconBox: 'bg-red-50 text-red-500',
+                valueClass: 'text-slate-950',
+                subClass: 'text-slate-500',
+                onClick: () => setActiveTab('needs')
+              }
+            ];
+
+            return (
+              <div className="relative min-h-full overflow-hidden rounded-[28px] bg-[#f7fbff] px-5 py-4 animate-in fade-in duration-300">
+                <div className="absolute inset-x-0 top-0 h-[210px] bg-[radial-gradient(circle_at_55%_-20%,rgba(56,189,248,0.30),transparent_34%),linear-gradient(135deg,rgba(219,234,254,0.85),rgba(255,255,255,0.70)_45%,rgba(239,246,255,0.95))] pointer-events-none"></div>
+                <div className="absolute -top-8 right-0 w-[760px] h-[180px] rounded-bl-[80px] bg-[linear-gradient(160deg,rgba(125,211,252,0.45),rgba(255,255,255,0.05))] blur-[1px] pointer-events-none"></div>
+                <div className="absolute top-3 right-24 w-[520px] h-[90px] border-t border-white/80 rounded-[100%] rotate-[-6deg] pointer-events-none"></div>
+                <div className="absolute top-8 right-44 w-[600px] h-[100px] border-t border-white/70 rounded-[100%] rotate-[-9deg] pointer-events-none"></div>
+
+                <div className="relative z-10">
+                  <div className="flex items-start justify-between gap-6 mb-4">
+                    <div>
+                      <h1 className="text-[34px] leading-tight font-black tracking-tight text-slate-950 mb-2">
+                        {className} 클래스 대시보드
+                      </h1>
+                      <p className="text-base font-bold text-slate-600 mb-2">
+                        영어 기초반 1A · 종합 1학년
+                      </p>
+                      <p className="text-sm font-black text-blue-600">
+                        담임교사: 김지혜 선생님
+                      </p>
                     </div>
-                    <div className="bg-amber-50/50 rounded-2xl border border-amber-100 p-6">
-                       <h3 className="font-bold text-amber-800 flex items-center gap-2 mb-4 pb-2 border-b border-amber-100"><AlertTriangle size={18}/> Daily 참여 저조 (70% 미만)</h3>
-                       {alerts.dailyScore.length > 0 ? (
-                         <ul className="space-y-2">
-                           {alerts.dailyScore.map((s, i) => <li key={i} className="flex justify-between text-sm font-bold text-slate-700 bg-white p-2 rounded shadow-sm"><span>{s.name}</span><span className="text-amber-600">{s.val}</span></li>)}
-                         </ul>
-                       ) : <div className="text-sm text-slate-400 text-center py-4">해당 학생이 없습니다.</div>}
+
+                    <select
+                      className="h-14 min-w-[190px] rounded-2xl bg-white/90 border border-blue-100 shadow-[0_12px_30px_rgba(37,99,235,0.12)] px-5 text-base font-black text-slate-800 outline-none cursor-pointer"
+                      value={dashboardMonth}
+                      onChange={(e) => setDashboardMonth(e.target.value)}
+                    >
+                      {MONTHS.map(m => <option key={m} value={m}>{academicYear}년 {m}</option>)}
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-1 xl:grid-cols-6 gap-4 mb-4">
+                    {kpiCards.map((card, index) => {
+                      const Icon = card.icon;
+
+                      return (
+                        <button
+                          key={index}
+                          type="button"
+                          onClick={card.onClick}
+                          className="text-left min-h-[150px] rounded-[24px] bg-white/88 backdrop-blur-xl border border-blue-100 shadow-[0_12px_30px_rgba(37,99,235,0.08)] p-5 hover:-translate-y-0.5 hover:shadow-[0_16px_38px_rgba(37,99,235,0.13)] transition-all"
+                        >
+                          <div className="flex items-start gap-4">
+                            <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shrink-0 ${card.iconBox}`}>
+                              <Icon size={28} />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-black text-slate-600 mb-2">{card.title}</p>
+                              <div className="flex items-end gap-1 mb-2">
+                                <strong className={`text-3xl font-black ${card.valueClass}`}>{card.value}</strong>
+                                <span className="text-base font-black text-slate-700 mb-1">{card.unit}</span>
+                              </div>
+                              <p className={`text-xs font-black ${card.subClass || 'text-slate-500'}`}>{card.sub}</p>
+                            </div>
+                          </div>
+                          <div className="mt-4 flex items-center justify-end gap-1 text-xs font-black text-blue-600">
+                            {card.link} <ChevronRight size={14} />
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="grid grid-cols-1 xl:grid-cols-4 gap-4 mb-4">
+                    {managementCards.map((card, index) => {
+                      const Icon = card.icon;
+
+                      return (
+                        <div
+                          key={index}
+                          className="rounded-[24px] bg-white/90 backdrop-blur-xl border border-blue-100 shadow-[0_12px_30px_rgba(37,99,235,0.08)] p-5 min-h-[185px]"
+                        >
+                          <div className="flex items-center justify-between mb-4">
+                            <h3 className={`flex items-center gap-2 text-lg font-black ${index === 0 ? 'text-emerald-700' : index === 1 ? 'text-slate-900' : index === 2 ? 'text-violet-700' : 'text-blue-700'}`}>
+                              <Icon size={20} className={card.iconClass} />
+                              {card.title}
+                            </h3>
+                            <span className={`px-3 py-1 rounded-lg text-xs font-black ${card.badgeClass}`}>
+                              {card.count}명
+                            </span>
+                          </div>
+
+                          <div className="space-y-2.5">
+                            {card.list.length > 0 ? card.list.map((item) => {
+                              const mainReason = item.reasons.find(reason => reason.type === card.key) || item.reasons[0];
+                              const severity = mainReason?.severity;
+
+                              return (
+                                <div key={`${card.title}-${item.student.id}`} className="flex items-center gap-3">
+                                  <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-100 to-sky-50 border border-white shadow-sm flex items-center justify-center text-[11px] font-black text-blue-700">
+                                    {getStudentInitial(item.student.name)}
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-sm font-black text-slate-800 truncate">{item.student.name}</p>
+                                    <p className="text-[11px] font-bold text-slate-400 truncate">{mainReason?.text}</p>
+                                  </div>
+                                  {severity && (
+                                    <span className={`px-2.5 py-1 rounded-lg text-xs font-black border ${severity.className}`}>
+                                      {severity.label}
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            }) : (
+                              <div className="py-8 text-center text-sm font-bold text-slate-400">{card.empty}</div>
+                            )}
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={card.onViewAll}
+                            className="mt-4 w-full border-t border-slate-100 pt-3 text-sm font-black text-blue-600 flex items-center justify-center gap-1"
+                          >
+                            전체 보기 <ChevronRight size={15} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="grid grid-cols-1 xl:grid-cols-[1.45fr_0.95fr] gap-4">
+                    <div className="relative rounded-[24px] bg-white/90 backdrop-blur-xl border border-blue-100 shadow-[0_12px_30px_rgba(37,99,235,0.08)] p-4 min-h-[230px]">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-lg font-black text-slate-900">
+                          주요 지표 추이 <span className="text-sm font-bold text-slate-400">(최근 8주)</span>
+                        </h3>
+                        <button
+                          type="button"
+                          onClick={() => setShowTrendAnalysis(prev => !prev)}
+                          className="text-sm font-black text-blue-600 flex items-center gap-1"
+                        >
+                          상세 분석 <ChevronRight size={15} />
+                        </button>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-center gap-6 mb-3 text-xs font-black text-slate-600">
+                        <span className="flex items-center gap-2"><span className="w-6 h-[3px] bg-blue-600 rounded-full"></span>출석률(%)</span>
+                        <span className="flex items-center gap-2"><span className="w-6 h-[3px] bg-emerald-500 rounded-full"></span>Daily 참여율(%)</span>
+                        <span className="flex items-center gap-2"><span className="w-6 h-[3px] bg-violet-600 rounded-full"></span>평균 점수(점)</span>
+                        <span className="flex items-center gap-2"><span className="w-6 h-[3px] bg-orange-500 rounded-full"></span>평균 학습시간(시간)</span>
+                      </div>
+
+                      <svg viewBox="0 0 720 230" className="w-full h-[185px]">
+                        {[0, 25, 50, 75, 100].map((tick) => {
+                          const y = 178 - (tick / 100) * 145;
+                          return (
+                            <g key={tick}>
+                              <line x1="48" x2="704" y1={y} y2={y} stroke="#e2e8f0" strokeWidth="1" />
+                              <text x="18" y={y + 4} fontSize="12" fill="#64748b" fontWeight="700">{tick}</text>
+                            </g>
+                          );
+                        })}
+
+                        <polyline points={makeLinePoints('attendance')} fill="none" stroke="#2563eb" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+                        <polyline points={makeLinePoints('daily')} fill="none" stroke="#10b981" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+                        <polyline points={makeLinePoints('score')} fill="none" stroke="#7c3aed" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+                        <polyline points={makeLinePoints('study')} fill="none" stroke="#f97316" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+
+                        {trendData.map((item, index) => (
+                          <text key={item.label} x={52 + index * 92} y="215" fontSize="11" fill="#64748b" fontWeight="700" textAnchor="middle">
+                            {item.label}
+                          </text>
+                        ))}
+
+                        {trendData.map((item, index) => {
+                          const x = 52 + index * 92;
+                          return (
+                            <g key={`hover-${item.label}`}>
+                              <rect
+                                x={x - 32}
+                                y="20"
+                                width="64"
+                                height="170"
+                                fill="transparent"
+                                onMouseEnter={() => setHoveredTrendIndex(index)}
+                                onMouseLeave={() => setHoveredTrendIndex(null)}
+                              />
+                              {hoveredTrendIndex === index && (
+                                <g>
+                                  <line x1={x} x2={x} y1="28" y2="180" stroke="#94a3b8" strokeDasharray="4 4" />
+                                  <rect x={Math.min(x + 10, 560)} y="28" width="145" height="92" rx="12" fill="white" stroke="#dbeafe" />
+                                  <text x={Math.min(x + 22, 572)} y="48" fontSize="12" fill="#0f172a" fontWeight="800">{item.label}</text>
+                                  <text x={Math.min(x + 22, 572)} y="68" fontSize="11" fill="#2563eb" fontWeight="700">출석률 {Math.round(item.attendance)}%</text>
+                                  <text x={Math.min(x + 22, 572)} y="84" fontSize="11" fill="#10b981" fontWeight="700">Daily {Math.round(item.daily)}%</text>
+                                  <text x={Math.min(x + 22, 572)} y="100" fontSize="11" fill="#7c3aed" fontWeight="700">
+                                    Weekly 평균 {item.scoreText || '데이터 없음'}
+                                  </text>
+                                  <text x={Math.min(x + 22, 572)} y="116" fontSize="11" fill="#f97316" fontWeight="700">학습시간 {Math.round(item.study)}%</text>
+                                </g>
+                              )}
+                            </g>
+                          );
+                        })}
+                      </svg>
+
+                      {showTrendAnalysis && (
+                        <div className="absolute right-5 top-14 w-[340px] max-h-[calc(100vh-140px)] overflow-y-auto rounded-2xl bg-white border border-blue-100 shadow-[0_18px_45px_rgba(37,99,235,0.18)] p-4 z-30">
+                          <div className="flex items-center justify-between mb-3">
+                            <h4 className="text-base font-black text-slate-950">주요 지표 상세 분석</h4>
+                            <button type="button" onClick={() => setShowTrendAnalysis(false)} className="w-7 h-7 rounded-lg bg-slate-100 text-slate-500 flex items-center justify-center"><X size={15} /></button>
+                          </div>
+                          <div className="space-y-3 text-sm">
+                            <div><p className="font-black text-blue-600 mb-1">1. 종합 요약</p><p className="text-xs font-bold text-slate-600 leading-5">{dashboardMonth} 기준 출석률 {getClassAttendanceRate(dashboardMonth)}%, Daily 참여율 {getClassDailyRate(dashboardMonth)}%입니다.</p></div>
+                            <div><p className="font-black text-blue-600 mb-1">2. 종합 관리 필요도</p><p className="text-xs font-bold text-slate-600 leading-5">관리 필요 학생은 총 {allNeedStudents.length}명이며, 출석 {attendanceNeedStudents.length}명, Daily {dailyNeedStudents.length}명, 성적 {scoreNeedStudents.length}명, 학습시간 {studyNeedStudents.length}명입니다.</p></div>
+                            <div><p className="font-black text-blue-600 mb-1">3. 주요 지표 현황</p><p className="text-xs font-bold text-slate-600 leading-5">출석, Daily, 성적, 학습시간을 함께 확인해 종합 관리 우선순위를 판단하세요.</p></div>
+                            <div><p className="font-black text-rose-500 mb-1">4. 위험 신호</p><p className="text-xs font-bold text-slate-600 leading-5">위험 단계 학생은 즉시 상담 또는 개별 연락이 필요합니다.</p></div>
+                            <div><p className="font-black text-violet-600 mb-1">5. 자동 분석 코멘트</p><p className="text-xs font-bold text-slate-600 leading-5">현재 데이터 기준으로 출석률과 Daily 참여율이 낮은 학생을 우선 관리하는 것이 좋습니다.</p></div>
+                            <div><p className="font-black text-emerald-600 mb-1">6. 추천 관리 액션</p><p className="text-xs font-bold text-slate-600 leading-5">출석 저조 학생 상담, Daily 미응시자 보완 안내, 학습시간 저조 학생 루틴 점검을 권장합니다.</p></div>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                    <div className="bg-slate-100/50 rounded-2xl border border-slate-200 p-6">
-                       <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-4 pb-2 border-b border-slate-200"><AlertTriangle size={18}/> 누적 학습시간 저조 (하위 3명)</h3>
-                       {alerts.studyTime.length > 0 ? (
-                         <ul className="space-y-2">
-                           {alerts.studyTime.map((s, i) => <li key={i} className="flex justify-between text-sm font-bold text-slate-700 bg-white p-2 rounded shadow-sm"><span>{s.name}</span><span className="text-slate-500">{s.val}</span></li>)}
-                         </ul>
-                       ) : <div className="text-sm text-slate-400 text-center py-4">데이터가 부족합니다.</div>}
+
+                    <div className="rounded-[22px] bg-white/90 backdrop-blur-xl border border-blue-100 shadow-[0_10px_24px_rgba(37,99,235,0.08)] p-4 min-h-[220px]">
+                      <h3 className="text-lg font-black text-slate-900 mb-4">빠른 이동</h3>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {quickLinks.map((link, index) => {
+                          const Icon = link.icon;
+
+                          return (
+                            <button
+                              key={index}
+                              type="button"
+                              onClick={link.onClick}
+                              className="min-h-[76px] rounded-2xl border border-blue-100 bg-white/80 hover:bg-blue-50/70 px-4 py-3 flex items-center gap-3 text-left transition-colors"
+                            >
+                              <div className="w-11 h-11 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
+                                <Icon size={23} />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-black text-slate-800">{link.title}</p>
+                                <p className="text-xs font-bold text-slate-500 mt-0.5">{link.desc}</p>
+                              </div>
+                              <ChevronRight size={18} className="text-slate-400" />
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
-                )
-              })()}
-            </div>
-          )}
+                </div>
+              </div>
+            );
+          })()}
 
+
+          {/* [0-1] 관리 필요 학생 탭 */}
+          {activeTab === 'needs' && (() => {
+            const needTabs = [
+              { key: 'all', label: '전체', count: allNeedStudents.length },
+              { key: 'attendance', label: '출석', count: attendanceNeedStudents.length },
+              { key: 'daily', label: 'Daily', count: dailyNeedStudents.length },
+              { key: 'score', label: '성적', count: scoreNeedStudents.length },
+              { key: 'study', label: '학습시간', count: studyNeedStudents.length }
+            ];
+            const currentNeedList = getNeedStudentsByType(activeNeedTab, dashboardMonth);
+
+            return (
+              <div className="max-w-7xl mx-auto animate-in fade-in duration-300">
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 mb-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <h1 className="text-2xl font-black text-slate-950 flex items-center gap-2">
+                        <AlertTriangle className="text-rose-500" size={24} />
+                        관리 필요 학생
+                      </h1>
+                      <p className="text-sm font-bold text-slate-500 mt-1">
+                        출석, Daily, 성적, 학습시간 기준에 따라 관리 필요 학생을 분류합니다.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('dashboard')}
+                      className="px-4 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-black hover:bg-blue-700 transition-colors"
+                    >
+                      대시보드로 돌아가기
+                    </button>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2 mt-4">
+                    {needTabs.map(tab => (
+                      <button
+                        key={tab.key}
+                        type="button"
+                        onClick={() => setActiveNeedTab(tab.key)}
+                        className={`px-4 py-2 rounded-xl text-sm font-black transition-colors ${
+                          activeNeedTab === tab.key
+                            ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
+                            : 'bg-slate-50 text-slate-600 border border-slate-200 hover:bg-blue-50'
+                        }`}
+                      >
+                        {tab.label} {tab.count}명
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-50 border-b border-slate-200">
+                      <tr>
+                        <th className="px-4 py-3 text-left font-black text-slate-600">학생명</th>
+                        <th className="px-4 py-3 text-center font-black text-slate-600">출석률</th>
+                        <th className="px-4 py-3 text-center font-black text-slate-600">Daily</th>
+                        <th className="px-4 py-3 text-center font-black text-slate-600">Monthly</th>
+                        <th className="px-4 py-3 text-center font-black text-slate-600">학습시간</th>
+                        <th className="px-4 py-3 text-left font-black text-slate-600">관리 사유</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {currentNeedList.length > 0 ? currentNeedList.map(item => (
+                        <tr key={item.student.id} className="border-b border-slate-100 hover:bg-blue-50/40">
+                          <td className="px-4 py-3 font-black text-slate-900">{item.student.name}</td>
+                          <td className="px-4 py-3 text-center font-black text-slate-700">{item.attendanceRate}%</td>
+                          <td className="px-4 py-3 text-center font-black text-slate-700">{item.dailyRate}%</td>
+                          <td className="px-4 py-3 text-center font-black text-slate-700">{item.monthlyScore || '-'}점</td>
+                          <td className="px-4 py-3 text-center font-black text-slate-700">{item.studyText}</td>
+                          <td className="px-4 py-3">
+                            <div className="flex flex-wrap gap-1.5">
+                              {item.reasons.map(reason => (
+                                <span
+                                  key={`${item.student.id}-${reason.type}-${reason.text}`}
+                                  className={`px-2.5 py-1 rounded-lg text-xs font-black border ${reason.severity.className}`}
+                                >
+                                  {reason.label} · {reason.text}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      )) : (
+                        <tr>
+                          <td colSpan={6} className="px-4 py-12 text-center text-slate-400 font-bold">
+                            해당 기준의 관리 필요 학생이 없습니다.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })()}
           {/* [1] 학생목록 탭 */}
           {activeTab === 'students' && (
              <div className="max-w-6xl mx-auto animate-in fade-in duration-300">
-               <div className="flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-6">
+               <div className="flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-4">
                  <div><h1 className="text-2xl font-extrabold text-slate-900">수강생 통합 명단</h1></div>
                  <div className="flex gap-2">
                    <button onClick={handleExportStudentsExcel} className="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-xl font-bold flex gap-2 transition-colors shadow-sm"><DownloadCloud size={18}/>명단 다운로드</button>
@@ -3959,7 +5544,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
           {/* [2] 31일 출결 캘린더 */}
           {activeTab === 'attendance' && activeAttendanceTab === 'calendar' && (
             <div className="max-w-[1600px] mx-auto animate-in fade-in duration-300">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-6 border-l-4 border-l-emerald-500">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-4 border-l-4 border-l-emerald-500">
                 <div>
                   <h1 className="text-2xl font-extrabold text-slate-900 flex items-center gap-2"><CalendarCheck className="text-emerald-500" size={24} />31일 출결 관리</h1>
                   <p className="text-slate-500 text-sm mt-1">출석확인을 기록하면 개인별/반 평균 출석률과 벌점이 자동 계산됩니다.</p>
@@ -4133,7 +5718,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
           {/* [2-2] 학습시간 기입 (날짜별 엑셀 업로드 지원) */}
           {activeTab === 'attendance' && activeAttendanceTab === 'studyTime' && (
              <div className="max-w-[1600px] mx-auto animate-in fade-in duration-300">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-6 border-l-4 border-l-indigo-500">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-4 border-l-4 border-l-indigo-500">
                 <div>
                   <h1 className="text-2xl font-extrabold text-slate-900 flex items-center gap-2"><Clock className="text-indigo-500" size={24} />31일 학습시간 기입란</h1>
                   <p className="text-slate-500 text-sm mt-1">엑셀을 통해 일별 등원/하원 시간을 기입하면 하루 및 누적 학습시간, <b>누적 등수</b>가 자동 산출됩니다.</p>
@@ -4351,7 +5936,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
           {/* [3] TEST 관리 (Daily / Weekly / Monthly) */}
           {activeTab === 'test' && (
             <div className="max-w-[1600px] mx-auto animate-in fade-in duration-300">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-6 border-l-4 border-l-indigo-500">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-4 border-l-4 border-l-indigo-500">
                 <div>
                   <h1 className="text-2xl font-extrabold text-slate-900 flex items-center gap-2 uppercase tracking-wide"><PenTool className="text-indigo-500" size={24} /> {activeTestTab} TEST 관리</h1>
                 </div>
@@ -4452,6 +6037,31 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
               {/* -- DAILY TEST (31일 표) -- */}
               {activeTestTab === 'daily' && activeDailyTab === 'input' && (
                 <>
+                  <div className="flex items-center gap-2 mb-4">
+                    <button
+                      type="button"
+                      onClick={() => setDailySubject('english')}
+                      className={`px-4 py-2 rounded-xl text-sm font-black transition-colors ${
+                        dailySubject === 'english'
+                          ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20'
+                          : 'bg-white text-slate-500 border border-slate-200 hover:bg-blue-50'
+                      }`}
+                    >
+                      영어 Daily
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDailySubject('math')}
+                      className={`px-4 py-2 rounded-xl text-sm font-black transition-colors ${
+                        dailySubject === 'math'
+                          ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20'
+                          : 'bg-white text-slate-500 border border-slate-200 hover:bg-blue-50'
+                      }`}
+                    >
+                      수학 Daily
+                    </button>
+                  </div>
+
                   <div className="mb-4 bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
                     <div className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2"><Calendar size={18} className="text-rose-500"/> 🚫 시험 미실시 일자 (휴일 및 시작일 이전) 설정</div>
                     <div className="flex flex-wrap gap-2">
@@ -4474,8 +6084,14 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                       <select className="border border-indigo-200 rounded-lg px-3 py-1.5 outline-none text-sm font-bold text-slate-700 bg-white" value={batchDailyDate} onChange={e => setBatchDailyDate(e.target.value)}>
                         {Array.from({length: 31}, (_, i) => <option key={i} value={i}>{i+1}일</option>)}
                       </select>
-                      <input type="number" placeholder="1차 점수" className="w-24 px-3 py-1.5 border border-indigo-200 rounded-lg outline-none text-sm font-bold text-slate-700" value={batchDailyT1} onChange={e => setBatchDailyT1(e.target.value)} />
-                      <input type="number" placeholder="2차 점수" className="w-24 px-3 py-1.5 border border-indigo-200 rounded-lg outline-none text-sm font-bold text-slate-700" value={batchDailyT2} onChange={e => setBatchDailyT2(e.target.value)} />
+                      {dailySubject === 'math' ? (
+                        <input type="number" placeholder="수학 점수" className="w-28 px-3 py-1.5 border border-indigo-200 rounded-lg outline-none text-sm font-bold text-slate-700" value={batchDailyMath} onChange={e => setBatchDailyMath(e.target.value)} />
+                      ) : (
+                        <>
+                          <input type="number" placeholder="1차 점수" className="w-24 px-3 py-1.5 border border-indigo-200 rounded-lg outline-none text-sm font-bold text-slate-700" value={batchDailyT1} onChange={e => setBatchDailyT1(e.target.value)} />
+                          <input type="number" placeholder="2차 점수" className="w-24 px-3 py-1.5 border border-indigo-200 rounded-lg outline-none text-sm font-bold text-slate-700" value={batchDailyT2} onChange={e => setBatchDailyT2(e.target.value)} />
+                        </>
+                      )}
                       <button onClick={handleBatchDailyChange} className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded-lg text-sm font-bold transition-colors shadow-sm disabled:opacity-50" disabled={selectedStudents.length === 0}>일괄 적용</button>
                       <button onClick={() => handleResetDaily(false)} className="bg-rose-100 hover:bg-rose-200 text-rose-600 px-3 py-1.5 rounded-lg text-sm font-bold transition-colors shadow-sm disabled:opacity-50 ml-2" disabled={selectedStudents.length === 0}>선택일자 삭제</button>
                       <button onClick={() => handleResetDaily(true)} className="bg-rose-600 hover:bg-rose-700 text-white px-3 py-1.5 rounded-lg text-sm font-bold transition-colors shadow-sm disabled:opacity-50" disabled={selectedStudents.length === 0}>월 전체 삭제</button>
@@ -4486,7 +6102,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                     <div className="bg-slate-50 p-4 border-b border-slate-200 flex justify-between items-center">
                        <div className="font-bold text-slate-700 flex items-center gap-2">
                          <PenTool size={18} className="text-indigo-500" />
-                         {dailyMonth} DAILY 현황 (전체 반 평균 참여율: <span className="text-emerald-600">{dailyClassStats.avgRate}%</span> / 반 평균 점수: <span className="text-indigo-600">{dailyClassStats.avgScore}점</span>)
+                         {dailyMonth} {dailySubject === 'math' ? '수학 DAILY' : '영어 DAILY'} 현황 (전체 반 평균 참여율: <span className="text-emerald-600">{dailyClassStats.avgRate}%</span> / 반 평균 점수: <span className="text-indigo-600">{dailyClassStats.avgScore}점</span>)
                        </div>
                     </div>
                     <div
@@ -4512,7 +6128,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                              <div className="flex items-center justify-between">학생 정보 (참여율) {sortKey === 'name' ? (sortOrder === 'asc' ? <ArrowDownAZ size={16}/> : <ArrowUpZA size={16}/>) : <ArrowDownAZ size={16} className="opacity-30"/>}</div>
                           </th>
                           <th rowSpan={2} className="px-3 py-3 border-r border-slate-700 sticky left-[216px] z-30 bg-slate-900 w-28 text-indigo-200">누적 / 평균</th>
-                          <th colSpan={31} className="py-2 border-b border-slate-700 bg-slate-800">{dailyMonth} 일별 DAILY SCORE (1일 ~ 31일)</th>
+                          <th colSpan={31} className="py-2 border-b border-slate-700 bg-slate-800">{dailyMonth} {dailySubject === 'math' ? '수학 DAILY SCORE' : '영어 DAILY SCORE'} (1일 ~ 31일)</th>
                         </tr>
                         <tr className="bg-slate-700 text-xs">
                           {Array.from({length: 31}, (_, i) => {
@@ -4523,8 +6139,8 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                       </thead>
                       <tbody className="divide-y divide-slate-200 text-xs">
                         {filteredStudents.map((student) => {
-                          const dRecords = student.dailyRecords[dailyMonth] || Array(31).fill({t1:'', t2:''});
-                          const dailyStats = getDailyStats(dRecords, dailyMonth);
+                          const dRecords = (student.dailyRecords[dailyMonth] || Array(31).fill({t1:'', t2:'', math:''})).map(d => ({ t1: '', t2: '', math: '', ...(d || {}) }));
+                          const dailyStats = getDailyStats(dRecords, dailyMonth, dailySubject);
                           const isSelected = selectedStudents.includes(student.id);
                           return (
                             <tr key={student.id} className={`hover:bg-indigo-50/50 transition-colors group cursor-pointer ${isSelected ? 'bg-indigo-50/30' : ''}`} onClick={() => setViewingDailySummary(student)}>
@@ -4547,8 +6163,14 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                                 return (
                                   <td key={dayIdx} className={`border-r border-slate-200 p-1.5 align-middle ${isExcluded ? 'bg-slate-100' : 'bg-white group-hover:bg-indigo-50/20'}`} onClick={e => e.stopPropagation()}>
                                     <div className="flex flex-col gap-1.5 items-center">
-                                      <input type="number" disabled={isExcluded} className={`w-10 text-center border rounded px-1 py-1 text-xs outline-none focus:ring-2 focus:ring-indigo-400 font-bold ${isExcluded ? 'bg-slate-200 text-slate-400 border-slate-300 cursor-not-allowed' : ''}`} value={rec.t1} placeholder="-" onChange={(e)=>handleDailyScoreChange(student.id, dayIdx, 't1', e.target.value)}/>
-                                      <input type="number" disabled={isExcluded} className={`w-10 text-center border rounded px-1 py-1 text-xs outline-none focus:ring-2 focus:ring-indigo-400 font-bold ${isExcluded ? 'bg-slate-200 text-slate-400 border-slate-300 cursor-not-allowed' : ''}`} value={rec.t2} placeholder="-" onChange={(e)=>handleDailyScoreChange(student.id, dayIdx, 't2', e.target.value)}/>
+                                      {dailySubject === 'math' ? (
+                                        <input type="number" disabled={isExcluded} className={`w-12 text-center border rounded px-1 py-1 text-xs outline-none focus:ring-2 focus:ring-indigo-400 font-bold ${isExcluded ? 'bg-slate-200 text-slate-400 border-slate-300 cursor-not-allowed' : ''}`} value={rec.math || ''} placeholder="-" onChange={(e)=>handleDailyScoreChange(student.id, dayIdx, 'math', e.target.value)}/>
+                                      ) : (
+                                        <>
+                                          <input type="number" disabled={isExcluded} className={`w-10 text-center border rounded px-1 py-1 text-xs outline-none focus:ring-2 focus:ring-indigo-400 font-bold ${isExcluded ? 'bg-slate-200 text-slate-400 border-slate-300 cursor-not-allowed' : ''}`} value={rec.t1} placeholder="-" onChange={(e)=>handleDailyScoreChange(student.id, dayIdx, 't1', e.target.value)}/>
+                                          <input type="number" disabled={isExcluded} className={`w-10 text-center border rounded px-1 py-1 text-xs outline-none focus:ring-2 focus:ring-indigo-400 font-bold ${isExcluded ? 'bg-slate-200 text-slate-400 border-slate-300 cursor-not-allowed' : ''}`} value={rec.t2} placeholder="-" onChange={(e)=>handleDailyScoreChange(student.id, dayIdx, 't2', e.target.value)}/>
+                                        </>
+                                      )}
                                     </div>
                                   </td>
                                 )
@@ -4587,8 +6209,8 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                       </thead>
                       <tbody className="divide-y divide-slate-100">
                         {filteredStudents.map(student => {
-                          const dRecords = student.dailyRecords[dailyMonth] || Array(31).fill({t1:'', t2:''});
-                          const stats = getDailyStats(dRecords, dailyMonth);
+                          const dRecords = (student.dailyRecords[dailyMonth] || Array(31).fill({t1:'', t2:'', math:''})).map(d => ({ t1: '', t2: '', math: '', ...(d || {}) }));
+                          const stats = getDailyStats(dRecords, dailyMonth, dailySubject);
                           return (
                             <tr key={student.id} className="hover:bg-slate-50 transition-colors cursor-pointer" onClick={() => setViewingDailySummary(student)}>
                               <td className="py-4 px-4 text-left">
@@ -4780,7 +6402,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
                   {activeWeeklyTab === 'omr' && (
                     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-12 flex flex-col justify-center items-center">
-                        <h2 className="font-bold text-slate-800 mb-6 flex items-center gap-2 text-xl">
+                        <h2 className="font-bold text-slate-800 mb-4 flex items-center gap-2 text-xl">
                           <UploadCloud className="text-indigo-500" size={28}/>
                           OMR 리딩 엑셀 업로드 [{weeklySubject === 'english' ? '영어' : '수학'}]
                         </h2>
@@ -4789,7 +6411,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                           className="border-2 border-dashed border-slate-300 rounded-xl p-16 text-center cursor-pointer hover:bg-indigo-50 hover:border-indigo-400 transition-colors w-full max-w-2xl"
                           onClick={() => triggerDirectUpload('weekly')}
                         >
-                          <FileSpreadsheet size={64} className="mx-auto text-indigo-300 mb-6"/>
+                          <FileSpreadsheet size={64} className="mx-auto text-indigo-300 mb-4"/>
                           <p className="text-lg font-bold text-indigo-600 mb-2">
                             클릭하여 {weeklyMonth} {selectedWeek}주차 OMR 첨부
                           </p>
@@ -5112,7 +6734,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
               {/* 리포트 뷰 모드 */}
               {testViewMode === 'report' && (
                 <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-8 flex flex-col items-center justify-center min-h-[500px]">
-                  <div className="w-20 h-20 bg-indigo-50 text-indigo-500 rounded-full flex items-center justify-center mb-6 shadow-inner"><BarChart3 size={40} /></div>
+                  <div className="w-20 h-20 bg-indigo-50 text-indigo-500 rounded-full flex items-center justify-center mb-4 shadow-inner"><BarChart3 size={40} /></div>
                   <h2 className="text-3xl font-extrabold text-slate-800 mb-3">{activeTestTab.toUpperCase()} TEST 단위 리포트</h2>
                   <p className="text-slate-500 text-center max-w-xl leading-relaxed text-sm">해당 테스트 전용 연간/월간 리포트가 렌더링될 영역입니다.</p>
                   <button onClick={() => window.print()} className="mt-8 bg-slate-900 hover:bg-slate-800 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 shadow-lg"><Printer size={18}/>리포트 인쇄</button>
@@ -5124,7 +6746,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
           {/* [4] 성적 현황 요약표 탭 */}
           {activeTab === 'grades' && (
             <div className="max-w-7xl mx-auto animate-in fade-in duration-300">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-6 border-l-4 border-l-indigo-500">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-4 border-l-4 border-l-indigo-500">
                 <div>
                   <h1 className="text-2xl font-extrabold text-slate-900 flex items-center gap-2">전체 성적 현황 요약표</h1>
                   <p className="text-slate-500 text-sm mt-1">학생들의 출석률, Daily 참여율, 최근 성적을 한눈에 파악하고 상세 리포트를 조회합니다.</p>
@@ -5411,7 +7033,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                   #monthly-report-preview .p-4 { padding: 8px !important; }
 
                   #monthly-report-preview .mb-8 { margin-bottom: 10px !important; }
-                  #monthly-report-preview .mb-6 { margin-bottom: 8px !important; }
+                  #monthly-report-preview .mb-4 { margin-bottom: 8px !important; }
                   #monthly-report-preview .mb-5 { margin-bottom: 7px !important; }
                   #monthly-report-preview .mb-4 { margin-bottom: 6px !important; }
                   #monthly-report-preview .mb-3 { margin-bottom: 5px !important; }
@@ -5485,7 +7107,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                        </div>
 
                        {/* 1. 리포트 헤더 & 학생 정보 바 */}
-                       <div className="border-b-4 border-slate-800 pb-4 mb-6 mt-2">
+                       <div className="border-b-4 border-slate-800 pb-4 mb-4 mt-2">
                           <div className="flex justify-between items-end">
                              <div>
                                 <div className="text-indigo-600 font-extrabold tracking-widest mb-1 flex items-center gap-2 text-sm"><School size={16}/> {academicYear} ACADEMIC REPORT</div>
@@ -5672,7 +7294,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                        {/* 4. 월별 월례고사 성적 추이 그래프 */}
                        <h3 className="font-extrabold text-sm text-slate-800 mb-4 flex items-center gap-1.5"><BarChart3 size={16} className="text-indigo-500"/> 월별 월례고사 성적 추이 (백분위)</h3>
                        <div className="border border-slate-200 rounded-xl pt-6 pb-2 mb-8 relative">
-                           <div className="h-32 flex items-end justify-between border-b border-slate-200 pb-0 relative px-8 mb-6">
+                           <div className="h-32 flex items-end justify-between border-b border-slate-200 pb-0 relative px-8 mb-4">
                               <div className="absolute left-0 top-0 h-full w-full flex flex-col justify-between pointer-events-none pb-0 text-[10px] text-slate-400 font-mono border-l border-slate-100 pl-2">
                                  <div className="leading-none -mt-1">100</div><div className="leading-none">75</div><div className="leading-none">50</div><div className="leading-none">25</div><div className="leading-none mb-1">0</div>
                               </div>
@@ -5728,7 +7350,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                                   const stats = getMonthlyWeeklyStats(reportStudent, selectedMonth, 'english'); // 영어 기준, 수학은 제외됨 (보통 Weekly는 주과목)
                                   return (
                                       <>
-                                          <div className="flex items-end justify-between h-24 border-b border-slate-200 pb-0 relative px-4 mb-6 mt-4">
+                                          <div className="flex items-end justify-between h-24 border-b border-slate-200 pb-0 relative px-4 mb-4 mt-4">
                                               <div className="absolute left-0 top-0 h-full w-full flex flex-col justify-between pointer-events-none text-[9px] text-slate-400 font-mono border-l border-slate-100 pl-1">
                                                 <div>100</div><div>75</div><div>50</div><div>25</div><div className="-mb-1">0</div>
                                               </div>
@@ -5817,7 +7439,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
         <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl p-8 relative">
             <button onClick={() => setShowImportModal(false)} className="absolute top-5 right-5 text-slate-400 hover:text-slate-600 bg-slate-100 p-1.5 rounded-full"><X size={20}/></button>
-            <div className="text-center mb-6">
+            <div className="text-center mb-4">
               <div className="w-16 h-16 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-4"><FileSpreadsheet size={32} /></div>
               <h2 className="text-xl font-extrabold text-slate-800 mb-2 uppercase">
                 {importType === 'studyTimeDaily' ? `${uploadTargetDay !== null ? uploadTargetDay + 1 : ''}일자 학습시간 연동` : `${importType} 엑셀 업로드`}
@@ -5883,7 +7505,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                
                 {/* 1. 최상단: 전체 월 모의고사 백분위 추이 그래프 */}
                 <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm overflow-x-auto">
-                  <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><BarChart3 size={18} className="text-indigo-500"/> 월별 모의고사 백분위 추이 (전체)</h3>
+                  <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><BarChart3 size={18} className="text-indigo-500"/> 월별 모의고사 백분위 추이 (전체)</h3>
                   <div className="h-48 flex items-end gap-2 border-b border-slate-200 pb-0 relative px-4 min-w-[800px] mb-8">
                      <div className="absolute left-0 top-0 h-full w-full flex flex-col justify-between pointer-events-none text-[10px] text-slate-400 font-mono border-l border-slate-100 pl-1">
                         <div className="leading-none -mt-1">100</div><div className="leading-none">75</div><div className="leading-none">50</div><div className="leading-none">25</div><div className="leading-none mb-1">0</div>
@@ -5921,7 +7543,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                 {/* 2. 중단: 선택된 월 요약 */}
                 <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
                   <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><FileText size={18} className="text-indigo-500"/> {detailSelectedMonth} 상세 요약</h3>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
                      <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl flex flex-col items-center">
                         <span className="text-xs text-slate-500 font-bold mb-1">출석률</span>
                         <span className="text-xl font-extrabold text-emerald-600">{getAttendanceRate(studentGradeToView, detailSelectedMonth)}</span>
@@ -5942,8 +7564,8 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                   {/* 추가된 부분: Weekly 성적 추이 그래프 */}
                   <div className="mt-8 flex gap-8">
                     <div className="flex-1 border border-slate-200 p-6 rounded-2xl bg-slate-50/50">
-                      <h3 className="font-extrabold text-sm text-slate-800 mb-6 text-center">{detailSelectedMonth} 영어 Weekly 추이</h3>
-                      <div className="flex items-end justify-between h-32 border-b border-slate-200 pb-0 relative px-4 mt-4 mb-6">
+                      <h3 className="font-extrabold text-sm text-slate-800 mb-4 text-center">{detailSelectedMonth} 영어 Weekly 추이</h3>
+                      <div className="flex items-end justify-between h-32 border-b border-slate-200 pb-0 relative px-4 mt-4 mb-4">
                         <div className="absolute left-0 top-0 h-full w-full flex flex-col justify-between pointer-events-none text-[10px] text-slate-400 font-mono border-l border-slate-200 pl-1">
                           <div className="leading-none -mt-1">100</div><div className="leading-none">75</div><div className="leading-none">50</div><div className="leading-none">25</div><div className="leading-none mb-1">0</div>
                         </div>
@@ -5963,8 +7585,8 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                     </div>
                     {studentGradeToView.targetTrack !== '인문계' && (
                       <div className="flex-1 border border-slate-200 p-6 rounded-2xl bg-slate-50/50">
-                        <h3 className="font-extrabold text-sm text-slate-800 mb-6 text-center">{detailSelectedMonth} 수학 Weekly 추이</h3>
-                        <div className="flex items-end justify-between h-32 border-b border-slate-200 pb-0 relative px-4 mt-4 mb-6">
+                        <h3 className="font-extrabold text-sm text-slate-800 mb-4 text-center">{detailSelectedMonth} 수학 Weekly 추이</h3>
+                        <div className="flex items-end justify-between h-32 border-b border-slate-200 pb-0 relative px-4 mt-4 mb-4">
                           <div className="absolute left-0 top-0 h-full w-full flex flex-col justify-between pointer-events-none text-[10px] text-slate-400 font-mono border-l border-slate-200 pl-1">
                             <div className="leading-none -mt-1">100</div><div className="leading-none">75</div><div className="leading-none">50</div><div className="leading-none">25</div><div className="leading-none mb-1">0</div>
                           </div>
@@ -6027,7 +7649,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                
                 {/* 1. 최상단: 전체 월 모의고사 백분위 추이 그래프 */}
                 <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm overflow-x-auto mb-8">
-                  <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><BarChart3 size={18} className="text-indigo-500"/> 월별 모의고사 백분위 추이 (자동 업데이트)</h3>
+                  <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><BarChart3 size={18} className="text-indigo-500"/> 월별 모의고사 백분위 추이 (자동 업데이트)</h3>
                   <div className="h-48 flex items-end gap-2 border-b border-slate-200 pb-0 relative px-4 min-w-[800px] mb-8">
                      <div className="absolute left-0 top-0 h-full w-full flex flex-col justify-between pointer-events-none text-[10px] text-slate-400 font-mono border-l border-slate-100 pl-1">
                         <div className="leading-none -mt-1">100</div><div className="leading-none">75</div><div className="leading-none">50</div><div className="leading-none">25</div><div className="leading-none mb-1">0</div>
@@ -6080,7 +7702,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
         <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl p-8 relative">
             <button onClick={() => setShowAddModal(false)} className="absolute top-5 right-5 text-slate-400 hover:text-slate-600 bg-slate-100 p-1.5 rounded-full"><X size={20}/></button>
-            <h2 className="text-xl font-extrabold text-slate-800 mb-6 flex items-center gap-2"><UserPlus size={24} className="text-indigo-500"/> 학생 수기 등록</h2>
+            <h2 className="text-xl font-extrabold text-slate-800 mb-4 flex items-center gap-2"><UserPlus size={24} className="text-indigo-500"/> 학생 수기 등록</h2>
             <div className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-slate-500 mb-1">이름</label>
@@ -6222,7 +7844,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
             </div>
 
             <div className="p-6 md:p-8 overflow-y-auto bg-slate-50 flex-1">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-4">
                 <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
                   <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
                     <Phone size={18} className="text-emerald-500"/> 연락처 및 기본정보
@@ -6249,7 +7871,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                 </div>
               </div>
 
-              <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm mb-6">
+              <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm mb-4">
                 <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
                   <Building size={18} className="text-blue-500"/> 출신 대학 및 스펙
                 </h3>
@@ -6325,11 +7947,11 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
                     {/* 주차별 점수 뷰 */}
                     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden p-6">
-                      <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2">
+                      <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
                         <BarChart3 size={18} className="text-indigo-500"/> {weeklyMonth} 주차별 성적 추이
                       </h3>
 
-                      <div className="h-48 flex items-end justify-around border-b border-slate-200 pb-2 relative px-4 mb-6">
+                      <div className="h-48 flex items-end justify-around border-b border-slate-200 pb-2 relative px-4 mb-4">
                         <div className="absolute left-0 top-0 h-full w-full flex flex-col justify-between pointer-events-none pb-2 text-[10px] text-slate-400 font-mono">
                           <div>100</div><div>75</div><div>50</div><div>25</div><div>0</div>
                         </div>
@@ -6421,7 +8043,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
             
             <div className="p-6 md:p-8 overflow-y-auto bg-slate-50 flex-1 space-y-6">
               {(() => {
-                const dRecords = viewingDailySummary.dailyRecords[dailyMonth] || Array(31).fill({t1:'', t2:''});
+                const dRecords = viewingDailySummary.dailyRecords[dailyMonth] || Array(31).fill({t1:'', t2:'', math:''});
                 const stats = getDailyStats(dRecords, dailyMonth);
                 const overallStats = getOverallDailyStats(viewingDailySummary);
                 
@@ -6448,7 +8070,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
                     {/* 월별 참여율 추이 그래프 (1~12월) */}
                     <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm overflow-x-auto">
-                      <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><BarChart3 size={18} className="text-emerald-500"/> 월별 DAILY 참여율 추이 (1월 ~ 12월)</h3>
+                      <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><BarChart3 size={18} className="text-emerald-500"/> 월별 DAILY 참여율 추이 (1월 ~ 12월)</h3>
                       <div className="h-40 flex items-end gap-2 border-b border-slate-200 pb-0 relative px-4 min-w-[800px] mt-4 mb-4">
                          <div className="absolute left-0 top-0 h-full w-full flex flex-col justify-between pointer-events-none text-[10px] text-slate-400 font-mono border-l border-slate-100 pl-1">
                             <div className="leading-none -mt-1">100%</div><div className="leading-none">75%</div><div className="leading-none">50%</div><div className="leading-none">25%</div><div className="leading-none mb-1">0%</div>
@@ -6463,7 +8085,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
                                   </div>
                                 )
                             }
-                            const monthStats = getDailyStats(viewingDailySummary.dailyRecords[m] || Array(31).fill({t1:'', t2:''}), m);
+                            const monthStats = getDailyStats(viewingDailySummary.dailyRecords[m] || Array(31).fill({t1:'', t2:'', math:''}), m);
                             const rateNum = monthStats.rate;
                             const displayHeight = rateNum > 100 ? 100 : rateNum;
                             return (
@@ -6480,7 +8102,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
                     {/* 현재 선택된 월(dailyMonth)의 일별 점수 추이 그래프 (t1+t2 총점 100점 만점 기준) */}
                     <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm overflow-x-auto mt-4">
-                      <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><BarChart3 size={18} className="text-indigo-500"/> {dailyMonth} 일별 득점 현황 (총 100점 만점 기준)</h3>
+                      <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><BarChart3 size={18} className="text-indigo-500"/> {dailyMonth} 일별 득점 현황 (총 100점 만점 기준)</h3>
                       <div className="h-40 flex items-end gap-1 border-b border-slate-200 pb-0 relative px-4 min-w-[800px] mt-4 mb-4">
                          <div className="absolute left-0 top-0 h-full w-full flex flex-col justify-between pointer-events-none text-[10px] text-slate-400 font-mono border-l border-slate-100 pl-1">
                             <div className="leading-none -mt-1">100</div><div className="leading-none">75</div><div className="leading-none">50</div><div className="leading-none">25</div><div className="leading-none mb-1">0</div>
@@ -6564,7 +8186,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
                     {/* 월간 평균 점수 추이 그래프 */}
                     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden p-6">
-                      <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><BarChart3 size={18} className="text-indigo-500"/> 전체 월별 평균 점수 추이</h3>
+                      <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><BarChart3 size={18} className="text-indigo-500"/> 전체 월별 평균 점수 추이</h3>
                       
                       <div className="h-48 flex items-end justify-around border-b border-slate-200 pb-0 relative px-4 mt-4 mb-8">
                          <div className="absolute left-0 top-0 h-full w-full flex flex-col justify-between pointer-events-none text-[10px] text-slate-400 font-mono border-l border-slate-100 pl-1">
@@ -6686,7 +8308,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
                     {/* 월별 누적 학습시간 추이 그래프 (1~12월) */}
                     <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm overflow-x-auto">
-                      <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><BarChart3 size={18} className="text-indigo-500"/> 월별 누적 학습시간 추이</h3>
+                      <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><BarChart3 size={18} className="text-indigo-500"/> 월별 누적 학습시간 추이</h3>
                       <div className="h-48 flex items-end gap-2 border-b border-slate-200 pb-0 relative px-4 min-w-[800px] mt-4 mb-8">
                          <div className="absolute left-0 top-0 h-full w-full flex flex-col justify-between pointer-events-none text-[10px] text-slate-400 font-mono border-l border-slate-100 pl-1">
                             <div className="leading-none -mt-1">300h</div><div className="leading-none">225h</div><div className="leading-none">150h</div><div className="leading-none">75h</div><div className="leading-none mb-1">0h</div>
@@ -6807,7 +8429,7 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
                     {/* 월별 출석률 추이 그래프 */}
                     <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm overflow-x-auto">
-                      <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2"><BarChart3 size={18} className="text-emerald-500"/> 전체 월별 출석률 추이</h3>
+                      <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><BarChart3 size={18} className="text-emerald-500"/> 전체 월별 출석률 추이</h3>
                       <div className="h-48 flex items-end gap-1 border-b border-slate-200 pb-0 relative px-4 min-w-[800px] mt-4 mb-4">
                          <div className="absolute left-0 top-0 h-full w-full flex flex-col justify-between pointer-events-none text-[10px] text-slate-400 font-mono border-l border-slate-100 pl-1">
                             <div className="leading-none -mt-1">100%</div><div className="leading-none">75%</div><div className="leading-none">50%</div><div className="leading-none">25%</div><div className="leading-none mb-1">0%</div>
