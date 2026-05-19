@@ -464,6 +464,11 @@ export default function App() {
   const homeMonth = `${new Date().getMonth() + 1}월`;
   const [homeSelectedMonth, setHomeSelectedMonth] = useState(homeMonth);
   const [homeActiveTab, setHomeActiveTab] = useState('home');
+  const [homeListModal, setHomeListModal] = useState({
+    open: false,
+    title: '',
+    items: []
+  });
 
   const getHomeClassSavedSettings = (clsName) => {
     if (!clsName || clsName === '대구캠퍼스 전체') return null;
@@ -521,15 +526,49 @@ export default function App() {
     });
   };
 
+  const getHomeStudentPrimaryClassName = (student) => {
+    const classList = Array.isArray(student.classNames)
+      ? student.classNames
+      : [student.className].filter(Boolean);
+
+    return classList.find(clsName => classes.includes(clsName)) || classList[0] || '';
+  };
+
+  const getHomeStudentClassNames = (student) => {
+    return Array.isArray(student.classNames)
+      ? student.classNames.filter(Boolean)
+      : [student.className].filter(Boolean);
+  };
+
+  const getHomeAttendanceExcludedDaysForStudent = (student, month = homeSelectedMonth) => {
+    const clsName = getHomeStudentPrimaryClassName(student);
+    return clsName ? getHomeAttendanceExcludedDays(clsName, month) : [];
+  };
+
+  const getHomeDailyExcludedDaysForStudent = (student, month = homeSelectedMonth) => {
+    const clsName = getHomeStudentPrimaryClassName(student);
+    return clsName ? getHomeDailyExcludedDays(clsName, month) : [];
+  };
+
+  const getHomeUnifiedAttendanceArray = (monthData = {}) => {
+    const am = monthData.am || Array(31).fill('');
+    const pm = monthData.pm || Array(31).fill('');
+
+    return Array.from({ length: 31 }, (_, i) => am[i] || pm[i] || '');
+  };
+
   const getHomeAttendanceRateForStudent = (student, month = homeSelectedMonth) => {
     const monthData = student.attendance?.[month] || {};
-    const attendanceArray = monthData[ATTENDANCE_SESSION_KEY] || monthData.am || [];
+    const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
     const dayLimit = getHomeMonthDayLimit(month);
+    const excluded = getHomeAttendanceExcludedDaysForStudent(student, month);
 
     let denominator = 0;
     let presentCount = 0;
 
     for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      if (excluded.includes(dayIndex)) continue;
+
       const value = attendanceArray?.[dayIndex];
       const type = getAttendanceValueType(value);
 
@@ -545,11 +584,14 @@ export default function App() {
   const getHomeDailyRateForStudent = (student, month = homeSelectedMonth) => {
     const dailyArray = student.dailyRecords?.[month] || [];
     const dayLimit = getHomeMonthDayLimit(month);
+    const excluded = getHomeDailyExcludedDaysForStudent(student, month);
 
     let denominator = 0;
     let participatedCount = 0;
 
     for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      if (excluded.includes(dayIndex)) continue;
+
       denominator += 1;
       const day = dailyArray[dayIndex] || {};
       const t1 = String(day?.t1 ?? '').trim();
@@ -561,12 +603,131 @@ export default function App() {
     return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
   };
 
+  const hasHomeDailyMissingUntilToday = (student, month = homeSelectedMonth) => {
+    const dailyArray = student.dailyRecords?.[month] || [];
+    const dayLimit = getHomeMonthDayLimit(month);
+    const excluded = getHomeDailyExcludedDaysForStudent(student, month);
+
+    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      if (excluded.includes(dayIndex)) continue;
+
+      const day = dailyArray[dayIndex] || {};
+      const t1 = String(day?.t1 ?? '').trim();
+      const t2 = String(day?.t2 ?? '').trim();
+      const math = String(day?.math ?? '').trim();
+
+      if (t1 === '' && t2 === '' && math === '') {
+        return true;
+      }
+    }
+
+    return false;
+  };
+
+  const getHomeWeeklyScoreValuesForStudent = (student, month = homeSelectedMonth) => {
+    const englishEntries = Object.entries(student.scores?.weeklyEnglish || {});
+    const mathEntries = Object.entries(student.scores?.weeklyMath || {});
+    const monthPrefix = `${month}_w`;
+
+    const values = [...englishEntries, ...mathEntries]
+      .filter(([key]) => String(key).startsWith(monthPrefix) || String(key) === `w${homeCurrentWeek}`)
+      .map(([, value]) => Number(value))
+      .filter(value => Number.isFinite(value));
+
+    return values;
+  };
+
+  const getHomeWeeklyAverageForStudent = (student, month = homeSelectedMonth) => {
+    const values = getHomeWeeklyScoreValuesForStudent(student, month);
+    if (!values.length) return null;
+
+    return Math.round((values.reduce((sum, value) => sum + value, 0) / values.length) * 10) / 10;
+  };
+
   const getHomeWeeklyMissingForStudent = (student, month = homeSelectedMonth) => {
     const weeklyKey = `${month}_w${homeCurrentWeek}`;
     const eng = student.scores?.weeklyEnglish?.[weeklyKey] ?? student.scores?.weeklyEnglish?.[`w${homeCurrentWeek}`];
     const math = student.scores?.weeklyMath?.[weeklyKey] ?? student.scores?.weeklyMath?.[`w${homeCurrentWeek}`];
 
     return String(eng ?? '').trim() === '' && String(math ?? '').trim() === '';
+  };
+
+  const getHomeWeeklyParticipationRate = (week = homeCurrentWeek, month = homeSelectedMonth) => {
+    if (!students.length) return 0;
+
+    const weeklyKey = `${month}_w${week}`;
+    const participated = students.filter(student => {
+      const eng = student.scores?.weeklyEnglish?.[weeklyKey] ?? student.scores?.weeklyEnglish?.[`w${week}`];
+      const math = student.scores?.weeklyMath?.[weeklyKey] ?? student.scores?.weeklyMath?.[`w${week}`];
+      return String(eng ?? '').trim() !== '' || String(math ?? '').trim() !== '';
+    }).length;
+
+    return Math.round((participated / students.length) * 100);
+  };
+
+  const getHomeMonthlyScoreForStudent = (student, month = homeSelectedMonth) => {
+    const monthly = student.scores?.monthly?.[month] || {};
+    const english = Number(monthly.english?.score);
+    const math = Number(monthly.math?.score);
+    const total = Number(monthly.total?.score);
+    const track = String(student.targetTrack || '');
+
+    if (Number.isFinite(total)) return total;
+
+    if (track.includes('자연')) {
+      if (Number.isFinite(english) && Number.isFinite(math)) return Math.round(((english + math) / 2) * 10) / 10;
+      if (Number.isFinite(math)) return math;
+      if (Number.isFinite(english)) return english;
+      return null;
+    }
+
+    if (Number.isFinite(english)) return english;
+    if (Number.isFinite(total)) return total;
+    if (Number.isFinite(math)) return math;
+
+    return null;
+  };
+
+  const getHomeMonthlyParticipationRate = (month = homeSelectedMonth) => {
+    if (!students.length) return 0;
+
+    const participated = students.filter(student => getHomeMonthlyScoreForStudent(student, month) !== null).length;
+    return Math.round((participated / students.length) * 100);
+  };
+
+  const getHomeMonthlyMissingStudents = (month = homeSelectedMonth) => {
+    return students.filter(student => getHomeMonthlyScoreForStudent(student, month) === null);
+  };
+
+  const getHomeMonthlyScoreOverview = (month = homeSelectedMonth) => {
+    const scoredStudents = students
+      .map(student => ({ student, score: getHomeMonthlyScoreForStudent(student, month) }))
+      .filter(item => item.score !== null);
+
+    const average = scoredStudents.length
+      ? Math.round((scoredStudents.reduce((sum, item) => sum + item.score, 0) / scoredStudents.length) * 10) / 10
+      : 0;
+
+    const belowAverageStudents = scoredStudents
+      .filter(item => item.score < average)
+      .map(item => item.student);
+
+    const classAverages = classes.map(clsName => {
+      const classScored = getHomeClassStudents(clsName)
+        .map(student => getHomeMonthlyScoreForStudent(student, month))
+        .filter(score => score !== null);
+
+      const avg = classScored.length
+        ? Math.round((classScored.reduce((sum, score) => sum + score, 0) / classScored.length) * 10) / 10
+        : null;
+
+      return { clsName, avg };
+    }).filter(item => item.avg !== null);
+
+    const bestClass = [...classAverages].sort((a, b) => b.avg - a.avg)[0] || null;
+    const worstClassByScore = [...classAverages].sort((a, b) => a.avg - b.avg)[0] || null;
+
+    return { average, belowAverageStudents, bestClass, worstClassByScore };
   };
 
   const getHomeStudyWeekMins = (student, month = homeSelectedMonth) => {
@@ -589,16 +750,50 @@ export default function App() {
     if (targetStudents.length === 0) return 0;
 
     const dayLimit = getHomeMonthDayLimit(homeSelectedMonth);
-    const excluded = clsName === '대구캠퍼스 전체' ? [] : getHomeAttendanceExcludedDays(clsName, homeSelectedMonth);
     let denominator = 0;
     let presentTotal = 0;
 
     for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
-      if (excluded.includes(dayIndex)) continue;
-
       targetStudents.forEach(student => {
+        const excluded = clsName === '대구캠퍼스 전체'
+          ? getHomeAttendanceExcludedDaysForStudent(student, homeSelectedMonth)
+          : getHomeAttendanceExcludedDays(clsName, homeSelectedMonth);
+
+        if (excluded.includes(dayIndex)) return;
+
         const monthData = student.attendance?.[homeSelectedMonth] || {};
-        const attendanceArray = monthData[ATTENDANCE_SESSION_KEY] || monthData.am || [];
+        const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
+        const value = attendanceArray?.[dayIndex];
+        const type = getAttendanceValueType(value);
+
+        if (type === 'neutral') return;
+
+        denominator += 1;
+        if (type === 'present') presentTotal += 1;
+      });
+    }
+
+    return denominator === 0 ? 0 : Math.round((presentTotal / denominator) * 100);
+  };
+
+  const getHomeClassAttendanceRateUntilDay = (clsName, month = homeSelectedMonth, dayLimitOverride = getHomeMonthDayLimit(month)) => {
+    const targetStudents = getHomeClassStudents(clsName);
+    if (!targetStudents.length) return 0;
+
+    const dayLimit = Math.max(1, Math.min(31, dayLimitOverride));
+    let denominator = 0;
+    let presentTotal = 0;
+
+    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      targetStudents.forEach(student => {
+        const excluded = clsName === '대구캠퍼스 전체'
+          ? getHomeAttendanceExcludedDaysForStudent(student, month)
+          : getHomeAttendanceExcludedDays(clsName, month);
+
+        if (excluded.includes(dayIndex)) return;
+
+        const monthData = student.attendance?.[month] || {};
+        const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
         const value = attendanceArray?.[dayIndex];
         const type = getAttendanceValueType(value);
 
@@ -617,16 +812,48 @@ export default function App() {
     if (targetStudents.length === 0) return 0;
 
     const dayLimit = getHomeMonthDayLimit(homeSelectedMonth);
-    const excluded = clsName === '대구캠퍼스 전체' ? [] : getHomeDailyExcludedDays(clsName, homeSelectedMonth);
     let denominator = 0;
     let participatedCount = 0;
 
     for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
-      if (excluded.includes(dayIndex)) continue;
-
       targetStudents.forEach(student => {
+        const excluded = clsName === '대구캠퍼스 전체'
+          ? getHomeDailyExcludedDaysForStudent(student, homeSelectedMonth)
+          : getHomeDailyExcludedDays(clsName, homeSelectedMonth);
+
+        if (excluded.includes(dayIndex)) return;
+
         denominator += 1;
         const dailyArray = student.dailyRecords?.[homeSelectedMonth] || [];
+        const day = dailyArray[dayIndex] || {};
+        const t1 = String(day?.t1 ?? '').trim();
+        const t2 = String(day?.t2 ?? '').trim();
+        const math = String(day?.math ?? '').trim();
+        if (t1 !== '' || t2 !== '' || math !== '') participatedCount += 1;
+      });
+    }
+
+    return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
+  };
+
+  const getHomeClassDailyRateUntilDay = (clsName, month = homeSelectedMonth, dayLimitOverride = getHomeMonthDayLimit(month)) => {
+    const targetStudents = getHomeClassStudents(clsName);
+    if (!targetStudents.length) return 0;
+
+    const dayLimit = Math.max(1, Math.min(31, dayLimitOverride));
+    let denominator = 0;
+    let participatedCount = 0;
+
+    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      targetStudents.forEach(student => {
+        const excluded = clsName === '대구캠퍼스 전체'
+          ? getHomeDailyExcludedDaysForStudent(student, month)
+          : getHomeDailyExcludedDays(clsName, month);
+
+        if (excluded.includes(dayIndex)) return;
+
+        denominator += 1;
+        const dailyArray = student.dailyRecords?.[month] || [];
         const day = dailyArray[dayIndex] || {};
         const t1 = String(day?.t1 ?? '').trim();
         const t2 = String(day?.t2 ?? '').trim();
@@ -644,7 +871,8 @@ export default function App() {
     return targetStudents.filter(student => {
       const attendanceRate = getHomeAttendanceRateForStudent(student, homeSelectedMonth);
       const dailyRate = getHomeDailyRateForStudent(student, homeSelectedMonth);
-      return attendanceRate <= 70 || dailyRate <= 70;
+      const weeklyAverage = getHomeWeeklyAverageForStudent(student, homeSelectedMonth);
+      return attendanceRate <= 70 || dailyRate <= 70 || (weeklyAverage !== null && weeklyAverage <= 50);
     }).length;
   };
 
@@ -667,26 +895,42 @@ export default function App() {
   };
 
   const showHomeStudentList = (title, list) => {
-    if (!list.length) {
-      alert(`${title}\n\n해당 학생이 없습니다.`);
-      return;
-    }
+    const items = list.length
+      ? list.map((s, i) => `${i + 1}. ${getHomeStudentLabel(s)}`)
+      : ['해당 학생이 없습니다.'];
 
-    alert(`${title}\n\n${list.map((s, i) => `${i + 1}. ${getHomeStudentLabel(s)}`).join('\n')}`);
+    setHomeListModal({
+      open: true,
+      title,
+      items
+    });
   };
 
-  const homeDailyMissingStudents = students.filter(s => {
-    const todayDaily = s.dailyRecords?.[homeSelectedMonth]?.[homeTodayIndex];
-    if (!todayDaily) return true;
+  const showHomeRecordList = (title, list) => {
+    const items = list.length
+      ? list.map((item, i) => `${i + 1}. ${item.text}`)
+      : ['해당 내역이 없습니다.'];
 
-    const t1 = String(todayDaily.t1 ?? '').trim();
-    const t2 = String(todayDaily.t2 ?? '').trim();
-    const math = String(todayDaily.math ?? '').trim();
+    setHomeListModal({
+      open: true,
+      title,
+      items
+    });
+  };
 
-    return t1 === '' && t2 === '' && math === '';
-  });
+  const showHomeTextList = (title, items = []) => {
+    setHomeListModal({
+      open: true,
+      title,
+      items: items.length ? items : ['표시할 내용이 없습니다.']
+    });
+  };
+
+  const homeDailyMissingStudents = students.filter(s => hasHomeDailyMissingUntilToday(s, homeSelectedMonth));
 
   const homeWeeklyMissingStudents = students.filter(s => getHomeWeeklyMissingForStudent(s, homeSelectedMonth));
+
+  const homeMonthlyMissingStudents = getHomeMonthlyMissingStudents(homeSelectedMonth);
 
   const homeLowAttendanceStudents = students.filter(s => {
     return getHomeAttendanceRateForStudent(s, homeSelectedMonth) < 80;
@@ -697,11 +941,123 @@ export default function App() {
     return weekMins > 0 && weekMins < 600;
   });
 
-  const homeNeedStudents = students.filter(s => {
-    const attendanceRate = getHomeAttendanceRateForStudent(s, homeSelectedMonth);
-    const dailyRate = getHomeDailyRateForStudent(s, homeSelectedMonth);
-    return attendanceRate <= 70 || dailyRate <= 70;
+  const homeCounselingNeededStudents = students.filter(student => {
+    const attendanceRate = getHomeAttendanceRateForStudent(student, homeSelectedMonth);
+    const dailyRate = getHomeDailyRateForStudent(student, homeSelectedMonth);
+    const weeklyAverage = getHomeWeeklyAverageForStudent(student, homeSelectedMonth);
+
+    return attendanceRate <= 50 || dailyRate <= 50 || (weeklyAverage !== null && weeklyAverage <= 30);
   });
+
+  const homeNeedStudents = students.filter(student => {
+    const attendanceRate = getHomeAttendanceRateForStudent(student, homeSelectedMonth);
+    const dailyRate = getHomeDailyRateForStudent(student, homeSelectedMonth);
+    const weeklyAverage = getHomeWeeklyAverageForStudent(student, homeSelectedMonth);
+
+    return attendanceRate <= 70 || dailyRate <= 70 || (weeklyAverage !== null && weeklyAverage <= 50);
+  });
+
+  const homeRecentNewStudents = students.filter(student => {
+    const registeredAt = student.createdAt || student.registeredAt || student.enrolledAt;
+    if (registeredAt) {
+      const createdDate = new Date(registeredAt);
+      if (!Number.isNaN(createdDate.getTime())) {
+        const diffDays = (Date.now() - createdDate.getTime()) / (1000 * 60 * 60 * 24);
+        return diffDays <= 30;
+      }
+    }
+
+    return student.startMonth === homeSelectedMonth;
+  });
+
+  const getHomeAttendanceRecordsByStatuses = (statuses = [], month = homeSelectedMonth) => {
+    const statusSet = new Set(statuses);
+    const dayLimit = getHomeMonthDayLimit(month);
+    const records = [];
+
+    students.forEach(student => {
+      const excluded = getHomeAttendanceExcludedDaysForStudent(student, month);
+      const monthData = student.attendance?.[month] || {};
+      const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
+
+      for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+        if (excluded.includes(dayIndex)) continue;
+
+        const status = String(attendanceArray?.[dayIndex] ?? '').trim();
+        if (!statusSet.has(status)) continue;
+
+        records.push({
+          student,
+          status,
+          dayIndex,
+          text: `${student.name} (${getHomeStudentPrimaryClassName(student) || '미배정'}) - ${month} ${dayIndex + 1}일 ${status}`
+        });
+      }
+    });
+
+    return records;
+  };
+
+  const getHomeConsecutiveAbsenceStudents = (minDays = 3, month = homeSelectedMonth) => {
+    const dayLimit = getHomeMonthDayLimit(month);
+
+    return students.filter(student => {
+      const excluded = getHomeAttendanceExcludedDaysForStudent(student, month);
+      const monthData = student.attendance?.[month] || {};
+      const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
+      let streak = 0;
+
+      for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+        if (excluded.includes(dayIndex)) continue;
+
+        const status = String(attendanceArray?.[dayIndex] ?? '').trim();
+
+        if (status === '결석') {
+          streak += 1;
+          if (streak >= minDays) return true;
+        } else if (status === '출석' || status === 'Live') {
+          streak = 0;
+        }
+      }
+
+      return false;
+    });
+  };
+
+  const getHomeLongNoShowStudents = (minDays = 7, month = homeSelectedMonth) => {
+    const dayLimit = getHomeMonthDayLimit(month);
+
+    return students.filter(student => {
+      const excluded = getHomeAttendanceExcludedDaysForStudent(student, month);
+      const monthData = student.attendance?.[month] || {};
+      const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
+      let validDays = 0;
+      let daysSinceLastPresent = 0;
+      let hasPresent = false;
+
+      for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+        if (excluded.includes(dayIndex)) continue;
+
+        validDays += 1;
+        const type = getAttendanceValueType(attendanceArray?.[dayIndex]);
+
+        if (type === 'present') {
+          hasPresent = true;
+          daysSinceLastPresent = 0;
+        } else if (type !== 'neutral') {
+          daysSinceLastPresent += 1;
+        }
+      }
+
+      return validDays >= minDays && (!hasPresent || daysSinceLastPresent >= minDays);
+    });
+  };
+
+  const homeLateRecords = getHomeAttendanceRecordsByStatuses(['지각'], homeSelectedMonth);
+  const homeAbsentRecords = getHomeAttendanceRecordsByStatuses(['결석'], homeSelectedMonth);
+  const homeEarlyLeaveRecords = getHomeAttendanceRecordsByStatuses(['조퇴'], homeSelectedMonth);
+  const homeConsecutiveAbsenceStudents = getHomeConsecutiveAbsenceStudents(3, homeSelectedMonth);
+  const homeLongNoShowStudents = getHomeLongNoShowStudents(7, homeSelectedMonth);
 
   const homeGraphColors = ['#16a34a', '#2563eb', '#06b6d4', '#7c3aed', '#22c55e', '#f43f5e', '#f97316', '#0ea5e9'];
   const getHomeGraphColor = (index) => homeGraphColors[index % homeGraphColors.length];
@@ -709,20 +1065,23 @@ export default function App() {
   const getHomeClassDailyAttendanceTrend = (clsName, month = homeSelectedMonth) => {
     const targetStudents = getHomeClassStudents(clsName);
     const dayLimit = getHomeMonthDayLimit(month);
-    const excluded = clsName === '대구캠퍼스 전체' ? [] : getHomeAttendanceExcludedDays(clsName, month);
     const trend = [];
 
     if (targetStudents.length === 0) return [0];
 
     for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
-      if (excluded.includes(dayIndex)) continue;
-
       let denominator = 0;
       let presentCount = 0;
 
       targetStudents.forEach(student => {
+        const excluded = clsName === '대구캠퍼스 전체'
+          ? getHomeAttendanceExcludedDaysForStudent(student, month)
+          : getHomeAttendanceExcludedDays(clsName, month);
+
+        if (excluded.includes(dayIndex)) return;
+
         const monthData = student.attendance?.[month] || {};
-        const attendanceArray = monthData?.[ATTENDANCE_SESSION_KEY] || monthData?.am || [];
+        const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
         const value = attendanceArray?.[dayIndex];
         const type = getAttendanceValueType(value);
 
@@ -737,7 +1096,6 @@ export default function App() {
 
     return trend.length ? trend : [0];
   };
-
   const getHomeSparkPointsFromTrend = (trend = []) => {
     const values = trend.length ? trend : [0];
 
@@ -816,7 +1174,7 @@ export default function App() {
   const homeManagementAlerts = [
     {
       title: 'Daily 미응시',
-      desc: `${homeSelectedMonth} ${homeTodayIndex + 1}일 Daily를 응시하지 않은 학생`,
+      desc: `${homeSelectedMonth} 1일~${homeTodayIndex + 1}일 Daily 누적 미응시 학생`,
       count: homeDailyMissingStudents.length,
       color: 'red',
       icon: AlertTriangle,
@@ -831,8 +1189,8 @@ export default function App() {
       students: homeWeeklyMissingStudents
     },
     {
-      title: '출석률 80% 미만',
-      desc: `${homeSelectedMonth} 출석률이 80% 미만인 학생`,
+      title: '출석률 저조',
+      desc: `${homeSelectedMonth} 1일~${homeTodayIndex + 1}일 기준 출석률 80% 미만 학생`,
       count: homeLowAttendanceStudents.length,
       color: 'orange',
       icon: AlertTriangle,
@@ -867,6 +1225,46 @@ export default function App() {
   if (!selectedClass) {
     return (
       <div className="min-h-screen bg-[#f4f8ff] font-sans relative overflow-hidden text-slate-900">
+        {homeListModal.open && (
+          <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/35 backdrop-blur-sm">
+            <div className="w-[430px] max-w-[92vw] max-h-[74vh] rounded-2xl bg-white shadow-2xl border border-blue-100 overflow-hidden">
+              <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+                <div>
+                  <h3 className="text-base font-black text-slate-900">{homeListModal.title}</h3>
+                  <p className="text-xs font-bold text-slate-400 mt-1">총 {homeListModal.items.length}개 항목</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setHomeListModal({ open: false, title: '', items: [] })}
+                  className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-500 font-black"
+                >
+                  ×
+                </button>
+              </div>
+
+              <div className="px-5 py-4 max-h-[56vh] overflow-y-auto">
+                <div className="space-y-2">
+                  {homeListModal.items.map((item, index) => (
+                    <div key={index} className="text-sm font-bold text-slate-700 leading-relaxed whitespace-pre-wrap">
+                      {item}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="px-5 py-3 border-t border-slate-100 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setHomeListModal({ open: false, title: '', items: [] })}
+                  className="px-4 py-2 rounded-xl bg-blue-600 text-white text-sm font-black hover:bg-blue-700"
+                >
+                  확인
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(96,165,250,0.20),transparent_32%),linear-gradient(135deg,rgba(239,246,255,0.96),rgba(255,255,255,0.98)_45%,rgba(219,234,254,0.42))]"></div>
 
         <img
@@ -983,91 +1381,345 @@ export default function App() {
                 </button>
               </div>
 
-              {homeActiveTab === 'students' && (
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                  <div className="rounded-2xl bg-blue-50/60 border border-blue-100 p-4">
-                    <p className="text-sm font-black text-slate-600 mb-1">전체 학생 수</p>
-                    <strong className="text-3xl font-black text-blue-600">{homeDashboardStats.totalStudents}명</strong>
-                  </div>
+              {homeActiveTab === 'students' && (() => {
+                const humanitiesCount = students.filter(s => String(s.targetTrack || '').includes('인문')).length;
+                const naturalCount = students.filter(s => String(s.targetTrack || '').includes('자연')).length;
+                const maleCount = students.filter(s => s.gender === '남').length;
+                const femaleCount = students.filter(s => s.gender === '여').length;
+                const totalCount = homeDashboardStats.totalStudents || 0;
+                const humanitiesRate = totalCount ? Math.round((humanitiesCount / totalCount) * 100) : 0;
+                const naturalRate = totalCount ? Math.round((naturalCount / totalCount) * 100) : 0;
+                const maxClassCount = Math.max(1, ...classes.map(clsName => classStats[clsName] || 0));
 
-                  <div className="rounded-2xl bg-white border border-blue-100 p-4">
-                    <p className="text-sm font-black text-slate-700 mb-3">반별 학생 수</p>
-                    <div className="grid grid-cols-2 gap-2">
-                      {classes.map(clsName => (
-                        <button
-                          key={clsName}
-                          onClick={() => setSelectedClass(clsName)}
-                          className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm font-black hover:bg-blue-50"
+                const currentMonthIndex = MONTHS.indexOf(homeSelectedMonth);
+                const prevMonth = MONTHS[Math.max(0, currentMonthIndex - 1)] || homeSelectedMonth;
+                const currentMonthNewCount = students.filter(s => s.startMonth === homeSelectedMonth).length;
+                const prevMonthNewCount = students.filter(s => s.startMonth === prevMonth).length;
+                const monthDiff = currentMonthNewCount - prevMonthNewCount;
+
+                return (
+                  <div className="grid grid-cols-1 lg:grid-cols-[1.05fr_1fr_1fr] gap-3">
+                    <div className="rounded-2xl bg-white border border-blue-100 p-4 shadow-sm">
+                      <p className="text-sm font-black text-slate-700 mb-1">전체 학생 수</p>
+
+                      <div className="flex items-end gap-2 mb-1">
+                        <strong className="text-3xl font-black text-blue-600">{totalCount}</strong>
+                        <span className="text-lg font-black text-slate-700 mb-0.5">명</span>
+                      </div>
+
+                      <div className={`text-[11px] font-black mb-4 ${monthDiff >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                        전월 대비 {monthDiff > 0 ? '▲' : monthDiff < 0 ? '▼' : ''} {Math.abs(monthDiff)}명
+                      </div>
+
+                      <div className="grid grid-cols-[96px_1fr] gap-4 items-center">
+                        <div
+                          className="relative w-[88px] h-[88px] rounded-full flex items-center justify-center"
+                          style={{
+                            background: `conic-gradient(#3b82f6 0% ${humanitiesRate}%, #ec4899 ${humanitiesRate}% 100%)`
+                          }}
                         >
-                          <span>{clsName}</span>
-                          <span className="text-blue-600">{classStats[clsName]}명</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {homeActiveTab === 'attendance' && (
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-                  <div className="rounded-2xl bg-blue-50/60 border border-blue-100 p-4">
-                    <p className="text-sm font-black text-slate-600 mb-1">{homeSelectedMonth} 전체 출석률</p>
-                    <strong className={`text-3xl font-black ${getRateTextClass(homeDashboardStats.attendanceRate)}`}>
-                      {homeDashboardStats.attendanceRate}%
-                    </strong>
-                  </div>
-
-                  <button
-                    onClick={() => showHomeStudentList('출석률 80% 미만 학생', homeLowAttendanceStudents)}
-                    className="rounded-2xl bg-orange-50/70 border border-orange-100 p-4 text-left"
-                  >
-                    <p className="text-sm font-black text-slate-600 mb-1">출석률 80% 미만</p>
-                    <strong className="text-3xl font-black text-orange-500">{homeLowAttendanceStudents.length}명</strong>
-                  </button>
-
-                  <div className="rounded-2xl bg-white border border-blue-100 p-4">
-                    <p className="text-sm font-black text-slate-700 mb-3">반별 출석률</p>
-                    <div className="space-y-2">
-                      {classes.map(clsName => (
-                        <div key={clsName} className="flex items-center justify-between text-sm font-black">
-                          <span>{clsName}</span>
-                          <span className={getRateTextClass(getHomeClassAttendanceRate(clsName))}>
-                            {getHomeClassAttendanceRate(clsName)}%
-                          </span>
+                          <div className="w-[56px] h-[56px] rounded-full bg-white shadow-inner"></div>
                         </div>
-                      ))}
+
+                        <div className="space-y-2 text-xs font-black">
+                          <div className="grid grid-cols-[10px_1fr_auto] items-center gap-2">
+                            <span className="w-2 h-2 rounded-full bg-blue-500"></span>
+                            <span className="text-slate-600">인문계열</span>
+                            <span className="text-slate-900">{humanitiesCount}명 ({humanitiesRate}%)</span>
+                          </div>
+
+                          <div className="grid grid-cols-[10px_1fr_auto] items-center gap-2">
+                            <span className="w-2 h-2 rounded-full bg-pink-500"></span>
+                            <span className="text-slate-600">자연계열</span>
+                            <span className="text-slate-900">{naturalCount}명 ({naturalRate}%)</span>
+                          </div>
+
+                          <div className="flex items-center gap-2 pt-2 mt-1 border-t border-slate-100 text-slate-500">
+                            <span className="w-2 h-2 rounded-full bg-slate-300"></span>
+                            <span>남 {maleCount}명 / 여 {femaleCount}명</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl bg-white border border-blue-100 p-4 shadow-sm">
+                      <div className="flex items-center justify-between mb-3">
+                        <p className="text-sm font-black text-slate-700">반별 학생 수</p>
+                        <button
+                          type="button"
+                          onClick={() => showHomeTextList('반별 학생 수', classes.map(clsName => `${clsName}: ${classStats[clsName] || 0}명`))}
+                          className="text-[11px] font-black text-blue-600"
+                        >
+                          전체 보기
+                        </button>
+                      </div>
+
+                      <div className="space-y-3">
+                        {classes.map(clsName => {
+                          const count = classStats[clsName] || 0;
+                          const width = Math.max(6, Math.round((count / maxClassCount) * 100));
+
+                          return (
+                            <button
+                              key={clsName}
+                              type="button"
+                              onClick={() => setSelectedClass(clsName)}
+                              className="w-full grid grid-cols-[52px_1fr_42px] items-center gap-3 text-xs font-black text-left"
+                            >
+                              <span className="text-slate-700">{clsName}</span>
+                              <span className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                                <span className="block h-full rounded-full bg-blue-500" style={{ width: `${width}%` }}></span>
+                              </span>
+                              <span className="text-right text-slate-700">{count}명</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl bg-white border border-blue-100 p-4 shadow-sm">
+                      <div className="flex items-center justify-between mb-3">
+                        <p className="text-sm font-black text-slate-700">학생 관리 포인트</p>
+                        <button
+                          type="button"
+                          onClick={() => showHomeStudentList('관리 필요 학생', homeNeedStudents)}
+                          className="text-[11px] font-black text-blue-600"
+                        >
+                          전체 보기
+                        </button>
+                      </div>
+
+                      <div className="space-y-3">
+                        {[
+                          { label: '상담 필요 학생', count: homeCounselingNeededStudents.length, color: 'text-red-500', bg: 'bg-red-50', list: homeCounselingNeededStudents },
+                          { label: '장기 미응시 학생', count: homeDailyMissingStudents.length, color: 'text-orange-500', bg: 'bg-orange-50', list: homeDailyMissingStudents },
+                          { label: '관리 필요 학생', count: homeNeedStudents.length, color: 'text-orange-500', bg: 'bg-orange-50', list: homeNeedStudents },
+                          { label: '최근 신규 등록', count: homeRecentNewStudents.length, color: 'text-violet-600', bg: 'bg-violet-50', list: homeRecentNewStudents }
+                        ].map(item => (
+                          <button
+                            key={item.label}
+                            type="button"
+                            onClick={() => showHomeStudentList(item.label, item.list)}
+                            className="w-full flex items-center justify-between text-left"
+                          >
+                            <span className="flex items-center gap-2">
+                              <span className={`w-8 h-8 rounded-xl ${item.bg} ${item.color} flex items-center justify-center`}>
+                                <AlertTriangle size={15} />
+                              </span>
+                              <span className="text-sm font-black text-slate-700">{item.label}</span>
+                            </span>
+                            <strong className={`text-lg font-black ${item.color}`}>{item.count}명</strong>
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
-              {homeActiveTab === 'test' && (
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-                  <div className="rounded-2xl bg-blue-50/60 border border-blue-100 p-4">
-                    <p className="text-sm font-black text-slate-600 mb-1">{homeSelectedMonth} Daily 참여율</p>
-                    <strong className={`text-3xl font-black ${getRateTextClass(homeDashboardStats.dailyRate)}`}>
-                      {homeDashboardStats.dailyRate}%
-                    </strong>
+              {homeActiveTab === 'attendance' && (() => {
+                const yesterdayLimit = Math.max(1, homeTodayIndex);
+                const yesterdayRate = getHomeClassAttendanceRateUntilDay('대구캠퍼스 전체', homeSelectedMonth, yesterdayLimit);
+                const todayRate = homeDashboardStats.attendanceRate;
+                const diff = todayRate - yesterdayRate;
+                const maxRate = 100;
+
+                return (
+                  <div className="grid grid-cols-1 lg:grid-cols-[1.15fr_0.9fr_1fr] gap-3">
+                    <div className="rounded-2xl bg-white border border-blue-100 p-4 shadow-sm">
+                      <p className="text-sm font-black text-slate-700 mb-3">이번 달 출결 현황</p>
+
+                      <div className="grid grid-cols-[130px_1fr] gap-4 items-center">
+                        <div className="relative w-[124px] h-[124px] rounded-full bg-[conic-gradient(#2563eb_0%,#2563eb_var(--rate),#e5edff_var(--rate),#e5edff_100%)] flex items-center justify-center" style={{ '--rate': `${todayRate}%` }}>
+                          <div className="w-[86px] h-[86px] rounded-full bg-white flex flex-col items-center justify-center">
+                            <strong className="text-3xl font-black text-slate-900">{todayRate}%</strong>
+                            <span className="text-xs font-black text-slate-500">평균 출석률</span>
+                          </div>
+                        </div>
+
+                        <div>
+                          <div className={`text-sm font-black mb-3 ${diff >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                            {diff >= 0 ? '▲' : '▼'} {Math.abs(diff)}%p 전날 대비
+                          </div>
+
+                          <div className="grid grid-cols-3 gap-2">
+                            <button type="button" onClick={() => showHomeRecordList('지각 학생', homeLateRecords)} className="rounded-xl bg-slate-50 p-3 text-center">
+                              <p className="text-xs font-black text-slate-500 mb-1">지각</p>
+                              <strong className="text-lg font-black text-orange-500">{homeLateRecords.length}건</strong>
+                            </button>
+                            <button type="button" onClick={() => showHomeRecordList('결석 학생', homeAbsentRecords)} className="rounded-xl bg-slate-50 p-3 text-center">
+                              <p className="text-xs font-black text-slate-500 mb-1">결석</p>
+                              <strong className="text-lg font-black text-red-500">{homeAbsentRecords.length}건</strong>
+                            </button>
+                            <button type="button" onClick={() => showHomeRecordList('조퇴 학생', homeEarlyLeaveRecords)} className="rounded-xl bg-slate-50 p-3 text-center">
+                              <p className="text-xs font-black text-slate-500 mb-1">조퇴</p>
+                              <strong className="text-lg font-black text-blue-500">{homeEarlyLeaveRecords.length}건</strong>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl bg-white border border-blue-100 p-4 shadow-sm">
+                      <p className="text-sm font-black text-slate-700 mb-3">출결 위험 학생</p>
+
+                      <div className="space-y-3">
+                        {[
+                          { label: '출석률 70% 미만', count: students.filter(s => getHomeAttendanceRateForStudent(s, homeSelectedMonth) < 70).length, list: students.filter(s => getHomeAttendanceRateForStudent(s, homeSelectedMonth) < 70), color: 'text-red-500', bg: 'bg-red-50' },
+                          { label: '연속 결석 3일 이상', count: homeConsecutiveAbsenceStudents.length, list: homeConsecutiveAbsenceStudents, color: 'text-orange-500', bg: 'bg-orange-50' },
+                          { label: '장기 미등원 7일 이상', count: homeLongNoShowStudents.length, list: homeLongNoShowStudents, color: 'text-orange-500', bg: 'bg-orange-50' }
+                        ].map(item => (
+                          <button
+                            key={item.label}
+                            type="button"
+                            onClick={() => showHomeStudentList(item.label, item.list)}
+                            className="w-full flex items-center justify-between text-left"
+                          >
+                            <span className="flex items-center gap-2">
+                              <span className={`w-8 h-8 rounded-xl ${item.bg} ${item.color} flex items-center justify-center`}>
+                                <AlertTriangle size={15} />
+                              </span>
+                              <span className="text-sm font-black text-slate-700">{item.label}</span>
+                            </span>
+                            <strong className={`text-lg font-black ${item.color}`}>{item.count}명</strong>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl bg-white border border-blue-100 p-4 shadow-sm">
+                      <div className="flex items-center justify-between mb-3">
+                        <p className="text-sm font-black text-slate-700">반별 출석률</p>
+                        <button
+                          type="button"
+                          onClick={() => showHomeTextList('반별 출석률', classes.map(clsName => `${clsName}: ${getHomeClassAttendanceRate(clsName)}%`))}
+                          className="text-[11px] font-black text-blue-600"
+                        >
+                          전체 보기
+                        </button>
+                      </div>
+
+                      <div className="space-y-3">
+                        {classes.map(clsName => {
+                          const rate = getHomeClassAttendanceRate(clsName);
+                          return (
+                            <button key={clsName} type="button" onClick={() => setSelectedClass(clsName)} className="w-full grid grid-cols-[52px_1fr_42px] items-center gap-3 text-xs font-black text-left">
+                              <span className="text-slate-700">{clsName}</span>
+                              <span className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                                <span className={`block h-full rounded-full ${rate < 80 ? 'bg-orange-400' : 'bg-emerald-500'}`} style={{ width: `${Math.min(maxRate, Math.max(0, rate))}%` }}></span>
+                              </span>
+                              <span className={getRateTextClass(rate)}>{rate}%</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
                   </div>
+                );
+              })()}
 
-                  <button
-                    onClick={() => showHomeStudentList('Daily 미응시 학생', homeDailyMissingStudents)}
-                    className="rounded-2xl bg-red-50/70 border border-red-100 p-4 text-left"
-                  >
-                    <p className="text-sm font-black text-slate-600 mb-1">Daily 미응시</p>
-                    <strong className="text-3xl font-black text-red-500">{homeDailyMissingStudents.length}명</strong>
-                  </button>
+              {homeActiveTab === 'test' && (() => {
+                const dailyRate = homeDashboardStats.dailyRate;
+                const yesterdayDailyRate = getHomeClassDailyRateUntilDay('대구캠퍼스 전체', homeSelectedMonth, Math.max(1, homeTodayIndex));
+                const weeklyRate = getHomeWeeklyParticipationRate(homeCurrentWeek, homeSelectedMonth);
+                const previousWeeklyRate = getHomeWeeklyParticipationRate(Math.max(1, homeCurrentWeek - 1), homeSelectedMonth);
+                const monthlyRate = getHomeMonthlyParticipationRate(homeSelectedMonth);
+                const scoreOverview = getHomeMonthlyScoreOverview(homeSelectedMonth);
+                const previousMonthIndex = Math.max(0, MONTHS.indexOf(homeSelectedMonth) - 1);
+                const previousMonth = MONTHS[previousMonthIndex] || homeSelectedMonth;
+                const previousScoreOverview = getHomeMonthlyScoreOverview(previousMonth);
+                const scoreDiff = Math.round((scoreOverview.average - previousScoreOverview.average) * 10) / 10;
 
-                  <button
-                    onClick={() => showHomeStudentList('Weekly 미응시 학생', homeWeeklyMissingStudents)}
-                    className="rounded-2xl bg-orange-50/70 border border-orange-100 p-4 text-left"
-                  >
-                    <p className="text-sm font-black text-slate-600 mb-1">Weekly 미응시</p>
-                    <strong className="text-3xl font-black text-orange-500">{homeWeeklyMissingStudents.length}명</strong>
-                  </button>
-                </div>
-              )}
+                const circleStyle = (rate, color) => ({
+                  background: `conic-gradient(${color} 0% ${Math.max(0, Math.min(100, rate))}%, #e5edff ${Math.max(0, Math.min(100, rate))}% 100%)`
+                });
 
+                return (
+                  <div className="grid grid-cols-1 lg:grid-cols-[1.15fr_0.9fr_1fr] gap-3">
+                    <div className="rounded-2xl bg-white border border-blue-100 p-4 shadow-sm">
+                      <p className="text-sm font-black text-slate-700 mb-3">시험 참여 현황</p>
+
+                      <div className="grid grid-cols-3 gap-3">
+                        {[
+                          { label: 'Daily 참여율', rate: dailyRate, diff: dailyRate - yesterdayDailyRate, color: '#3b82f6' },
+                          { label: 'Weekly 참여율', rate: weeklyRate, diff: weeklyRate - previousWeeklyRate, color: '#8b5cf6' },
+                          { label: 'Monthly 응시율', rate: monthlyRate, diff: 0, color: '#f59e0b' }
+                        ].map(item => (
+                          <div key={item.label} className="text-center">
+                            <div className="mx-auto w-[92px] h-[92px] rounded-full flex items-center justify-center" style={circleStyle(item.rate, item.color)}>
+                              <div className="w-[62px] h-[62px] rounded-full bg-white flex flex-col items-center justify-center">
+                                <strong className="text-xl font-black text-slate-900">{item.rate}%</strong>
+                              </div>
+                            </div>
+                            <p className="text-xs font-black text-slate-600 mt-2">{item.label}</p>
+                            <p className={`text-[11px] font-black mt-1 ${item.diff >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                              {item.diff >= 0 ? '▲' : '▼'} {Math.abs(item.diff)}%p
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl bg-white border border-blue-100 p-4 shadow-sm">
+                      <p className="text-sm font-black text-slate-700 mb-3">미응시 현황</p>
+
+                      <div className="space-y-3">
+                        {[
+                          { label: 'Daily 미응시', count: homeDailyMissingStudents.length, list: homeDailyMissingStudents, color: 'text-red-500', bg: 'bg-red-50' },
+                          { label: 'Weekly 미응시', count: homeWeeklyMissingStudents.length, list: homeWeeklyMissingStudents, color: 'text-orange-500', bg: 'bg-orange-50' },
+                          { label: 'Monthly 미응시', count: homeMonthlyMissingStudents.length, list: homeMonthlyMissingStudents, color: 'text-amber-500', bg: 'bg-amber-50' }
+                        ].map(item => (
+                          <button
+                            key={item.label}
+                            type="button"
+                            onClick={() => showHomeStudentList(item.label, item.list)}
+                            className="w-full flex items-center justify-between text-left"
+                          >
+                            <span className="flex items-center gap-2">
+                              <span className={`w-8 h-8 rounded-xl ${item.bg} ${item.color} flex items-center justify-center`}>
+                                <Calendar size={15} />
+                              </span>
+                              <span className="text-sm font-black text-slate-700">{item.label}</span>
+                            </span>
+                            <strong className={`text-lg font-black ${item.color}`}>{item.count}명</strong>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl bg-white border border-blue-100 p-4 shadow-sm">
+                      <p className="text-sm font-black text-slate-700 mb-3">성적 개요</p>
+
+                      <div className="flex items-start justify-between mb-4">
+                        <div>
+                          <p className="text-xs font-black text-slate-500 mb-1">전체 평균 점수</p>
+                          <strong className="text-3xl font-black text-slate-900">{scoreOverview.average}점</strong>
+                        </div>
+                        <span className={`text-xs font-black ${scoreDiff >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                          {scoreDiff >= 0 ? '▲' : '▼'} {Math.abs(scoreDiff)}점
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-3 text-xs font-black">
+                        <div>
+                          <p className="text-slate-400 mb-1">최고 반</p>
+                          <p className="text-slate-900">{scoreOverview.bestClass?.clsName || '-'}</p>
+                          <p className="text-slate-500">{scoreOverview.bestClass ? `${scoreOverview.bestClass.avg}점` : '-'}</p>
+                        </div>
+                        <div>
+                          <p className="text-slate-400 mb-1">최저 반</p>
+                          <p className="text-slate-900">{scoreOverview.worstClassByScore?.clsName || '-'}</p>
+                          <p className="text-slate-500">{scoreOverview.worstClassByScore ? `${scoreOverview.worstClassByScore.avg}점` : '-'}</p>
+                        </div>
+                        <div>
+                          <p className="text-slate-400 mb-1">평균 이하 학생</p>
+                          <p className="text-red-500 text-lg">{scoreOverview.belowAverageStudents.length}명</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
               {homeActiveTab === 'analysis' && (
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
                   <div className="rounded-2xl bg-white border border-blue-100 p-4">
@@ -1223,7 +1875,7 @@ export default function App() {
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-black text-slate-950">알림 및 공지</h3>
                 <button
-                  onClick={() => alert(homeNotices.map((n, i) => `${i + 1}. [${n.type}] ${n.text}`).join('\n'))}
+                  onClick={() => showHomeTextList('알림 및 공지 전체 보기', homeNotices.map((n, i) => `${i + 1}. [${n.type}] ${n.text}`))}
                   className="text-xs font-black text-slate-500 hover:text-blue-600 flex items-center gap-1"
                 >
                   전체 보기 <ChevronRight size={14} />
@@ -1234,7 +1886,7 @@ export default function App() {
                 {homeNotices.map((notice, idx) => (
                   <button
                     key={idx}
-                    onClick={() => alert(`[${notice.type}] ${notice.text}`)}
+                    onClick={() => showHomeTextList('알림 및 공지', [`[${notice.type}] ${notice.text}`])}
                     className="w-full flex items-center gap-3 bg-white/75 rounded-xl border border-blue-50 px-3 py-3 text-left hover:bg-blue-50/40 transition-colors"
                   >
                     <span className={`w-9 h-9 rounded-xl flex items-center justify-center ${
@@ -2697,19 +3349,32 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
   const isAttendancePresent = (value) => ATTENDANCE_PRESENT_STATUSES.includes(value);
 
+  const getAttendanceDayLimit = (month) => {
+      const currentMonth = `${new Date().getMonth() + 1}월`;
+
+      if (month === currentMonth) {
+          return Math.max(1, Math.min(31, new Date().getDate()));
+      }
+
+      return 31;
+  };
+
   const getAttendanceRate = (student, month) => {
       const excluded = attendanceSettings[month]?.excludedDays || [];
       const attendanceData = getUnifiedAttendanceArray(student.attendance?.[month] || {});
+      const dayLimit = getAttendanceDayLimit(month);
       let totalDays = 0, attendedDays = 0;
 
-      for(let i=0; i<31; i++) {
-          if(!excluded.includes(i)) {
-              const value = attendanceData[i];
-              if (value !== '') {
-                  totalDays++;
-                  if (isAttendancePresent(value)) attendedDays++;
-              }
-          }
+      for(let i=0; i<dayLimit; i++) {
+          if(excluded.includes(i)) continue;
+
+          const value = attendanceData[i];
+          const type = getAttendanceValueType(value);
+
+          if (type === 'neutral') continue;
+
+          totalDays++;
+          if (type === 'present') attendedDays++;
       }
 
       return totalDays === 0 ? "0%" : `${Math.round((attendedDays / totalDays) * 100)}%`;
@@ -2718,16 +3383,19 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   const getAttendanceRateNum = (student, month) => {
       const excluded = attendanceSettings[month]?.excludedDays || [];
       const attendanceData = getUnifiedAttendanceArray(student.attendance?.[month] || {});
+      const dayLimit = getAttendanceDayLimit(month);
       let totalDays = 0, attendedDays = 0;
 
-      for(let i=0; i<31; i++) {
-          if(!excluded.includes(i)) {
-              const value = attendanceData[i];
-              if (value !== '') {
-                  totalDays++;
-                  if (isAttendancePresent(value)) attendedDays++;
-              }
-          }
+      for(let i=0; i<dayLimit; i++) {
+          if(excluded.includes(i)) continue;
+
+          const value = attendanceData[i];
+          const type = getAttendanceValueType(value);
+
+          if (type === 'neutral') continue;
+
+          totalDays++;
+          if (type === 'present') attendedDays++;
       }
 
       return totalDays === 0 ? 0 : Math.round((attendedDays / totalDays) * 100);
@@ -3095,10 +3763,10 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
 
       const type = getAttendanceValueType(attendanceData?.[dayIndex]);
 
-      // 조퇴/지각/사전통보/병결 등 중립 유형은 출석률 계산 제외
+      // 조퇴/지각/사전통보/병결 등 중립 유형과 빈 값은 출석률 계산 제외
       if (type === 'neutral') continue;
 
-      // 출석/Live, 결석, 빈 값은 정상 출석일 기준 분모 포함
+      // 출석/Live는 출석 인정, 결석은 출석률 하락
       denominator += 1;
 
       if (type === 'present') {
@@ -4635,10 +5303,10 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                     setActiveTab('attendance');
                     setActiveAttendanceTab('calendar');
                   }}
-                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black ${
+                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black transition-all ${
                     activeAttendanceTab === 'calendar'
-                      ? 'bg-white/24 text-white'
-                      : 'text-white/72 hover:bg-white/12'
+                      ? 'bg-white/28 text-white shadow-inner'
+                      : 'text-white/78 hover:bg-white/18 hover:text-white hover:translate-x-0.5'
                   }`}
                 >
                   출석
@@ -4649,10 +5317,10 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                     setActiveTab('attendance');
                     setActiveAttendanceTab('studyTime');
                   }}
-                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black ${
+                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black transition-all ${
                     activeAttendanceTab === 'studyTime'
-                      ? 'bg-white/24 text-white'
-                      : 'text-white/72 hover:bg-white/12'
+                      ? 'bg-white/28 text-white shadow-inner'
+                      : 'text-white/78 hover:bg-white/18 hover:text-white hover:translate-x-0.5'
                   }`}
                 >
                   학습시간
@@ -4687,10 +5355,10 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                     setActiveTestTab('daily');
                     setActiveDailyTab('input');
                   }}
-                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black ${
+                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black transition-all ${
                     activeTestTab === 'daily'
-                      ? 'bg-white/24 text-white'
-                      : 'text-white/72 hover:bg-white/12'
+                      ? 'bg-white/28 text-white shadow-inner'
+                      : 'text-white/78 hover:bg-white/18 hover:text-white hover:translate-x-0.5'
                   }`}
                 >
                   Daily
@@ -4702,10 +5370,10 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                     setActiveTestTab('weekly');
                     setActiveWeeklyTab('setup');
                   }}
-                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black ${
+                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black transition-all ${
                     activeTestTab === 'weekly'
-                      ? 'bg-white/24 text-white'
-                      : 'text-white/72 hover:bg-white/12'
+                      ? 'bg-white/28 text-white shadow-inner'
+                      : 'text-white/78 hover:bg-white/18 hover:text-white hover:translate-x-0.5'
                   }`}
                 >
                   Weekly
@@ -4717,10 +5385,10 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                     setActiveTestTab('monthly');
                     setTestViewMode('input');
                   }}
-                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black ${
+                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black transition-all ${
                     activeTestTab === 'monthly'
-                      ? 'bg-white/24 text-white'
-                      : 'text-white/72 hover:bg-white/12'
+                      ? 'bg-white/28 text-white shadow-inner'
+                      : 'text-white/78 hover:bg-white/18 hover:text-white hover:translate-x-0.5'
                   }`}
                 >
                   Monthly
@@ -4897,14 +5565,145 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
               return Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(1));
             };
 
-            const trendData = Array.from({ length: 8 }, (_, index) => {
-              const labelPool = ['1주차', '2주차', '3주차', '4주차', '5주차', '6주차', '7주차', '8주차'];
+            const getMondayOfWeek = (date) => {
+              const target = new Date(date);
+              const day = target.getDay();
+              const diff = day === 0 ? -6 : 1 - day;
+
+              target.setDate(target.getDate() + diff);
+              target.setHours(0, 0, 0, 0);
+
+              return target;
+            };
+
+            const formatMonthDayWithWeekday = (date) => {
+              const weekdays = ['일', '월', '화', '수', '목', '금', '토'];
+              return `${date.getMonth() + 1}/${date.getDate()}(${weekdays[date.getDay()]})`;
+            };
+
+            const formatMonthDayShort = (date) => {
+              return `${date.getMonth() + 1}/${date.getDate()}`;
+            };
+
+            const getWeekRangesForTrend = () => {
+              const now = new Date();
+              const selectedMonthNumber = parseInt(String(dashboardMonth).replace('월', ''), 10);
+              const safeMonthNumber = Number.isFinite(selectedMonthNumber) && selectedMonthNumber >= 1 && selectedMonthNumber <= 12
+                ? selectedMonthNumber
+                : now.getMonth() + 1;
+
+              const baseDate = new Date(
+                now.getFullYear(),
+                safeMonthNumber - 1,
+                now.getMonth() + 1 === safeMonthNumber ? now.getDate() : 1
+              );
+
+              const thisWeekMonday = getMondayOfWeek(baseDate);
+
+              return Array.from({ length: 8 }, (_, index) => {
+                const start = new Date(thisWeekMonday);
+                start.setDate(thisWeekMonday.getDate() - 7 * (7 - index));
+
+                const end = new Date(start);
+                end.setDate(start.getDate() + 6);
+
+                return {
+                  start,
+                  end,
+                  label: `${formatMonthDayWithWeekday(start)}~${formatMonthDayWithWeekday(end)}`,
+                  shortLabel: `${formatMonthDayShort(start)}~${formatMonthDayShort(end)}`
+                };
+              });
+            };
+
+            const isFutureDateForTrend = (date) => {
+              const today = new Date();
+              const checkDate = new Date(date);
+
+              today.setHours(0, 0, 0, 0);
+              checkDate.setHours(0, 0, 0, 0);
+
+              return checkDate > today;
+            };
+
+            const getDashboardAttendanceRateByDateRange = (startDate, endDate) => {
+              if (!classStudents.length) return 0;
+
+              let denominator = 0;
+              let presentCount = 0;
+              const cursor = new Date(startDate);
+
+              while (cursor <= endDate) {
+                if (!isFutureDateForTrend(cursor)) {
+                  const month = `${cursor.getMonth() + 1}월`;
+                  const dayIndex = cursor.getDate() - 1;
+                  const excluded = attendanceSettings?.[month]?.excludedDays || [];
+
+                  if (!excluded.includes(dayIndex)) {
+                    classStudents.forEach(student => {
+                      const monthData = student.attendance?.[month] || {};
+                      const attendanceArray = getUnifiedAttendanceArray(monthData);
+                      const value = attendanceArray?.[dayIndex];
+                      const type = getAttendanceValueType(value);
+
+                      if (type === 'neutral') return;
+
+                      denominator += 1;
+                      if (type === 'present') presentCount += 1;
+                    });
+                  }
+                }
+
+                cursor.setDate(cursor.getDate() + 1);
+              }
+
+              return denominator === 0 ? 0 : Math.round((presentCount / denominator) * 100);
+            };
+
+            const getDashboardDailyRateByDateRange = (startDate, endDate) => {
+              if (!classStudents.length) return 0;
+
+              let denominator = 0;
+              let participatedCount = 0;
+              const cursor = new Date(startDate);
+
+              while (cursor <= endDate) {
+                if (!isFutureDateForTrend(cursor)) {
+                  const month = `${cursor.getMonth() + 1}월`;
+                  const dayIndex = cursor.getDate() - 1;
+                  const excluded = dailySettings?.[month]?.excludedDays || [];
+
+                  if (!excluded.includes(dayIndex)) {
+                    classStudents.forEach(student => {
+                      denominator += 1;
+
+                      const dailyArray = student.dailyRecords?.[month] || [];
+                      const day = dailyArray[dayIndex] || {};
+                      const t1 = String(day?.t1 ?? '').trim();
+                      const t2 = String(day?.t2 ?? '').trim();
+                      const math = String(day?.math ?? '').trim();
+
+                      if (t1 !== '' || t2 !== '' || math !== '') participatedCount += 1;
+                    });
+                  }
+                }
+
+                cursor.setDate(cursor.getDate() + 1);
+              }
+
+              return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
+            };
+
+            const weekRanges = getWeekRangesForTrend();
+
+            const trendData = weekRanges.map((range, index) => {
               const weeklyScore = getWeeklyAverageScoreForIndex(index);
 
               return {
-                label: labelPool[index],
-                attendance: dashboardAttendanceRate,
-                daily: dailyRate,
+                label: range.label,
+                shortLabel: range.shortLabel,
+                attendance: getDashboardAttendanceRateByDateRange(range.start, range.end),
+                daily: getDashboardDailyRateByDateRange(range.start, range.end),
                 score: weeklyScore,
                 scoreText: weeklyScore === null ? '데이터 없음' : `${weeklyScore}점`,
                 study: Math.max(0, Math.min(100, Number(avgStudyHours || 0) * 8))
@@ -5268,8 +6067,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                         <polyline points={makeLinePoints('study')} fill="none" stroke="#f97316" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
 
                         {trendData.map((item, index) => (
-                          <text key={item.label} x={52 + index * 92} y="215" fontSize="11" fill="#64748b" fontWeight="700" textAnchor="middle">
-                            {item.label}
+                          <text key={item.label} x={52 + index * 92} y="215" fontSize="10" fill="#64748b" fontWeight="700" textAnchor="middle">
+                            {item.shortLabel || item.label.replace(/\(.\)/g, '')}
                           </text>
                         ))}
 
@@ -5677,7 +6476,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                                     <span className="font-bold text-slate-900 text-[13px]">{student.name}</span>
                                     <span className="font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded text-[11px]">{getAttendanceRate(student, attendanceMonth)}</span>
                                   </div>
-                                  <div className="text-[10px] text-slate-400 font-mono text-left">{student.id} / {student.userId}</div>
+                                  <div className="text-[10px] text-slate-400 font-mono text-left">{student.id}</div>
                                 </div>
                               </td>
                               <td className="border-r border-slate-200 sticky left-[200px] z-10 bg-slate-50 text-slate-500 font-semibold shadow-[2px_0_5px_rgba(0,0,0,0.05)]">{ATTENDANCE_SESSION_LABEL}</td>
