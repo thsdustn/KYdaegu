@@ -174,6 +174,22 @@ export default function App() {
   const [saveStatus, setSaveStatus] = useState('idle'); // 'idle', 'saving', 'saved', 'error'
   const [isDataLoaded, setIsDataLoaded] = useState(false);
 
+  // --- ✅ 수동 저장 안정화 상태 ---
+  const [dirtyStudentIds, setDirtyStudentIds] = useState(new Set());
+  const [dirtyFieldsByStudent, setDirtyFieldsByStudent] = useState({});
+  const [manualSaveStatus, setManualSaveStatus] = useState('idle'); // idle | dirty | saving | saved | error
+  const [manualSaveMessage, setManualSaveMessage] = useState('');
+  const [lastManualSavedAt, setLastManualSavedAt] = useState(null);
+
+  // ✅ 저장 최적화: 반 목록/classes 변경 추적
+  const [isClassesDirty, setIsClassesDirty] = useState(false);
+
+  // ✅ 저장 최적화: 반별 설정 변경 추적
+  const [dirtyClassSettings, setDirtyClassSettings] = useState({});
+
+  // ✅ 저장 최적화: 마지막으로 Firebase에서 불러왔거나 저장 완료된 학생 데이터 스냅샷
+  const savedStudentsSnapshotRef = useRef({});
+
   // --- [인증] 앱 시작 시 익명 로그인 처리 ---
   useEffect(() => {
     const initAuth = async () => {
@@ -221,10 +237,50 @@ export default function App() {
              });
           }
 
+          // ✅ 반별 설정 classSettings 컬렉션 불러오기
+          try {
+            const classSettingsColRef = collection(
+              db,
+              'artifacts',
+              APP_ID,
+              'public',
+              'data',
+              'years',
+              `year_${academicYear}`,
+              'classSettings'
+            );
+
+            const classSettingsSnap = await getDocs(classSettingsColRef);
+
+            classSettingsSnap.forEach(settingDoc => {
+              const settingData = settingDoc.data();
+
+              localStorage.setItem(
+                `academyClassSettings_${academicYear}_${settingDoc.id}`,
+                JSON.stringify(settingData)
+              );
+            });
+          } catch (settingsError) {
+            console.error('반별 설정 로드 에러:', settingsError);
+          }
+
           // 컬렉션 방식 데이터가 존재하거나, 메인 문서에 클래스 정보라도 있으면 반영
           if (loadedStudents.length > 0) {
-            setClasses(loadedClasses.length > 0 ? loadedClasses : ['GB1A', 'GB1B', 'GB2A', 'S-CLASS']);
+            const nextClasses = loadedClasses.length > 0 ? loadedClasses : ['GB1A', 'GB1B', 'GB2A', 'S-CLASS'];
+
+            setClasses(nextClasses);
             setStudents(loadedStudents);
+
+            savedStudentsSnapshotRef.current = loadedStudents.reduce((acc, student) => {
+              acc[student.id] = JSON.parse(JSON.stringify(student));
+              return acc;
+            }, {});
+
+            setDirtyStudentIds(new Set());
+            setDirtyFieldsByStudent({});
+            setDirtyClassSettings({});
+            setIsClassesDirty(false);
+
             useFallback = false;
           } else if (loadedClasses.length > 0) {
             loadedClasses = loadedClasses;
@@ -264,80 +320,395 @@ export default function App() {
     loadCloudData();
   }, [user, academicYear]);
 
-  // --- [저장하기] 데이터 변경 시 Firestore에 자동 백업 ---
+  // --- [자동 백업] 데이터 변경 시 localStorage에만 자동 백업 ---
+  // ✅ Firebase 자동 전체 저장은 Firestore 사용량 초과 방지를 위해 중단
+  // ✅ Firebase 공유 저장은 우측 상단 "변경사항 저장" 버튼을 눌렀을 때만 실행
   useEffect(() => {
-    if (!user || !isDataLoaded) return;
+    if (!isDataLoaded) return;
 
-    const saveToCloud = async () => {
+    const saveToLocalBackup = () => {
       setSaveStatus('saving');
-      
-      // 1. 로컬스토리지 이중 백업은 무조건 우선 실행 (기존 구조 호환 유지)
-      try {
-        localStorage.setItem(`studentManagement_${academicYear}`, JSON.stringify({ classes, students }));
-      } catch (localErr) {
-        console.error("로컬스토리지 백업 에러:", localErr);
-      }
 
       try {
-        const docRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`);
-        const studentsColRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`, 'students');
-
-        // 삭제된 학생 동기화를 위해 기존 클라우드에 있는 문서 목록 가져오기
-        const currentIds = students.map(s => s.id);
-        const existingDocsSnap = await getDocs(studentsColRef);
-        const docsToDelete = [];
-        existingDocsSnap.forEach(docSnap => {
-            if (!currentIds.includes(docSnap.id)) {
-                docsToDelete.push(docSnap.ref);
-            }
-        });
-
-        // 처리할 모든 저장/삭제 작업 모으기
-        const operations = [];
-        
-        // 메인 문서 업데이트 (students 배열 통째로 저장하지 않음)
-        operations.push({ 
-            type: 'set', 
-            ref: docRef, 
-            data: { classes, lastUpdated: Date.now(), updatedBy: user.uid, storageMode: 'subcollection' } 
-        });
-        
-        // 학생 개별 문서 업데이트
-        students.forEach(student => {
-           operations.push({ type: 'set', ref: doc(studentsColRef, student.id), data: student });
-        });
-
-        // 삭제될 문서 작업 추가
-        docsToDelete.forEach(ref => {
-           operations.push({ type: 'delete', ref: ref });
-        });
-
-        // Firestore batch 제한을 고려하여 450개 단위로 청크 분할하여 안전하게 전송
-        const chunkSize = 5;
-        for (let i = 0; i < operations.length; i += chunkSize) {
-            const chunk = operations.slice(i, i + chunkSize);
-            const batch = writeBatch(db);
-            
-            chunk.forEach(op => {
-                if (op.type === 'set') batch.set(op.ref, op.data);
-                else if (op.type === 'delete') batch.delete(op.ref);
-            });
-            
-            await batch.commit();
-        }
+        localStorage.setItem(
+          `studentManagement_${academicYear}`,
+          JSON.stringify({ classes, students })
+        );
 
         setSaveStatus('saved');
-        setTimeout(() => setSaveStatus('idle'), 2000);
-      } catch (e) {
-        console.error("데이터 클라우드 분산 저장 에러:", e);
+        setTimeout(() => setSaveStatus('idle'), 1200);
+      } catch (localErr) {
+        console.error("로컬스토리지 백업 에러:", localErr);
         setSaveStatus('error');
       }
     };
 
-    // 과도한 서버 요청을 방지하기 위해 1초 뒤에 저장 (디바운싱)
-    const timer = setTimeout(saveToCloud, 1000);
+    // 화면 수정 후 브라우저 임시 백업만 수행
+    const timer = setTimeout(saveToLocalBackup, 1000);
     return () => clearTimeout(timer);
-  }, [classes, students, user, isDataLoaded, academicYear]);
+  }, [classes, students, isDataLoaded, academicYear]);
+
+  // --- ✅ 수동 저장 안정화: 변경 학생/필드 기록 ---
+  const markStudentDirty = (studentId, fieldName) => {
+    if (!studentId) return;
+
+    setDirtyStudentIds(prev => {
+      const next = new Set(prev);
+      next.add(studentId);
+      return next;
+    });
+
+    setDirtyFieldsByStudent(prev => {
+      const currentFields = new Set(prev[studentId] || []);
+      if (fieldName) currentFields.add(fieldName);
+
+      return {
+        ...prev,
+        [studentId]: Array.from(currentFields)
+      };
+    });
+
+    setManualSaveStatus('dirty');
+    setManualSaveMessage('변경사항 있음');
+  };
+
+  // ✅ 실제 값 비교용 helper
+  const isSameValueForDirtyCheck = (currentValue, nextValue) => {
+    return String(currentValue ?? '').trim() === String(nextValue ?? '').trim();
+  };
+
+  const isSameObjectForDirtyCheck = (currentValue, nextValue) => {
+    return JSON.stringify(currentValue ?? null) === JSON.stringify(nextValue ?? null);
+  };
+
+  // ✅ 반 목록/classes 변경 추적
+  const markClassesDirty = () => {
+    setIsClassesDirty(true);
+    setManualSaveStatus('dirty');
+    setManualSaveMessage('변경사항 있음');
+  };
+
+  // ✅ 반별 설정 변경 추적
+  const markClassSettingsDirty = (targetClassName, settingType) => {
+    if (!targetClassName || targetClassName === '대구캠퍼스 전체') return;
+
+    setDirtyClassSettings(prev => ({
+      ...prev,
+      [targetClassName]: {
+        ...(prev[targetClassName] || {}),
+        [settingType]: true
+      }
+    }));
+
+    setManualSaveStatus('dirty');
+    setManualSaveMessage('변경사항 있음');
+  };
+
+  const getSavedStudentSnapshot = (studentId) => {
+    return savedStudentsSnapshotRef.current?.[studentId] || null;
+  };
+
+  const hasDirtyPayloadChanged = (student, payload) => {
+    const savedStudent = getSavedStudentSnapshot(student.id);
+
+    if (!savedStudent) return true;
+
+    return Object.keys(payload || {}).some(fieldName => {
+      return !isSameObjectForDirtyCheck(savedStudent[fieldName], payload[fieldName]);
+    });
+  };
+
+  const buildDirtyStudentPayload = (student) => {
+    const fields = dirtyFieldsByStudent[student.id] || [];
+
+    if (!fields.length) return student;
+
+    const payload = {};
+
+    if (fields.includes('attendance')) payload.attendance = student.attendance;
+    if (fields.includes('studyTime')) payload.studyTime = student.studyTime;
+    if (fields.includes('dailyRecords')) payload.dailyRecords = student.dailyRecords;
+    if (fields.includes('scores')) payload.scores = student.scores;
+    if (fields.includes('notes')) payload.notes = student.notes;
+    if (fields.includes('consulting')) payload.consulting = student.consulting;
+
+    if (fields.includes('studentInfo')) {
+      Object.assign(payload, {
+        id: student.id,
+        userId: student.userId,
+        name: student.name,
+        startMonth: student.startMonth,
+        className: student.className,
+        classNames: student.classNames,
+        gender: student.gender,
+        contact: student.contact,
+        parentContact: student.parentContact,
+        address: student.address,
+        university: student.university,
+        major: student.major,
+        gradStatus: student.gradStatus,
+        transferType: student.transferType,
+        targetTrack: student.targetTrack,
+        credits: student.credits,
+        gpa: student.gpa,
+        motivation: student.motivation,
+        englishScore: student.englishScore
+      });
+    }
+
+    return Object.keys(payload).length ? payload : student;
+  };
+
+  const getDirtyClassSettingsNamesForScope = (scope = 'all') => {
+    const names = Object.keys(dirtyClassSettings || {});
+
+    if (scope === 'class' && selectedClass) {
+      return names.filter(name => name === selectedClass);
+    }
+
+    return names;
+  };
+
+  const getClassSettingsPayloadFromLocalStorage = (targetClassName) => {
+    const defaults = {
+      dailySettings: createDefaultDailySettings(),
+      attendanceSettings: createDefaultAttendanceSettings(),
+      penaltyRules: createDefaultPenaltyRules()
+    };
+
+    try {
+      const saved = localStorage.getItem(`academyClassSettings_${academicYear}_${targetClassName}`);
+      const parsed = saved ? JSON.parse(saved) : {};
+
+      return {
+        className: targetClassName,
+        dailySettings: {
+          ...defaults.dailySettings,
+          ...(parsed.dailySettings || {})
+        },
+        attendanceSettings: {
+          ...defaults.attendanceSettings,
+          ...(parsed.attendanceSettings || {})
+        },
+        penaltyRules: {
+          ...defaults.penaltyRules,
+          ...(parsed.penaltyRules || {}),
+          rules: {
+            ...defaults.penaltyRules.rules,
+            ...(parsed.penaltyRules?.rules || {})
+          }
+        },
+        updatedAt: Date.now(),
+        updatedBy: user?.uid || ''
+      };
+    } catch (error) {
+      return {
+        className: targetClassName,
+        ...defaults,
+        updatedAt: Date.now(),
+        updatedBy: user?.uid || ''
+      };
+    }
+  };
+
+  const getDirtyCountForScope = (scope = 'all') => {
+    const dirtyIds = Array.from(dirtyStudentIds);
+
+    const studentDirtyCount = scope === 'class' && selectedClass
+      ? students.filter(student => {
+          if (!dirtyIds.includes(student.id)) return false;
+
+          const classList = Array.isArray(student.classNames)
+            ? student.classNames
+            : [student.className].filter(Boolean);
+
+          return classList.includes(selectedClass);
+        }).length
+      : dirtyIds.length;
+
+    const classSettingsCount = getDirtyClassSettingsNamesForScope(scope).length;
+    const classesCount = isClassesDirty ? 1 : 0;
+
+    return studentDirtyCount + classSettingsCount + classesCount;
+  };
+
+  const saveDirtyStudentsToFirebase = async (scope = 'all') => {
+    if (!user || !isDataLoaded) {
+      setManualSaveStatus('error');
+      setManualSaveMessage('저장 준비가 완료되지 않았습니다.');
+      return;
+    }
+
+    const dirtyIds = Array.from(dirtyStudentIds);
+
+    const targetStudents = students.filter(student => {
+      if (!dirtyIds.includes(student.id)) return false;
+
+      if (scope === 'class' && selectedClass) {
+        const classList = Array.isArray(student.classNames)
+          ? student.classNames
+          : [student.className].filter(Boolean);
+
+        return classList.includes(selectedClass);
+      }
+
+      return true;
+    });
+
+    const targetClassSettingNames = getDirtyClassSettingsNamesForScope(scope);
+    const shouldSaveClasses = isClassesDirty;
+
+    if (targetStudents.length === 0 && targetClassSettingNames.length === 0 && !shouldSaveClasses) {
+      setManualSaveStatus('saved');
+      setManualSaveMessage('저장할 변경사항이 없습니다.');
+      return;
+    }
+
+    setManualSaveStatus('saving');
+    setManualSaveMessage('저장중...');
+
+    try {
+      const docRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`);
+      const studentsColRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`, 'students');
+      const classSettingsColRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`, 'classSettings');
+
+      const batch = writeBatch(db);
+      let writeCount = 0;
+      const actuallySavedStudents = [];
+      const skippedUnchangedStudents = [];
+
+      // ✅ classes가 실제로 변경된 경우에만 메인 문서 저장
+      if (shouldSaveClasses) {
+        batch.set(docRef, {
+          classes,
+          lastManualSavedAt: Date.now(),
+          updatedBy: user.uid,
+          storageMode: 'subcollection',
+          manualSaveMode: 'dirty-students'
+        }, { merge: true });
+
+        writeCount += 1;
+      }
+
+      // ✅ 학생 데이터는 dirty라도 실제 저장 스냅샷과 값이 다를 때만 저장
+      targetStudents.forEach(student => {
+        const payload = buildDirtyStudentPayload(student);
+
+        if (!payload || Object.keys(payload).length === 0 || !hasDirtyPayloadChanged(student, payload)) {
+          skippedUnchangedStudents.push(student);
+          return;
+        }
+
+        const studentRef = doc(studentsColRef, student.id);
+        batch.set(studentRef, payload, { merge: true });
+
+        actuallySavedStudents.push(student);
+        writeCount += 1;
+      });
+
+      // ✅ 반별 설정 저장
+      targetClassSettingNames.forEach(targetClassName => {
+        const classSettingRef = doc(classSettingsColRef, targetClassName);
+        const classSettingsPayload = getClassSettingsPayloadFromLocalStorage(targetClassName);
+
+        batch.set(classSettingRef, classSettingsPayload, { merge: true });
+        writeCount += 1;
+      });
+
+      if (writeCount === 0) {
+        // dirty는 있었지만 실제 값 변경이 없는 경우 정리
+        setDirtyStudentIds(prev => {
+          const next = new Set(prev);
+          targetStudents.forEach(student => next.delete(student.id));
+          return next;
+        });
+
+        setDirtyFieldsByStudent(prev => {
+          const next = { ...prev };
+          targetStudents.forEach(student => {
+            delete next[student.id];
+          });
+          return next;
+        });
+
+        setManualSaveStatus('saved');
+        setManualSaveMessage('실제 변경된 저장 항목이 없습니다.');
+        return;
+      }
+
+      await Promise.race([
+        batch.commit(),
+        new Promise((_, reject) => {
+          setTimeout(() => {
+            reject(new Error('저장 요청 시간이 초과되었습니다. 네트워크 또는 Firebase 응답을 확인해주세요.'));
+          }, 15000);
+        })
+      ]);
+
+      setDirtyStudentIds(prev => {
+        const next = new Set(prev);
+        [...actuallySavedStudents, ...skippedUnchangedStudents].forEach(student => next.delete(student.id));
+        return next;
+      });
+
+      setDirtyFieldsByStudent(prev => {
+        const next = { ...prev };
+        [...actuallySavedStudents, ...skippedUnchangedStudents].forEach(student => {
+          delete next[student.id];
+        });
+        return next;
+      });
+
+      actuallySavedStudents.forEach(student => {
+        savedStudentsSnapshotRef.current[student.id] = JSON.parse(JSON.stringify(student));
+      });
+
+      if (shouldSaveClasses) {
+        setIsClassesDirty(false);
+      }
+
+      if (targetClassSettingNames.length > 0) {
+        setDirtyClassSettings(prev => {
+          const next = { ...prev };
+          targetClassSettingNames.forEach(className => {
+            delete next[className];
+          });
+          return next;
+        });
+      }
+
+      const savedAt = new Date();
+      setLastManualSavedAt(savedAt);
+      setManualSaveStatus('saved');
+      setManualSaveMessage(`저장완료 ${savedAt.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}`);
+    } catch (error) {
+      console.error('변경사항 수동 저장 실패:', error);
+
+      setManualSaveStatus('error');
+
+      if (error?.code === 'resource-exhausted' || String(error?.message || '').includes('Quota exceeded')) {
+        setManualSaveMessage('저장실패: Firebase 사용량 초과');
+      } else if (String(error?.message || '').includes('초과')) {
+        setManualSaveMessage('저장실패: 응답 지연, 다시 시도');
+      } else {
+        setManualSaveMessage('저장실패, 다시 시도');
+      }
+    }
+  };
+
+  useEffect(() => {
+    const handleBeforeUnload = (event) => {
+      const hasDirtyClassSettings = Object.keys(dirtyClassSettings || {}).length > 0;
+
+      if (dirtyStudentIds.size === 0 && !isClassesDirty && !hasDirtyClassSettings) return;
+
+      event.preventDefault();
+      event.returnValue = '';
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [dirtyStudentIds, isClassesDirty, dirtyClassSettings]);
 
   /* * [7단계: Supabase/Firebase 연동 준비 가이드 (데이터 구조 분리 제안)]
    * 현재는 localStorage를 이용해 JSON 통짜 데이터를 저장하고 있지만,
@@ -397,25 +768,48 @@ export default function App() {
 
   const handleAddClass = (e) => {
     e.preventDefault();
+
     if (newClassName.trim() && !classes.includes(newClassName.trim().toUpperCase())) {
-      setClasses([...classes, newClassName.trim().toUpperCase()]); setNewClassName('');
+      setClasses([...classes, newClassName.trim().toUpperCase()]);
+      setNewClassName('');
+      markClassesDirty();
     }
   };
 
   const handleEditClass = (e, oldName) => {
     e.stopPropagation();
+
     const newName = prompt('새로운 반 이름을 입력하세요:', oldName);
+
     if(newName && newName.trim() && newName.trim() !== oldName) {
-      if(classes.includes(newName.trim().toUpperCase())) { alert('이미 존재하는 반 이름입니다.'); return; }
-      setClasses(prev => prev.map(c => c === oldName ? newName.trim().toUpperCase() : c));
+      const nextClassName = newName.trim().toUpperCase();
+
+      if(classes.includes(nextClassName)) {
+        alert('이미 존재하는 반 이름입니다.');
+        return;
+      }
+
+      setClasses(prev => prev.map(c => c === oldName ? nextClassName : c));
+
       setStudents(prev => prev.map(s => {
         const cNames = s.classNames || [s.className];
+
         if (cNames.includes(oldName)) {
-          const newClassNames = cNames.map(c => c === oldName ? newName.trim().toUpperCase() : c);
-          return { ...s, className: newClassNames[0], classNames: newClassNames };
+          const newClassNames = cNames.map(c => c === oldName ? nextClassName : c);
+
+          markStudentDirty(s.id, 'studentInfo');
+
+          return {
+            ...s,
+            className: newClassNames[0],
+            classNames: newClassNames
+          };
         }
+
         return s;
       }));
+
+      markClassesDirty();
     }
   };
 
@@ -427,17 +821,31 @@ export default function App() {
     if (studentsInClass.length > 0) {
       if (
         !window.confirm(
-          `[${clsName}] 반에 ${studentsInClass.length}명의 학생이 있습니다.\n\n반을 삭제하면 해당 학생들의 소속에서 이 반만 제거됩니다.\n모든 반에서 제외된 학생은 '미배정' 처리됩니다.\n\n계속하시겠습니까?`
+          `[${clsName}] 반에 ${studentsInClass.length}명의 학생이 있습니다.
+
+반을 삭제하면 해당 학생들의 소속에서 이 반만 제거됩니다.
+모든 반에서 제외된 학생은 '미배정' 처리됩니다.
+
+계속하시겠습니까?`
         )
       ) return;
 
       setStudents(prev => prev.map(s => {
         let cNames = s.classNames || [s.className];
+
         if (cNames.includes(clsName)) {
           cNames = cNames.filter(c => c !== clsName);
           if (cNames.length === 0) cNames = ['미배정'];
-          return { ...s, className: cNames[0], classNames: cNames };
+
+          markStudentDirty(s.id, 'studentInfo');
+
+          return {
+            ...s,
+            className: cNames[0],
+            classNames: cNames
+          };
         }
+
         return s;
       }));
     } else {
@@ -445,6 +853,7 @@ export default function App() {
     }
 
     setClasses(prev => prev.filter(c => c !== clsName));
+    markClassesDirty();
 
     if (selectedClass === clsName) {
       setSelectedClass(null);
@@ -453,12 +862,17 @@ export default function App() {
 
   const handleMoveClass = (e, index, direction) => {
     e.stopPropagation();
+
     if((direction === -1 && index === 0) || (direction === 1 && index === classes.length - 1)) return;
+
     const newClasses = [...classes];
     const temp = newClasses[index];
+
     newClasses[index] = newClasses[index + direction];
     newClasses[index + direction] = temp;
+
     setClasses(newClasses);
+    markClassesDirty();
   };
 
   const homeMonth = `${new Date().getMonth() + 1}월`;
@@ -1134,6 +1548,358 @@ export default function App() {
 
   const worstClass = getWorstAttendanceClass();
 
+  const getHomeStartOfWeek = (baseDate = new Date()) => {
+    const date = new Date(baseDate);
+    date.setHours(0, 0, 0, 0);
+
+    const day = date.getDay();
+    const diffToMonday = day === 0 ? -6 : 1 - day;
+
+    const monday = new Date(date);
+    monday.setDate(date.getDate() + diffToMonday);
+    monday.setHours(0, 0, 0, 0);
+
+    return monday;
+  };
+
+  const getHomeWeekPeriods = (baseDate = new Date()) => {
+    const thisWeekMonday = getHomeStartOfWeek(baseDate);
+
+    const lastWeekStart = new Date(thisWeekMonday);
+    lastWeekStart.setDate(thisWeekMonday.getDate() - 7);
+
+    const lastWeekEnd = new Date(thisWeekMonday);
+    lastWeekEnd.setDate(thisWeekMonday.getDate() - 1);
+
+    const twoWeeksAgoStart = new Date(thisWeekMonday);
+    twoWeeksAgoStart.setDate(thisWeekMonday.getDate() - 14);
+
+    const twoWeeksAgoEnd = new Date(thisWeekMonday);
+    twoWeeksAgoEnd.setDate(thisWeekMonday.getDate() - 8);
+
+    return {
+      lastWeek: { start: lastWeekStart, end: lastWeekEnd },
+      twoWeeksAgo: { start: twoWeeksAgoStart, end: twoWeeksAgoEnd }
+    };
+  };
+
+  const formatHomeShortDate = (date) => `${date.getMonth() + 1}/${date.getDate()}`;
+
+  const formatHomePeriodText = (period) => {
+    if (!period?.start || !period?.end) return '-';
+    return `${formatHomeShortDate(period.start)} ~ ${formatHomeShortDate(period.end)}`;
+  };
+
+  const getHomeMonthLabelFromDate = (date) => `${date.getMonth() + 1}월`;
+
+  const getHomeDatesInPeriod = (period) => {
+    if (!period?.start || !period?.end) return [];
+
+    const dates = [];
+    const cursor = new Date(period.start);
+    cursor.setHours(0, 0, 0, 0);
+
+    const end = new Date(period.end);
+    end.setHours(0, 0, 0, 0);
+
+    while (cursor <= end) {
+      dates.push(new Date(cursor));
+      cursor.setDate(cursor.getDate() + 1);
+    }
+
+    return dates;
+  };
+
+  const roundHomeValue = (value, digit = 1) => {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) return null;
+    const multiplier = Math.pow(10, digit);
+    return Math.round(Number(value) * multiplier) / multiplier;
+  };
+
+  const formatHomeMetricValue = (value, unit = '') => {
+    const rounded = roundHomeValue(value, 1);
+    if (rounded === null) return '-';
+
+    const text = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+    return `${text}${unit}`;
+  };
+
+  const getAverageNullable = (values = []) => {
+    const validValues = values
+      .map(value => Number(value))
+      .filter(value => Number.isFinite(value));
+
+    if (!validValues.length) return null;
+
+    return roundHomeValue(
+      validValues.reduce((sum, value) => sum + value, 0) / validValues.length,
+      1
+    );
+  };
+
+  const getHomeAttendanceRateForStudentPeriod = (student, period) => {
+    let denominator = 0;
+    let presentCount = 0;
+
+    getHomeDatesInPeriod(period).forEach(date => {
+      const month = getHomeMonthLabelFromDate(date);
+      const dayIndex = date.getDate() - 1;
+      const excluded = getHomeAttendanceExcludedDaysForStudent(student, month);
+
+      if (excluded.includes(dayIndex)) return;
+
+      const monthData = student.attendance?.[month] || {};
+      const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
+      const type = getAttendanceValueType(attendanceArray?.[dayIndex]);
+
+      if (type === 'neutral') return;
+
+      denominator += 1;
+      if (type === 'present') presentCount += 1;
+    });
+
+    return denominator === 0 ? null : roundHomeValue((presentCount / denominator) * 100, 1);
+  };
+
+  const getHomeDailyRateForStudentPeriod = (student, period) => {
+    let denominator = 0;
+    let participatedCount = 0;
+
+    getHomeDatesInPeriod(period).forEach(date => {
+      const month = getHomeMonthLabelFromDate(date);
+      const dayIndex = date.getDate() - 1;
+      const excluded = getHomeDailyExcludedDaysForStudent(student, month);
+
+      if (excluded.includes(dayIndex)) return;
+
+      denominator += 1;
+
+      const dailyArray = student.dailyRecords?.[month] || [];
+      const day = dailyArray[dayIndex] || {};
+      const t1 = String(day?.t1 ?? '').trim();
+      const t2 = String(day?.t2 ?? '').trim();
+      const math = String(day?.math ?? '').trim();
+
+      if (t1 !== '' || t2 !== '' || math !== '') participatedCount += 1;
+    });
+
+    return denominator === 0 ? null : roundHomeValue((participatedCount / denominator) * 100, 1);
+  };
+
+  const getHomeStudyHoursForStudentPeriod = (student, period) => {
+    let totalMins = 0;
+    let hasStudyRecord = false;
+
+    getHomeDatesInPeriod(period).forEach(date => {
+      const month = getHomeMonthLabelFromDate(date);
+      const dayIndex = date.getDate() - 1;
+      const studyArray = student.studyTime?.[month] || [];
+      const day = studyArray[dayIndex] || {};
+      const diff = parseTimeDiffToMins(day?.in, day?.out);
+
+      if (diff > 0) {
+        hasStudyRecord = true;
+        totalMins += diff;
+      }
+    });
+
+    if (!hasStudyRecord) return null;
+
+    return roundHomeValue(totalMins / 60, 1);
+  };
+
+  const getHomeWeeklyAverageForStudentPeriod = (student, period) => {
+    if (!period?.start || !period?.end) return null;
+
+    const start = new Date(period.start);
+    start.setHours(0, 0, 0, 0);
+
+    const end = new Date(period.end);
+    end.setHours(23, 59, 59, 999);
+
+    const values = Object.values(student.scores?.weeklyMeta || {})
+      .filter(meta => {
+        if (!meta?.testDate) return false;
+
+        const testDate = new Date(`${meta.testDate}T00:00:00`);
+        if (Number.isNaN(testDate.getTime())) return false;
+
+        return testDate >= start && testDate <= end;
+      })
+      .map(meta => Number(meta.score))
+      .filter(value => Number.isFinite(value));
+
+    if (!values.length) return null;
+
+    return roundHomeValue(values.reduce((sum, value) => sum + value, 0) / values.length, 1);
+  };
+
+  const getHomeCampusPeriodStats = (period) => {
+    return {
+      attendanceRate: getAverageNullable(students.map(student => getHomeAttendanceRateForStudentPeriod(student, period))),
+      dailyRate: getAverageNullable(students.map(student => getHomeDailyRateForStudentPeriod(student, period))),
+      weeklyAverage: getAverageNullable(students.map(student => getHomeWeeklyAverageForStudentPeriod(student, period))),
+      studyHoursAverage: getAverageNullable(students.map(student => getHomeStudyHoursForStudentPeriod(student, period)))
+    };
+  };
+
+  const buildHomeChange = (current, previous, unit = '') => {
+    if (current === null || previous === null || current === undefined || previous === undefined) {
+      return {
+        hasData: false,
+        mark: '',
+        text: '-',
+        color: 'text-slate-400'
+      };
+    }
+
+    const diff = roundHomeValue(Number(current) - Number(previous), 1);
+
+    if (diff === 0) {
+      return {
+        hasData: true,
+        mark: '-',
+        text: `0${unit}`,
+        color: 'text-slate-400'
+      };
+    }
+
+    return {
+      hasData: true,
+      mark: diff > 0 ? '▲' : '▼',
+      text: `${formatHomeMetricValue(Math.abs(diff), unit)}`,
+      color: diff > 0 ? 'text-emerald-600' : 'text-red-500'
+    };
+  };
+
+  const getHomePriorityDrop = ({ label, unit, currentGetter, previousGetter }) => {
+    const candidates = students
+      .map(student => {
+        const currentValue = currentGetter(student);
+        const previousValue = previousGetter(student);
+
+        if (
+          currentValue === null ||
+          previousValue === null ||
+          currentValue === undefined ||
+          previousValue === undefined
+        ) {
+          return null;
+        }
+
+        const drop = roundHomeValue(Number(previousValue) - Number(currentValue), 1);
+
+        if (!Number.isFinite(drop) || drop <= 0) return null;
+
+        return {
+          student,
+          drop,
+          className: getHomeStudentPrimaryClassName(student) || '미배정'
+        };
+      })
+      .filter(Boolean);
+
+    if (!candidates.length) {
+      return {
+        label,
+        displayName: '-',
+        dropText: '비교 데이터 없음',
+        tooltipItems: ['비교 데이터 없음']
+      };
+    }
+
+    const maxDrop = Math.max(...candidates.map(item => item.drop));
+
+    const tiedItems = candidates
+      .filter(item => item.drop === maxDrop)
+      .sort((a, b) => {
+        const nameCompare = String(a.student.name || '').localeCompare(String(b.student.name || ''), 'ko-KR');
+        if (nameCompare !== 0) return nameCompare;
+        return String(a.className || '').localeCompare(String(b.className || ''), 'ko-KR');
+      });
+
+    const representative = tiedItems[0];
+    const displayName = tiedItems.length > 1
+      ? `${representative.student.name}(${representative.className}) 외 ${tiedItems.length - 1}명`
+      : `${representative.student.name}(${representative.className})`;
+
+    return {
+      label,
+      displayName,
+      dropText: `${formatHomeMetricValue(maxDrop, unit)} ↓`,
+      tooltipItems: tiedItems.map(item => `${item.student.name}(${item.className})`)
+    };
+  };
+
+  const homeWeekPeriods = getHomeWeekPeriods();
+  const homeLastWeekPeriodText = formatHomePeriodText(homeWeekPeriods.lastWeek);
+  const homeTwoWeeksAgoPeriodText = formatHomePeriodText(homeWeekPeriods.twoWeeksAgo);
+
+  const homeLastWeekStats = getHomeCampusPeriodStats(homeWeekPeriods.lastWeek);
+  const homeTwoWeeksAgoStats = getHomeCampusPeriodStats(homeWeekPeriods.twoWeeksAgo);
+
+  const homeAnalysisMetricRows = [
+    {
+      key: 'attendance',
+      label: '출석률',
+      icon: CalendarCheck,
+      value: formatHomeMetricValue(homeLastWeekStats.attendanceRate, '%'),
+      previous: formatHomeMetricValue(homeTwoWeeksAgoStats.attendanceRate, '%'),
+      change: buildHomeChange(homeLastWeekStats.attendanceRate, homeTwoWeeksAgoStats.attendanceRate, '%p')
+    },
+    {
+      key: 'daily',
+      label: 'Daily 참여율',
+      icon: BarChart3,
+      value: formatHomeMetricValue(homeLastWeekStats.dailyRate, '%'),
+      previous: formatHomeMetricValue(homeTwoWeeksAgoStats.dailyRate, '%'),
+      change: buildHomeChange(homeLastWeekStats.dailyRate, homeTwoWeeksAgoStats.dailyRate, '%p')
+    },
+    {
+      key: 'weekly',
+      label: 'Weekly 평균',
+      icon: Trophy,
+      value: formatHomeMetricValue(homeLastWeekStats.weeklyAverage, '점'),
+      previous: formatHomeMetricValue(homeTwoWeeksAgoStats.weeklyAverage, '점'),
+      change: buildHomeChange(homeLastWeekStats.weeklyAverage, homeTwoWeeksAgoStats.weeklyAverage, '점')
+    },
+    {
+      key: 'study',
+      label: '학습시간 평균',
+      icon: Clock,
+      value: formatHomeMetricValue(homeLastWeekStats.studyHoursAverage, 'h'),
+      previous: formatHomeMetricValue(homeTwoWeeksAgoStats.studyHoursAverage, 'h'),
+      change: buildHomeChange(homeLastWeekStats.studyHoursAverage, homeTwoWeeksAgoStats.studyHoursAverage, 'h')
+    }
+  ];
+
+  const homePriorityDrops = [
+    getHomePriorityDrop({
+      label: '출석률',
+      unit: '%',
+      currentGetter: student => getHomeAttendanceRateForStudentPeriod(student, homeWeekPeriods.lastWeek),
+      previousGetter: student => getHomeAttendanceRateForStudentPeriod(student, homeWeekPeriods.twoWeeksAgo)
+    }),
+    getHomePriorityDrop({
+      label: 'Daily',
+      unit: '%',
+      currentGetter: student => getHomeDailyRateForStudentPeriod(student, homeWeekPeriods.lastWeek),
+      previousGetter: student => getHomeDailyRateForStudentPeriod(student, homeWeekPeriods.twoWeeksAgo)
+    }),
+    getHomePriorityDrop({
+      label: 'Weekly',
+      unit: '점',
+      currentGetter: student => getHomeWeeklyAverageForStudentPeriod(student, homeWeekPeriods.lastWeek),
+      previousGetter: student => getHomeWeeklyAverageForStudentPeriod(student, homeWeekPeriods.twoWeeksAgo)
+    }),
+    getHomePriorityDrop({
+      label: '학습시간',
+      unit: 'h',
+      currentGetter: student => getHomeStudyHoursForStudentPeriod(student, homeWeekPeriods.lastWeek),
+      previousGetter: student => getHomeStudyHoursForStudentPeriod(student, homeWeekPeriods.twoWeeksAgo)
+    })
+  ];
+
   const homeDashboardStats = {
     totalStudents: classStats['대구캠퍼스 전체'],
     classCount: classes.length,
@@ -1320,6 +2086,41 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={manualSaveStatus === 'saving' || getDirtyCountForScope('all') === 0}
+                  onClick={() => saveDirtyStudentsToFirebase('all')}
+                  title="공유 저장은 Firebase에 저장됩니다. 저장완료 표시 후 다른 사용자에게 반영됩니다."
+                  className={`h-11 flex items-center gap-2 px-4 rounded-xl text-sm font-extrabold transition-colors shadow-[0_8px_28px_rgba(37,99,235,0.10)] ${
+                    getDirtyCountForScope('all') === 0
+                      ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                      : manualSaveStatus === 'error'
+                        ? 'bg-red-600 text-white hover:bg-red-700'
+                        : 'bg-blue-600 text-white hover:bg-blue-700'
+                  }`}
+                >
+                  <CheckCircle2 size={17} />
+                  전체 변경사항 저장{getDirtyCountForScope('all') > 0 ? ` (${getDirtyCountForScope('all')}건)` : ''}
+                </button>
+
+                <span
+                  className={`h-9 px-3 rounded-full flex items-center text-xs font-black ${
+                    manualSaveStatus === 'saving'
+                      ? 'bg-blue-50 text-blue-600'
+                      : manualSaveStatus === 'saved'
+                        ? 'bg-emerald-50 text-emerald-600'
+                        : manualSaveStatus === 'error'
+                          ? 'bg-red-50 text-red-600'
+                          : getDirtyCountForScope('all') > 0
+                            ? 'bg-orange-50 text-orange-600'
+                            : 'bg-slate-100 text-slate-500'
+                  }`}
+                >
+                  {manualSaveMessage || (getDirtyCountForScope('all') > 0 ? '변경사항 있음' : '저장 대기')}
+                </span>
+              </div>
+
               <select
                 value={academicYear}
                 onChange={e => setAcademicYear(e.target.value)}
@@ -1387,8 +2188,12 @@ export default function App() {
                 const maleCount = students.filter(s => s.gender === '남').length;
                 const femaleCount = students.filter(s => s.gender === '여').length;
                 const totalCount = homeDashboardStats.totalStudents || 0;
-                const humanitiesRate = totalCount ? Math.round((humanitiesCount / totalCount) * 100) : 0;
-                const naturalRate = totalCount ? Math.round((naturalCount / totalCount) * 100) : 0;
+
+                // 계열 그래프/비율은 전체 학생 수가 아니라 인문+자연 계열 합계를 기준으로 계산
+                const trackTotal = humanitiesCount + naturalCount;
+                const humanitiesRate = trackTotal ? Math.round((humanitiesCount / trackTotal) * 100) : 0;
+                const naturalRate = trackTotal ? 100 - humanitiesRate : 0;
+
                 const maxClassCount = Math.max(1, ...classes.map(clsName => classStats[clsName] || 0));
 
                 const currentMonthIndex = MONTHS.indexOf(homeSelectedMonth);
@@ -1399,43 +2204,47 @@ export default function App() {
 
                 return (
                   <div className="grid grid-cols-1 lg:grid-cols-[1.05fr_1fr_1fr] gap-3">
-                    <div className="rounded-2xl bg-white border border-blue-100 p-4 shadow-sm">
-                      <p className="text-sm font-black text-slate-700 mb-1">전체 학생 수</p>
+                    <div className="rounded-2xl bg-white border border-blue-100 p-5 shadow-sm h-full flex items-center">
+                      <div className="w-full flex items-center gap-7">
+                        <div className="min-w-[128px]">
+                          <p className="text-[15px] font-black text-slate-700 mb-2">전체 학생 수</p>
 
-                      <div className="flex items-end gap-2 mb-1">
-                        <strong className="text-3xl font-black text-blue-600">{totalCount}</strong>
-                        <span className="text-lg font-black text-slate-700 mb-0.5">명</span>
-                      </div>
+                          <div className="flex items-end gap-1.5 mb-2">
+                            <strong className="text-4xl font-black text-blue-600 leading-none">{totalCount}</strong>
+                            <span className="text-lg font-black text-slate-700 mb-0.5">명</span>
+                          </div>
 
-                      <div className={`text-[11px] font-black mb-4 ${monthDiff >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
-                        전월 대비 {monthDiff > 0 ? '▲' : monthDiff < 0 ? '▼' : ''} {Math.abs(monthDiff)}명
-                      </div>
-
-                      <div className="grid grid-cols-[96px_1fr] gap-4 items-center">
-                        <div
-                          className="relative w-[88px] h-[88px] rounded-full flex items-center justify-center"
-                          style={{
-                            background: `conic-gradient(#3b82f6 0% ${humanitiesRate}%, #ec4899 ${humanitiesRate}% 100%)`
-                          }}
-                        >
-                          <div className="w-[56px] h-[56px] rounded-full bg-white shadow-inner"></div>
+                          <div className={`text-xs font-black ${monthDiff >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                            전월 대비 {monthDiff > 0 ? '▲' : monthDiff < 0 ? '▼' : ''} {Math.abs(monthDiff)}명
+                          </div>
                         </div>
 
-                        <div className="space-y-2 text-xs font-black">
-                          <div className="grid grid-cols-[10px_1fr_auto] items-center gap-2">
-                            <span className="w-2 h-2 rounded-full bg-blue-500"></span>
+                        <div
+                          className="relative w-[108px] h-[108px] rounded-full flex items-center justify-center shrink-0"
+                          style={{
+                            background: trackTotal > 0
+                              ? `conic-gradient(#3b82f6 0% ${humanitiesRate}%, #ec4899 ${humanitiesRate}% 100%)`
+                              : '#e2e8f0'
+                          }}
+                        >
+                          <div className="w-[66px] h-[66px] rounded-full bg-white shadow-inner"></div>
+                        </div>
+
+                        <div className="flex-1 min-w-[230px] max-w-[300px] space-y-3 text-sm font-black">
+                          <div className="grid grid-cols-[12px_1fr_auto] items-center gap-2.5">
+                            <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span>
                             <span className="text-slate-600">인문계열</span>
                             <span className="text-slate-900">{humanitiesCount}명 ({humanitiesRate}%)</span>
                           </div>
 
-                          <div className="grid grid-cols-[10px_1fr_auto] items-center gap-2">
-                            <span className="w-2 h-2 rounded-full bg-pink-500"></span>
+                          <div className="grid grid-cols-[12px_1fr_auto] items-center gap-2.5">
+                            <span className="w-2.5 h-2.5 rounded-full bg-pink-500"></span>
                             <span className="text-slate-600">자연계열</span>
                             <span className="text-slate-900">{naturalCount}명 ({naturalRate}%)</span>
                           </div>
 
-                          <div className="flex items-center gap-2 pt-2 mt-1 border-t border-slate-100 text-slate-500">
-                            <span className="w-2 h-2 rounded-full bg-slate-300"></span>
+                          <div className="flex items-center gap-2.5 pt-3 mt-1 border-t border-slate-100 text-slate-500">
+                            <span className="w-2.5 h-2.5 rounded-full bg-slate-300"></span>
                             <span>남 {maleCount}명 / 여 {femaleCount}명</span>
                           </div>
                         </div>
@@ -1722,34 +2531,111 @@ export default function App() {
               })()}
               {homeActiveTab === 'analysis' && (
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-                  <div className="rounded-2xl bg-white border border-blue-100 p-4">
-                    <p className="text-sm font-black text-slate-700 mb-3">출석률 최저 반</p>
-                    <strong className="text-2xl font-black text-rose-600">
-                      {worstClass ? `${worstClass.clsName} ${worstClass.rate}%` : '데이터 없음'}
-                    </strong>
+                  <div className="rounded-2xl bg-white/95 border border-blue-100 p-4 shadow-sm">
+                    <div className="flex items-start justify-between mb-4">
+                      <div>
+                        <p className="text-base font-black text-slate-900 flex items-center gap-1">
+                          지난주 학습 상태
+                          <span className="text-[11px] text-slate-400">ⓘ</span>
+                        </p>
+                        <p className="text-xs font-bold text-slate-500 mt-1">{homeLastWeekPeriodText} 기준</p>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      {homeAnalysisMetricRows.map(row => {
+                        const Icon = row.icon;
+
+                        return (
+                          <div key={row.key} className="rounded-2xl bg-white border border-blue-100 px-4 py-3 min-h-[92px] flex items-center gap-3 shadow-[0_8px_20px_rgba(37,99,235,0.05)]">
+                            <div className={`w-11 h-11 rounded-2xl flex items-center justify-center ${
+                              row.key === 'attendance'
+                                ? 'bg-blue-50 text-blue-600'
+                                : row.key === 'daily'
+                                  ? 'bg-emerald-50 text-emerald-600'
+                                  : row.key === 'weekly'
+                                    ? 'bg-orange-50 text-orange-500'
+                                    : 'bg-violet-50 text-violet-600'
+                            }`}>
+                              <Icon size={22} />
+                            </div>
+
+                            <div>
+                              <p className="text-xs font-black text-slate-500">{row.label}</p>
+                              <p className="text-2xl font-black text-slate-950 mt-0.5">{row.value}</p>
+                              <p className="text-[11px] font-bold text-slate-400 mt-0.5">지난주</p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
 
-                  <div className="rounded-2xl bg-white border border-blue-100 p-4">
-                    <p className="text-sm font-black text-slate-700 mb-3">Daily 참여율 비교</p>
-                    <div className="space-y-2">
-                      {classes.map(clsName => (
-                        <div key={clsName} className="flex items-center justify-between text-sm font-black">
-                          <span>{clsName}</span>
-                          <span className={getRateTextClass(getHomeClassDailyRate(clsName))}>
-                            {getHomeClassDailyRate(clsName)}%
+                  <div className="rounded-2xl bg-white/95 border border-blue-100 p-4 shadow-sm">
+                    <div className="flex items-start justify-between mb-4">
+                      <div>
+                        <p className="text-base font-black text-slate-900 flex items-center gap-1">
+                          주요 지표 변화
+                          <span className="text-[11px] text-slate-400">ⓘ</span>
+                        </p>
+                        <p className="text-xs font-bold text-slate-500 mt-1">지난주 vs 2주 전</p>
+                      </div>
+
+                      <div className="hidden xl:flex items-center gap-3 text-[11px] font-black text-slate-400">
+                        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-blue-500"></span>지난주</span>
+                        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-slate-300"></span>2주 전</span>
+                        <span>× 변화</span>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl bg-white border border-blue-100 overflow-hidden">
+                      {homeAnalysisMetricRows.map(row => (
+                        <div key={row.key} className="grid grid-cols-[1fr_82px_82px_82px] items-center px-4 py-3 border-b border-slate-100 last:border-b-0 text-sm font-black">
+                          <span className="text-slate-700">{row.label}</span>
+                          <span className="text-blue-600 text-right">{row.value}</span>
+                          <span className="text-slate-500 text-right">{row.previous}</span>
+                          <span className={`text-right ${row.change.color}`}>
+                            {row.change.hasData ? `${row.change.mark} ${row.change.text}` : '-'}
                           </span>
                         </div>
                       ))}
                     </div>
+
+                    <p className="text-[11px] font-bold text-slate-400 mt-3">
+                      {homeLastWeekPeriodText} · {homeTwoWeeksAgoPeriodText} 비교
+                    </p>
                   </div>
 
-                  <button
-                    onClick={() => showHomeStudentList('관리 필요 학생', homeNeedStudents)}
-                    className="rounded-2xl bg-red-50/70 border border-red-100 p-4 text-left"
-                  >
-                    <p className="text-sm font-black text-slate-600 mb-1">관리 필요 학생</p>
-                    <strong className="text-3xl font-black text-red-500">{homeNeedStudents.length}명</strong>
-                  </button>
+                  <div className="rounded-2xl bg-red-50/50 border border-red-100 p-4 shadow-sm">
+                    <div className="flex items-start justify-between mb-4">
+                      <div className="flex items-start gap-3">
+                        <div className="w-11 h-11 rounded-full bg-red-500 text-white flex items-center justify-center shadow-lg shadow-red-200">
+                          <AlertTriangle size={22} />
+                        </div>
+
+                        <div>
+                          <p className="text-base font-black text-red-600">우선 관리 포인트</p>
+                          <p className="text-xs font-bold text-slate-500 mt-1">지난주 vs 2주 전 하락폭 기준</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl bg-white/90 border border-red-100 overflow-hidden">
+                      {homePriorityDrops.map(item => (
+                        <button
+                          key={item.label}
+                          type="button"
+                          title={item.tooltipItems.join('\n')}
+                          onClick={() => showHomeTextList(`${item.label} 하락폭 동일 학생`, item.tooltipItems)}
+                          className="w-full grid grid-cols-[86px_1fr_84px] items-center gap-2 px-4 py-3 border-b border-red-50 last:border-b-0 text-left hover:bg-red-50/60 transition-colors"
+                        >
+                          <span className="text-sm font-black text-slate-700">{item.label}</span>
+                          <span className="text-sm font-bold text-slate-600 truncate">{item.displayName}</span>
+                          <span className="text-right text-lg font-black text-red-500">{item.dropText}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -2076,10 +2962,40 @@ export default function App() {
   }
 
 
-  return <ClassDashboard academicYear={academicYear} className={selectedClass} classes={classes} onBack={() => setSelectedClass(null)} students={students} setStudents={setStudents} isXlsxReady={isXlsxReady} />;
+  return (
+    <ClassDashboard
+      academicYear={academicYear}
+      className={selectedClass}
+      classes={classes}
+      onBack={() => setSelectedClass(null)}
+      students={students}
+      setStudents={setStudents}
+      isXlsxReady={isXlsxReady}
+      markStudentDirty={markStudentDirty}
+      saveDirtyStudentsToFirebase={saveDirtyStudentsToFirebase}
+      manualSaveStatus={manualSaveStatus}
+      manualSaveMessage={manualSaveMessage}
+      dirtyStudentIds={dirtyStudentIds}
+      getDirtyCountForScope={getDirtyCountForScope}
+    />
+  );
 }
 
-function ClassDashboard({ academicYear, className, classes, onBack, students, setStudents, isXlsxReady }) {
+function ClassDashboard({
+  academicYear,
+  className,
+  classes,
+  onBack,
+  students,
+  setStudents,
+  isXlsxReady,
+  markStudentDirty = () => {},
+  saveDirtyStudentsToFirebase = async () => {},
+  manualSaveStatus = 'idle',
+  manualSaveMessage = '',
+  dirtyStudentIds = new Set(),
+  getDirtyCountForScope = () => 0
+}) {
   const [activeTab, setActiveTab] = useState('dashboard'); 
   const [activeTestTab, setActiveTestTab] = useState('monthly'); 
   const [activeDailyTab, setActiveDailyTab] = useState('input'); 
@@ -2143,6 +3059,10 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   const [batchDailyT2, setBatchDailyT2] = useState('');
   const [batchDailyMath, setBatchDailyMath] = useState('');
 
+  // 출석 + Daily 통합 엑셀 업로드 input ref
+  const attendanceDailyExcelInputRef = useRef(null);
+  const testDailyExcelInputRef = useRef(null);
+
   const handleBatchDailyChange = () => {
     if (selectedStudents.length === 0) { showAlert('일괄 적용할 학생을 선택해주세요.'); return; }
     const subjectLabel = dailySubject === 'math' ? '수학 Daily' : '영어 Daily';
@@ -2170,6 +3090,9 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
 
         return { ...student, dailyRecords: { ...student.dailyRecords, [dailyMonth]: newDaily } };
       }));
+
+      selectedStudents.forEach(studentId => markStudentDirty(studentId, 'dailyRecords'));
+
       showAlert(`${subjectLabel} 성적 일괄 적용이 완료되었습니다.`);
       setSelectedStudents([]);
       setBatchDailyT1('');
@@ -2178,48 +3101,465 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
     });
   };
 
-  const handleResetDaily = (isAllMonth) => {
-    if (selectedStudents.length === 0) { showAlert('초기화할 학생을 선택해주세요.'); return; }
-    const subjectLabel = dailySubject === 'math' ? '수학 Daily' : '영어 Daily';
-    const targetMsg = isAllMonth ? `${dailyMonth} 전체 ${subjectLabel}` : `${dailyMonth} ${Number(batchDailyDate) + 1}일 ${subjectLabel}`;
+  const normalizeExcelHeader = (header = '') => {
+    const key = String(header || '').replace(/\s+/g, '').toLowerCase();
 
-    showConfirm(`선택한 ${selectedStudents.length}명의 [${targetMsg}] 데이터를 초기화(삭제)하시겠습니까?`, () => {
-      setStudents(prev => prev.map(student => {
-        if (!selectedStudents.includes(student.id)) return student;
-        const baseDaily = student.dailyRecords?.[dailyMonth] || generateEmptyMonthlyDaily()[dailyMonth];
-        const newDaily = baseDaily.map(d => ({ t1: '', t2: '', math: '', ...(d || {}) }));
+    const headerMap = {
+      '반': 'className',
+      'class': 'className',
+      'classname': 'className',
+      '수강반': 'className',
+      '이름': 'name',
+      '성명': 'name',
+      'name': 'name',
+      '학생명': 'name',
+      '학번': 'studentId',
+      '학생번호': 'studentId',
+      'id': 'studentId',
+      'studentid': 'studentId',
+      '수험번호': 'studentId',
+      '아이디': 'userId',
+      'userid': 'userId',
+      '로그인id': 'userId',
+      '로그인아이디': 'userId',
+      '날짜': 'date',
+      '일자': 'date',
+      'day': 'date',
+      'date': 'date',
+      '출석유형': 'attendanceStatus',
+      '출석': 'attendanceStatus',
+      '출결': 'attendanceStatus',
+      'attendance': 'attendanceStatus',
+      'daily1차': 'dailyT1',
+      '데일리1차': 'dailyT1',
+      '1차': 'dailyT1',
+      't1': 'dailyT1',
+      'daily2차': 'dailyT2',
+      '데일리2차': 'dailyT2',
+      '2차': 'dailyT2',
+      't2': 'dailyT2',
+      '수학daily': 'dailyMath',
+      '수학데일리': 'dailyMath',
+      'math': 'dailyMath',
+      '수학': 'dailyMath'
+    };
 
-        if (isAllMonth) {
-          const resetDaily = newDaily.map(day => {
-            if (dailySubject === 'math') return { ...day, math: '' };
-            return { ...day, t1: '', t2: '' };
-          });
-          return { ...student, dailyRecords: { ...student.dailyRecords, [dailyMonth]: resetDaily } };
-        } else {
-          const currentDay = { t1: '', t2: '', math: '', ...(newDaily[batchDailyDate] || {}) };
-          newDaily[batchDailyDate] = dailySubject === 'math'
-            ? { ...currentDay, math: '' }
-            : { ...currentDay, t1: '', t2: '' };
-          return { ...student, dailyRecords: { ...student.dailyRecords, [dailyMonth]: newDaily } };
-        }
-      }));
-      showAlert(`${subjectLabel} 초기화가 완료되었습니다.`);
-      setSelectedStudents([]);
-    });
+    return headerMap[key] || key;
   };
 
-  const toggleStudentSelection = (studentId) => {
-    setSelectedStudents(prev => 
-      prev.includes(studentId) ? prev.filter(id => id !== studentId) : [...prev, studentId]
-    );
+  const normalizeAttendanceStatus = (value) => {
+    const status = String(value ?? '').trim();
+    if (!status) return '';
+    return ATTENDANCE_OPTIONS.includes(status) ? status : null;
   };
 
-  const handleSelectAllStudents = (isAll) => {
-    if (isAll) {
-      setSelectedStudents(filteredStudents.map(s => s.id));
-    } else {
-      setSelectedStudents([]);
+  const getStudentClassNamesForExcel = (student) => {
+    return Array.isArray(student.classNames)
+      ? student.classNames.filter(Boolean)
+      : [student.className].filter(Boolean);
+  };
+
+  const getRowValueByNormalizedKey = (row, targetKey) => {
+    const foundKey = Object.keys(row).find(key => normalizeExcelHeader(key) === targetKey);
+    return foundKey ? row[foundKey] : '';
+  };
+
+  const parseExcelDateToDayIndex = (value, fallbackMonth, fallbackDayIndex = 0) => {
+    const raw = String(value ?? '').trim();
+    const safeFallbackDayIndex = Math.max(0, Math.min(30, Number(fallbackDayIndex || 0)));
+
+    if (!raw) {
+      return { month: fallbackMonth, dayIndex: safeFallbackDayIndex };
     }
+
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      const day = Math.round(value);
+      if (day >= 1 && day <= 31) return { month: fallbackMonth, dayIndex: day - 1 };
+    }
+
+    const isoMatch = raw.match(/^(\d{4})[-./](\d{1,2})[-./](\d{1,2})$/);
+    if (isoMatch) {
+      const monthNumber = Number(isoMatch[2]);
+      const day = Number(isoMatch[3]);
+      if (monthNumber >= 1 && monthNumber <= 12 && day >= 1 && day <= 31) {
+        return { month: `${monthNumber}월`, dayIndex: day - 1 };
+      }
+    }
+
+    const koreanMatch = raw.match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일?/);
+    if (koreanMatch) {
+      const monthNumber = Number(koreanMatch[1]);
+      const day = Number(koreanMatch[2]);
+      if (monthNumber >= 1 && monthNumber <= 12 && day >= 1 && day <= 31) {
+        return { month: `${monthNumber}월`, dayIndex: day - 1 };
+      }
+    }
+
+    const slashMatch = raw.match(/^(\d{1,2})[/.](\d{1,2})$/);
+    if (slashMatch) {
+      const monthNumber = Number(slashMatch[1]);
+      const day = Number(slashMatch[2]);
+      if (monthNumber >= 1 && monthNumber <= 12 && day >= 1 && day <= 31) {
+        return { month: `${monthNumber}월`, dayIndex: day - 1 };
+      }
+    }
+
+    const dayOnly = Number(raw);
+    if (Number.isFinite(dayOnly) && dayOnly >= 1 && dayOnly <= 31) {
+      return { month: fallbackMonth, dayIndex: Math.round(dayOnly) - 1 };
+    }
+
+    return null;
+  };
+
+  const findStudentByAttendanceDailyExcelRow = (row, studentList = students) => {
+    const rowClassName = String(getRowValueByNormalizedKey(row, 'className') || '').trim();
+    const rowName = String(getRowValueByNormalizedKey(row, 'name') || '').trim();
+    const rowStudentId = String(getRowValueByNormalizedKey(row, 'studentId') || '').trim();
+    const rowUserId = String(getRowValueByNormalizedKey(row, 'userId') || '').trim();
+    const scopeClassName = rowClassName || className;
+
+    const candidates = studentList.filter(student => {
+      if (className === '대구캠퍼스 전체' && !scopeClassName) return true;
+
+      const classList = getStudentClassNamesForExcel(student);
+      return scopeClassName ? classList.includes(scopeClassName) : classList.includes(className);
+    });
+
+    if (rowStudentId) {
+      const matched = candidates.find(student => String(student.id || '').trim() === rowStudentId);
+      if (matched) return { student: matched, error: null };
+    }
+
+    if (rowUserId) {
+      const matched = candidates.find(student => String(student.userId || '').trim() === rowUserId);
+      if (matched) return { student: matched, error: null };
+    }
+
+    if (rowName) {
+      const nameMatches = candidates.filter(student => String(student.name || '').trim() === rowName);
+      if (nameMatches.length === 1) return { student: nameMatches[0], error: null };
+      if (nameMatches.length > 1) return { student: null, error: '중복 이름 확인 필요' };
+    }
+
+    return { student: null, error: '학생 매칭 실패' };
+  };
+
+  const downloadAttendanceDailyTemplate = async (source = 'attendance') => {
+    const loadExcelJS = () => {
+      return new Promise((resolve, reject) => {
+        if (window.ExcelJS) {
+          resolve(window.ExcelJS);
+          return;
+        }
+
+        const existingScript = document.querySelector('script[data-exceljs="true"]');
+        if (existingScript) {
+          existingScript.addEventListener('load', () => resolve(window.ExcelJS));
+          existingScript.addEventListener('error', reject);
+          return;
+        }
+
+        const script = document.createElement('script');
+        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js';
+        script.async = true;
+        script.dataset.exceljs = 'true';
+        script.onload = () => resolve(window.ExcelJS);
+        script.onerror = reject;
+        document.body.appendChild(script);
+      });
+    };
+
+    try {
+      const ExcelJS = await loadExcelJS();
+
+      if (!ExcelJS) {
+        showAlert('엑셀 양식 생성 모듈을 불러오지 못했습니다.');
+        return;
+      }
+
+      const targetMonth = source === 'daily' ? dailyMonth : attendanceMonth;
+      const targetDayIndex = source === 'daily' ? Number(batchDailyDate || 0) : Number(batchAttendanceDate || 0);
+      const targetDateLabel = `${targetMonth} ${targetDayIndex + 1}일`;
+
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = 'KY Daegu Academy';
+      workbook.created = new Date();
+
+      const worksheet = workbook.addWorksheet('출석_Daily_업로드');
+      const guideWorksheet = workbook.addWorksheet('출석유형_목록');
+
+      worksheet.columns = [
+        { header: '반', key: 'className', width: 12 },
+        { header: '이름', key: 'name', width: 12 },
+        { header: '학번', key: 'studentId', width: 16 },
+        { header: '아이디', key: 'userId', width: 18 },
+        { header: '날짜', key: 'date', width: 14 },
+        { header: '출석유형', key: 'attendanceStatus', width: 16 },
+        { header: 'Daily 1차', key: 'dailyT1', width: 12 },
+        { header: 'Daily 2차', key: 'dailyT2', width: 12 },
+        { header: '수학 Daily', key: 'dailyMath', width: 12 }
+      ];
+
+      worksheet.getRow(1).font = { bold: true };
+      worksheet.getRow(1).alignment = { horizontal: 'center', vertical: 'middle' };
+      worksheet.getRow(1).height = 22;
+
+      classStudents.forEach(student => {
+        worksheet.addRow({
+          className: className === '대구캠퍼스 전체'
+            ? (getStudentClassNamesForExcel(student)[0] || '')
+            : className,
+          name: student.name || '',
+          studentId: student.id || '',
+          userId: student.userId || '',
+          date: targetDateLabel,
+          attendanceStatus: '',
+          dailyT1: '',
+          dailyT2: '',
+          dailyMath: ''
+        });
+      });
+
+      guideWorksheet.columns = [
+        { header: '출석유형 목록', key: 'attendanceStatus', width: 18 }
+      ];
+      guideWorksheet.getRow(1).font = { bold: true };
+
+      ATTENDANCE_OPTIONS.forEach(status => {
+        guideWorksheet.addRow({ attendanceStatus: status });
+      });
+
+      const guideStartRow = 2;
+      const guideEndRow = ATTENDANCE_OPTIONS.length + 1;
+      const validationFormula = `'출석유형_목록'!$A$${guideStartRow}:$A$${guideEndRow}`;
+
+      for (let rowNumber = 2; rowNumber <= 500; rowNumber++) {
+        const cell = worksheet.getCell(`F${rowNumber}`);
+
+        cell.dataValidation = {
+          type: 'list',
+          allowBlank: true,
+          formulae: [validationFormula],
+          showErrorMessage: true,
+          errorStyle: 'error',
+          errorTitle: '출석유형 선택 오류',
+          error: '출석유형_목록에 있는 값만 선택해주세요.',
+          promptTitle: '출석유형 선택',
+          prompt: '드롭다운에서 출석유형을 선택해주세요.'
+        };
+      }
+
+      worksheet.views = [{ state: 'frozen', ySplit: 1 }];
+      worksheet.autoFilter = {
+        from: 'A1',
+        to: 'I1'
+      };
+
+      guideWorksheet.state = 'veryHidden';
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      });
+
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${className}_${targetMonth}_${targetDayIndex + 1}일_출석_Daily_업로드양식.xlsx`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('출석/Daily 엑셀 양식 생성 오류:', error);
+      showAlert('엑셀 양식 생성 중 오류가 발생했습니다.');
+    }
+  };
+
+  const handleAttendanceDailyExcelUpload = (event, source = 'attendance') => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (typeof window.XLSX === 'undefined') {
+      showAlert('엑셀 모듈 로딩중입니다.');
+      event.target.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+
+    reader.onload = (loadEvent) => {
+      try {
+        const data = new Uint8Array(loadEvent.target.result);
+        const workbook = window.XLSX.read(data, { type: 'array' });
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
+
+        if (!worksheet) {
+          showAlert('엑셀 첫 번째 시트를 찾을 수 없습니다.');
+          return;
+        }
+
+        const rows = window.XLSX.utils.sheet_to_json(worksheet, { defval: '' });
+
+        if (!rows.length) {
+          showAlert('업로드할 데이터가 없습니다.');
+          return;
+        }
+
+        const baseMonth = source === 'daily' ? dailyMonth : attendanceMonth;
+        const fallbackDayIndex = source === 'daily' ? Number(batchDailyDate || 0) : Number(batchAttendanceDate || 0);
+        const result = {
+          total: rows.length,
+          matchedStudents: new Set(),
+          attendanceCount: 0,
+          dailyCount: 0,
+          matchFailCount: 0,
+          statusErrorCount: 0,
+          duplicateNameCount: 0,
+          errors: []
+        };
+
+        const dirtyMap = {};
+        const nextStudents = students.map(student => ({ ...student }));
+        const studentIndexMap = {};
+
+        nextStudents.forEach((student, index) => {
+          studentIndexMap[student.id] = index;
+        });
+
+        rows.forEach((row, rowIndex) => {
+          const excelRowNumber = rowIndex + 2;
+          const { student, error } = findStudentByAttendanceDailyExcelRow(row, nextStudents);
+
+          if (!student) {
+            if (error === '중복 이름 확인 필요') result.duplicateNameCount += 1;
+            else result.matchFailCount += 1;
+
+            result.errors.push(`${excelRowNumber}행: ${error}`);
+            return;
+          }
+
+          const targetIndex = studentIndexMap[student.id];
+          if (targetIndex === undefined) {
+            result.matchFailCount += 1;
+            result.errors.push(`${excelRowNumber}행: 학생 매칭 실패`);
+            return;
+          }
+
+          const dateValue = getRowValueByNormalizedKey(row, 'date');
+          const parsedDate = parseExcelDateToDayIndex(dateValue, baseMonth, fallbackDayIndex);
+
+          if (!parsedDate || parsedDate.dayIndex < 0 || parsedDate.dayIndex > 30) {
+            result.errors.push(`${excelRowNumber}행: 날짜 형식 오류`);
+            return;
+          }
+
+          const targetMonth = parsedDate.month || baseMonth;
+          const dayIndex = parsedDate.dayIndex;
+          const rawAttendanceStatus = getRowValueByNormalizedKey(row, 'attendanceStatus');
+          const attendanceStatus = normalizeAttendanceStatus(rawAttendanceStatus);
+          const dailyT1 = String(getRowValueByNormalizedKey(row, 'dailyT1') ?? '').trim();
+          const dailyT2 = String(getRowValueByNormalizedKey(row, 'dailyT2') ?? '').trim();
+          const dailyMath = String(getRowValueByNormalizedKey(row, 'dailyMath') ?? '').trim();
+
+          let changedAttendance = false;
+          let changedDaily = false;
+          const currentStudent = nextStudents[targetIndex];
+
+          if (attendanceStatus === null) {
+            result.statusErrorCount += 1;
+            result.errors.push(`${excelRowNumber}행: 출석유형 값 오류 - "${rawAttendanceStatus}"`);
+          } else if (attendanceStatus !== '') {
+            const currentMonth = currentStudent.attendance?.[targetMonth] || generateEmptyMonthlyAttendance()[targetMonth];
+            const currentAttendanceValue = currentMonth.am?.[dayIndex] || '';
+
+            if (!isSameValueForDirtyCheck(currentAttendanceValue, attendanceStatus)) {
+              const updatedAm = [...(currentMonth.am || Array(31).fill(''))];
+              const updatedPm = [...(currentMonth.pm || Array(31).fill(''))];
+
+              updatedAm[dayIndex] = attendanceStatus;
+              updatedPm[dayIndex] = '';
+
+              nextStudents[targetIndex] = {
+                ...currentStudent,
+                attendance: {
+                  ...currentStudent.attendance,
+                  [targetMonth]: {
+                    ...currentMonth,
+                    am: updatedAm,
+                    pm: updatedPm
+                  }
+                }
+              };
+
+              changedAttendance = true;
+              result.attendanceCount += 1;
+            }
+          }
+
+          if (dailyT1 !== '' || dailyT2 !== '' || dailyMath !== '') {
+            const studentAfterAttendance = nextStudents[targetIndex];
+            const baseDaily = studentAfterAttendance.dailyRecords?.[targetMonth] || generateEmptyMonthlyDaily()[targetMonth];
+            const currentDaily = baseDaily[dayIndex] || { t1: '', t2: '', math: '' };
+
+            const shouldChangeDaily =
+              (dailyT1 !== '' && !isSameValueForDirtyCheck(currentDaily.t1, dailyT1)) ||
+              (dailyT2 !== '' && !isSameValueForDirtyCheck(currentDaily.t2, dailyT2)) ||
+              (dailyMath !== '' && !isSameValueForDirtyCheck(currentDaily.math, dailyMath));
+
+            if (shouldChangeDaily) {
+              const newDaily = baseDaily.map(day => ({ t1: '', t2: '', math: '', ...(day || {}) }));
+
+              newDaily[dayIndex] = {
+                ...newDaily[dayIndex],
+                ...(dailyT1 !== '' ? { t1: dailyT1 } : {}),
+                ...(dailyT2 !== '' ? { t2: dailyT2 } : {}),
+                ...(dailyMath !== '' ? { math: dailyMath } : {})
+              };
+
+              nextStudents[targetIndex] = {
+                ...studentAfterAttendance,
+                dailyRecords: {
+                  ...studentAfterAttendance.dailyRecords,
+                  [targetMonth]: newDaily
+                }
+              };
+
+              changedDaily = true;
+              result.dailyCount += 1;
+            }
+          }
+
+          if (changedAttendance || changedDaily) {
+            result.matchedStudents.add(student.id);
+            if (!dirtyMap[student.id]) dirtyMap[student.id] = new Set();
+            if (changedAttendance) dirtyMap[student.id].add('attendance');
+            if (changedDaily) dirtyMap[student.id].add('dailyRecords');
+          }
+        });
+
+        setStudents(nextStudents);
+
+        Object.entries(dirtyMap).forEach(([studentId, fields]) => {
+          fields.forEach(field => markStudentDirty(studentId, field));
+        });
+
+        if (result.errors.length) {
+          console.warn('출석/Daily 엑셀 업로드 오류 목록:', result.errors);
+        }
+
+        showAlert(
+          `엑셀 업로드 완료\n총 ${result.total}행 중 ${result.matchedStudents.size}명 반영\n출석 ${result.attendanceCount}건, Daily ${result.dailyCount}건 반영\n매칭 실패 ${result.matchFailCount}건, 출석유형 오류 ${result.statusErrorCount}건, 중복 이름 ${result.duplicateNameCount}건`
+        );
+      } catch (error) {
+        console.error('출석/Daily 엑셀 업로드 오류:', error);
+        showAlert('엑셀 업로드 중 오류가 발생했습니다.');
+      } finally {
+        event.target.value = '';
+      }
+    };
+
+    reader.readAsArrayBuffer(file);
   };
 
   const handleBatchAttendanceChange = () => {
@@ -2255,6 +3595,9 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
           }
         };
       }));
+
+      selectedStudents.forEach(studentId => markStudentDirty(studentId, 'attendance'));
+
       showAlert(`출결 일괄 적용이 완료되었습니다.`);
       setSelectedStudents([]);
     });
@@ -2273,11 +3616,11 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
     showConfirm(`선택한 ${selectedStudents.length}명의 ${studyTimeMonth} ${Number(batchStudyTimeDate) + 1}일 학습시간을 일괄 변경하시겠습니까?`, () => {
       setStudents(prev => prev.map(student => {
         if (!selectedStudents.includes(student.id)) return student;
-        
-        const newDaily = [...(student.studyTime[studyTimeMonth] || Array.from({length: 31}, () => ({in: '', out: ''})))];
+
+        const newDaily = [...(student.studyTime?.[studyTimeMonth] || Array.from({length: 31}, () => ({in: '', out: ''})))];
         if (batchStudyTimeIn !== '') newDaily[batchStudyTimeDate] = { ...newDaily[batchStudyTimeDate], in: batchStudyTimeIn };
         if (batchStudyTimeOut !== '') newDaily[batchStudyTimeDate] = { ...newDaily[batchStudyTimeDate], out: batchStudyTimeOut };
-        
+
         return { 
           ...student, 
           studyTime: { 
@@ -2286,8 +3629,11 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
           } 
         };
       }));
+
+      selectedStudents.forEach(studentId => markStudentDirty(studentId, 'studyTime'));
+
       showAlert(`학습시간 일괄 적용이 완료되었습니다.`);
-      setSelectedStudents([]); // 선택 초기화
+      setSelectedStudents([]);
       setBatchStudyTimeIn('');
       setBatchStudyTimeOut('');
     });
@@ -3224,6 +4570,8 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
           ...prev,
           rules: { ...prev.rules, [opt]: { ...prev.rules[opt], [field]: val } }
       }));
+
+      markClassSettingsDirty(className, 'penaltyRules');
   };
 
   const [monthlySummaries, setMonthlySummaries] = useState({
@@ -3232,24 +4580,160 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
   });
 
   const [selectedWeek, setSelectedWeek] = useState(1);
-  const [weeklySettings, setWeeklySettings] = useState(() => {
+
+  const getWeeklyMonthNumber = (monthLabel) => {
+    const parsed = parseInt(String(monthLabel || '').replace('월', ''), 10);
+    return Number.isFinite(parsed) ? parsed : new Date().getMonth() + 1;
+  };
+
+  const getWeeklyMonthKeyFromDate = (dateValue) => {
+    if (!dateValue) return '';
+    const date = new Date(`${dateValue}T00:00:00`);
+    if (Number.isNaN(date.getTime())) return '';
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+  };
+
+  const getWeeklyMonthLabelFromDateValue = (dateValue) => {
+    if (!dateValue) return '';
+    const date = new Date(`${dateValue}T00:00:00`);
+    if (Number.isNaN(date.getTime())) return '';
+    return `${date.getMonth() + 1}월`;
+  };
+
+  const createDefaultWeeklySetting = (subject, month, week) => {
+    const isEnglish = subject === 'english';
+
+    return {
+      subject,
+      testName: `${month} ${week}주차 Weekly`,
+      testDate: '',
+      testMonth: '',
+      weekRound: week,
+      targetClasses: className === '대구캠퍼스 전체' ? [] : [className],
+      maxScore: 100,
+      answers: Array(isEnglish ? 40 : 30).fill(''),
+      types: Array(isEnglish ? 40 : 30).fill(''),
+      ...(isEnglish ? {} : { qCount: 20, qScore: 5 })
+    };
+  };
+
+  const createDefaultWeeklySettings = () => {
     const settings = { english: {}, math: {} };
-    MONTHS.forEach(m => {
-      settings.english[m] = {
-        1: { answers: Array(40).fill(''), types: Array(40).fill('') }, 2: { answers: Array(40).fill(''), types: Array(40).fill('') },
-        3: { answers: Array(40).fill(''), types: Array(40).fill('') }, 4: { answers: Array(40).fill(''), types: Array(40).fill('') },
-        5: { answers: Array(40).fill(''), types: Array(40).fill('') }
+
+    MONTHS.forEach(month => {
+      settings.english[month] = {};
+      settings.math[month] = {};
+
+      for (let week = 1; week <= 5; week++) {
+        settings.english[month][week] = createDefaultWeeklySetting('english', month, week);
+        settings.math[month][week] = createDefaultWeeklySetting('math', month, week);
+      }
+    });
+
+    return settings;
+  };
+
+  const normalizeWeeklySettings = (savedSettings) => {
+    const defaults = createDefaultWeeklySettings();
+    const saved = savedSettings || {};
+
+    ['english', 'math'].forEach(subject => {
+      MONTHS.forEach(month => {
+        for (let week = 1; week <= 5; week++) {
+          const base = defaults[subject][month][week];
+          const savedItem = saved?.[subject]?.[month]?.[week] || {};
+
+          defaults[subject][month][week] = {
+            ...base,
+            ...savedItem,
+            subject,
+            testName: savedItem.testName || base.testName,
+            testDate: savedItem.testDate || '',
+            testMonth: savedItem.testMonth || getWeeklyMonthKeyFromDate(savedItem.testDate) || '',
+            weekRound: savedItem.weekRound || week,
+            targetClasses: Array.isArray(savedItem.targetClasses)
+              ? savedItem.targetClasses
+              : base.targetClasses,
+            maxScore: Number(savedItem.maxScore || base.maxScore || 100),
+            answers: Array.isArray(savedItem.answers) ? savedItem.answers : base.answers,
+            types: Array.isArray(savedItem.types) ? savedItem.types : base.types
+          };
+        }
+      });
+    });
+
+    return defaults;
+  };
+
+  const getWeeklySettingsStorageKey = () => `academyWeeklySettings_${academicYear}_${className}`;
+
+  const [weeklySettings, setWeeklySettings] = useState(() => {
+    try {
+      const saved = localStorage.getItem(getWeeklySettingsStorageKey());
+      return normalizeWeeklySettings(saved ? JSON.parse(saved) : null);
+    } catch (error) {
+      console.error('Weekly 설정 불러오기 오류:', error);
+      return createDefaultWeeklySettings();
+    }
+  });
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(getWeeklySettingsStorageKey());
+      setWeeklySettings(normalizeWeeklySettings(saved ? JSON.parse(saved) : null));
+    } catch (error) {
+      console.error('Weekly 설정 불러오기 오류:', error);
+      setWeeklySettings(createDefaultWeeklySettings());
+    }
+  }, [academicYear, className]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(getWeeklySettingsStorageKey(), JSON.stringify(weeklySettings));
+    } catch (error) {
+      console.error('Weekly 설정 저장 오류:', error);
+    }
+  }, [academicYear, className, weeklySettings]);
+
+  const getWeeklySetting = (subject = weeklySubject, month = weeklyMonth, week = selectedWeek) => {
+    return weeklySettings?.[subject]?.[month]?.[week] || createDefaultWeeklySetting(subject, month, week);
+  };
+
+  const buildWeeklyTestId = (subject = weeklySubject, month = weeklyMonth, week = selectedWeek, setting = getWeeklySetting(subject, month, week)) => {
+    const safeClassName = className === '대구캠퍼스 전체' ? 'all' : className;
+    const datePart = setting?.testDate || `${academicYear}-${String(getWeeklyMonthNumber(month)).padStart(2, '0')}-w${week}`;
+    return `weekly_${datePart}_${subject}_${safeClassName}`.replace(/[^\w가-힣-]/g, '_');
+  };
+
+  const updateWeeklySetting = (patch) => {
+    setWeeklySettings(prev => {
+      const current = prev?.[weeklySubject]?.[weeklyMonth]?.[selectedWeek] || createDefaultWeeklySetting(weeklySubject, weeklyMonth, selectedWeek);
+      const nextItem = {
+        ...current,
+        ...patch
       };
-      settings.math[m] = {
-        1: { answers: Array(30).fill(''), types: Array(30).fill(''), qCount: 20, qScore: 5 },
-        2: { answers: Array(30).fill(''), types: Array(30).fill(''), qCount: 20, qScore: 5 },
-        3: { answers: Array(30).fill(''), types: Array(30).fill(''), qCount: 20, qScore: 5 },
-        4: { answers: Array(30).fill(''), types: Array(30).fill(''), qCount: 20, qScore: 5 },
-        5: { answers: Array(30).fill(''), types: Array(30).fill(''), qCount: 20, qScore: 5 }
+
+      if (patch.testDate !== undefined) {
+        nextItem.testMonth = getWeeklyMonthKeyFromDate(patch.testDate);
+      }
+
+      return {
+        ...prev,
+        [weeklySubject]: {
+          ...prev[weeklySubject],
+          [weeklyMonth]: {
+            ...prev[weeklySubject]?.[weeklyMonth],
+            [selectedWeek]: nextItem
+          }
+        }
       };
     });
-    return settings;
-  });
+  };
+
+  const getWeeklySettingDateText = (subject = weeklySubject, month = weeklyMonth, week = selectedWeek) => {
+    const setting = getWeeklySetting(subject, month, week);
+    return setting.testDate ? setting.testDate.replaceAll('-', '.') : '시험일 미설정';
+  };
 
   const [showImportModal, setShowImportModal] = useState(false);
   const [importType, setImportType] = useState('student'); 
@@ -3468,66 +4952,101 @@ function ClassDashboard({ academicYear, className, classes, onBack, students, se
     return { sum, avg, rate, missedRate, count, MAX_POSSIBLE };
   };
 
+  const getWeeklyMetaEntriesForStudent = (student, subject) => {
+      return Object.values(student.scores?.weeklyMeta || {})
+          .filter(meta => {
+              if (!meta?.testDate) return false;
+              if (meta.subject !== subject) return false;
+              if (!Number.isFinite(Number(meta.score))) return false;
+              return true;
+          })
+          .sort((a, b) => String(b.testDate || '').localeCompare(String(a.testDate || '')));
+  };
+
+  const getWeeklyMetaMonthLabel = (meta) => {
+      return getWeeklyMonthLabelFromDateValue(meta?.testDate);
+  };
+
   const getMonthlyWeeklyStats = (student, month, subject) => {
       let totalScore = 0, testCount = 0, totalCorrect = 0, totalQuestions = 0;
       const typeStats = {};
 
-      for(let w=1; w<=5; w++) {
-          const weekKey = `${month}_w${w}`;
-          const scoreKey = subject === 'english' ? 'weeklyEnglish' : 'weeklyMath';
-          const detailKey = subject === 'english' ? 'weeklyDetails' : 'weeklyDetailsMath';
-          
-          const score = student.scores[scoreKey]?.[weekKey];
-          const details = student.scores[detailKey]?.[weekKey];
+      const entries = getWeeklyMetaEntriesForStudent(student, subject)
+          .filter(meta => getWeeklyMetaMonthLabel(meta) === month);
 
-          if (score !== undefined && score !== null) { totalScore += score; testCount++; }
-          if (details && details.length > 0) {
-              details.forEach(item => {
-                  if (!typeStats[item.type]) typeStats[item.type] = { correct: 0, total: 0 };
-                  typeStats[item.type].total++; totalQuestions++;
-                  if (item.isCorrect) { typeStats[item.type].correct++; totalCorrect++; }
-              });
-          }
-      }
-      const avgScore = testCount > 0 ? (totalScore / testCount).toFixed(1) : '-';
-      const overallRate = totalQuestions > 0 ? Math.round((totalCorrect / totalQuestions) * 100) : '-';
-      return { avgScore, overallRate, typeStats, testCount };
-  }
+      entries.forEach(meta => {
+          totalScore += Number(meta.score);
+          testCount++;
 
-  const getOverallWeeklyStats = (student, subject) => {
-      let totalScore = 0, testCount = 0, totalCorrect = 0, totalQuestions = 0;
-      const typeStats = {}; const monthlyScores = {};
-      const startIdx = MONTHS.indexOf(student.startMonth || '1월');
+          const details = Array.isArray(meta.details) ? meta.details : [];
 
-      MONTHS.forEach((m, idx) => {
-          let mScore = 0, mCount = 0;
-          for(let w=1; w<=5; w++) {
-              const weekKey = `${m}_w${w}`;
-              const scoreKey = subject === 'english' ? 'weeklyEnglish' : 'weeklyMath';
-              const detailKey = subject === 'english' ? 'weeklyDetails' : 'weeklyDetailsMath';
-              const score = student.scores[scoreKey]?.[weekKey];
-              const details = student.scores[detailKey]?.[weekKey];
+          details.forEach(item => {
+              if (!typeStats[item.type]) typeStats[item.type] = { correct: 0, total: 0 };
+              typeStats[item.type].total++;
+              totalQuestions++;
 
-              if (idx >= startIdx) {
-                  if (score !== undefined && score !== null) {
-                      totalScore += score; testCount++; mScore += score; mCount++;
-                  }
-                  if (details && details.length > 0) {
-                      details.forEach(item => {
-                          if (!typeStats[item.type]) typeStats[item.type] = { correct: 0, total: 0 };
-                          typeStats[item.type].total++; totalQuestions++;
-                          if (item.isCorrect) { typeStats[item.type].correct++; totalCorrect++; }
-                      });
-                  }
+              if (item.isCorrect) {
+                  typeStats[item.type].correct++;
+                  totalCorrect++;
               }
-          }
-          if (idx < startIdx) monthlyScores[m] = '-'; else monthlyScores[m] = mCount > 0 ? (mScore / mCount).toFixed(1) : '-';
+          });
       });
 
       const avgScore = testCount > 0 ? (totalScore / testCount).toFixed(1) : '-';
       const overallRate = totalQuestions > 0 ? Math.round((totalCorrect / totalQuestions) * 100) : '-';
+
+      return { avgScore, overallRate, typeStats, testCount };
+  };
+
+  const getOverallWeeklyStats = (student, subject) => {
+      let totalScore = 0, testCount = 0, totalCorrect = 0, totalQuestions = 0;
+      const typeStats = {};
+      const monthlyScores = {};
+      const startIdx = MONTHS.indexOf(student.startMonth || '1월');
+      const entries = getWeeklyMetaEntriesForStudent(student, subject);
+
+      MONTHS.forEach((month, idx) => {
+          if (idx < startIdx) {
+              monthlyScores[month] = '-';
+              return;
+          }
+
+          const monthEntries = entries.filter(meta => getWeeklyMetaMonthLabel(meta) === month);
+          let monthScore = 0;
+          let monthCount = 0;
+
+          monthEntries.forEach(meta => {
+              const score = Number(meta.score);
+
+              if (Number.isFinite(score)) {
+                  totalScore += score;
+                  testCount++;
+                  monthScore += score;
+                  monthCount++;
+              }
+
+              const details = Array.isArray(meta.details) ? meta.details : [];
+
+              details.forEach(item => {
+                  if (!typeStats[item.type]) typeStats[item.type] = { correct: 0, total: 0 };
+                  typeStats[item.type].total++;
+                  totalQuestions++;
+
+                  if (item.isCorrect) {
+                      typeStats[item.type].correct++;
+                      totalCorrect++;
+                  }
+              });
+          });
+
+          monthlyScores[month] = monthCount > 0 ? (monthScore / monthCount).toFixed(1) : '-';
+      });
+
+      const avgScore = testCount > 0 ? (totalScore / testCount).toFixed(1) : '-';
+      const overallRate = totalQuestions > 0 ? Math.round((totalCorrect / totalQuestions) * 100) : '-';
+
       return { avgScore, overallRate, typeStats, testCount, monthlyScores };
-  }
+  };
 
   const getOverallDailyStats = (student) => {
       let totalSum = 0, totalCount = 0, totalMax = 0;
@@ -4167,6 +5686,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
     newStu.className = className === '대구캠퍼스 전체' ? 'S-CLASS' : className; 
     newStu.classNames = [newStu.className];
     setStudents(prev => [newStu, ...prev]);
+    markStudentDirty(newStu.id, 'studentInfo');
     setShowAddModal(false);
     setNewStudentForm({ name: '', userId: '', targetTrack: '인문계', startMonth: '1월' });
     showAlert(`${newStudentForm.name} 학생이 수기 등록되었습니다.`);
@@ -4189,6 +5709,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
         [field]: value
       };
     }));
+
+    markStudentDirty(studentId, 'studentInfo');
   };
 
   const toggleDailyExcluded = (month, dayIndex) => {
@@ -4196,8 +5718,17 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
         const currentArr = prev[month]?.excludedDays || [];
         const isExcluded = currentArr.includes(dayIndex);
         const newArr = isExcluded ? currentArr.filter(i => i !== dayIndex) : [...currentArr, dayIndex];
-        return { ...prev, [month]: { ...prev[month], excludedDays: newArr } };
+
+        return {
+          ...prev,
+          [month]: {
+            ...prev[month],
+            excludedDays: newArr
+          }
+        };
     });
+
+    markClassSettingsDirty(className, 'dailySettings');
   };
 
   const toggleAttendanceExcluded = (month, dayIndex) => {
@@ -4205,8 +5736,17 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
         const currentArr = prev[month]?.excludedDays || [];
         const isExcluded = currentArr.includes(dayIndex);
         const newArr = isExcluded ? currentArr.filter(i => i !== dayIndex) : [...currentArr, dayIndex];
-        return { ...prev, [month]: { ...prev[month], excludedDays: newArr } };
+
+        return {
+          ...prev,
+          [month]: {
+            ...prev[month],
+            excludedDays: newArr
+          }
+        };
     });
+
+    markClassSettingsDirty(className, 'attendanceSettings');
   };
 
   const handleGenericFileUpload = (e) => {
@@ -4609,23 +6149,42 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
   };
 
   const processWeeklyRows = (rows) => {
-    const currentSettings = weeklySettings[weeklySubject]?.[weeklyMonth]?.[selectedWeek] || { answers: [], types: [], qCount: weeklySubject === 'english' ? 40 : 20, qScore: weeklySubject === 'english' ? 2.5 : 5 };
-    const maxQs = currentSettings.qCount || 40;
-    
+    const currentSettings = getWeeklySetting(weeklySubject, weeklyMonth, selectedWeek);
+    const maxQs = weeklySubject === 'english' ? 40 : (currentSettings.qCount || 20);
+    const testDate = currentSettings.testDate || '';
+
+    if (!testDate) {
+      showAlert('정답 셋업에서 Weekly 시험일을 먼저 설정해주세요.');
+      return;
+    }
+
     const executeWeeklyParse = () => {
       let matchCount = 0;
+      const testId = buildWeeklyTestId(weeklySubject, weeklyMonth, selectedWeek, currentSettings);
+      const testMonth = getWeeklyMonthKeyFromDate(testDate);
+      const weekKey = `${weeklyMonth}_w${selectedWeek}`;
+      const scoreField = weeklySubject === 'english' ? 'weeklyEnglish' : 'weeklyMath';
+      const detailField = weeklySubject === 'english' ? 'weeklyDetails' : 'weeklyDetailsMath';
+      const subjectLabel = weeklySubject === 'english' ? '영어' : '수학';
+
       setStudents(prev => {
         const updated = [...prev];
+
         for (let i = 0; i < rows.length; i++) {
           const row = Array.isArray(rows[i]) ? rows[i] : Object.values(rows[i] || {});
           if (!row || row.length < 2 || row[0] === undefined) continue;
-          const key = String(row[0]).trim(); 
-          if (key === '' || key === '수험번호') continue; 
-          const studentIdx = updated.findIndex(s => (s.id.toLowerCase() === key.toLowerCase() || s.userId.toLowerCase() === key.toLowerCase()) && (className === '대구캠퍼스 전체' ? true : (s.classNames || [s.className]).includes(className)));
-          
+
+          const key = String(row[0]).trim();
+          if (key === '' || key === '수험번호') continue;
+
+          const studentIdx = updated.findIndex(s =>
+            (s.id.toLowerCase() === key.toLowerCase() || s.userId.toLowerCase() === key.toLowerCase()) &&
+            (className === '대구캠퍼스 전체' ? true : (s.classNames || [s.className]).includes(className))
+          );
+
           if (studentIdx >= 0) {
-               let correctCount = 0; 
-               let details = []; 
+               let correctCount = 0;
+               let details = [];
 
                const normalizeOmrAnswer = (value) => {
                  const raw = String(value ?? '').trim().toLowerCase();
@@ -4671,34 +6230,62 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                    type: currentSettings.types[q] || '미지정'
                  });
                }
-               const score = correctCount * (currentSettings.qScore || 2.5);
-               const weekKey = `${weeklyMonth}_w${selectedWeek}`;
-               const scoreField = weeklySubject === 'english' ? 'weeklyEnglish' : 'weeklyMath';
-               const detailField = weeklySubject === 'english' ? 'weeklyDetails' : 'weeklyDetailsMath';
 
-               updated[studentIdx] = { 
-                   ...updated[studentIdx], 
-                   scores: { 
-                       ...updated[studentIdx].scores, 
-                       [scoreField]: { ...updated[studentIdx].scores[scoreField], [weekKey]: score },
-                       [detailField]: { ...updated[studentIdx].scores[detailField], [weekKey]: details }
-                   } 
+               const score = correctCount * (currentSettings.qScore || 2.5);
+               const currentScores = updated[studentIdx].scores || {};
+
+               updated[studentIdx] = {
+                   ...updated[studentIdx],
+                   scores: {
+                       ...currentScores,
+                       [scoreField]: {
+                         ...(currentScores[scoreField] || {}),
+                         [weekKey]: score
+                       },
+                       [detailField]: {
+                         ...(currentScores[detailField] || {}),
+                         [weekKey]: details
+                       },
+                       weeklyMeta: {
+                         ...(currentScores.weeklyMeta || {}),
+                         [testId]: {
+                           testId,
+                           subject: weeklySubject,
+                           subjectLabel,
+                           testName: currentSettings.testName || `${weeklyMonth} ${selectedWeek}주차 Weekly`,
+                           testDate,
+                           testMonth,
+                           weekRound: selectedWeek,
+                           weekKey,
+                           targetClasses: currentSettings.targetClasses || [],
+                           maxScore: currentSettings.maxScore || 100,
+                           score,
+                           details,
+                           submittedAt: new Date().toISOString()
+                         }
+                       }
+                   }
                };
+
                matchCount++;
           }
         }
+
         return updated;
       });
+
       showAlert(`OMR 인식 완료! 총 ${matchCount}명의 점수와 유형별 정답률이 연동되었습니다.`);
     };
 
     const hasAnyAnswer = currentSettings.answers.some(ans => String(ans).trim() !== '');
+
     if (!hasAnyAnswer) {
         showConfirm(`현재 ${weeklyMonth} ${selectedWeek}주차의 '정답'이 설정되지 않았습니다.\n모든 학생의 점수가 0점 처리될 수 있습니다.\n그래도 진행하시겠습니까?`, () => {
             executeWeeklyParse();
         });
         return;
     }
+
     executeWeeklyParse();
   };
 
@@ -4766,6 +6353,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
   };
 
   const handleResetWeeklyOmrScores = () => {
+    const currentSettings = getWeeklySetting(weeklySubject, weeklyMonth, selectedWeek);
+    const testId = buildWeeklyTestId(weeklySubject, weeklyMonth, selectedWeek, currentSettings);
     const weekKey = `${weeklyMonth}_w${selectedWeek}`;
     const scoreField = weeklySubject === 'english' ? 'weeklyEnglish' : 'weeklyMath';
     const detailField = weeklySubject === 'english' ? 'weeklyDetails' : 'weeklyDetailsMath';
@@ -4788,16 +6377,19 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
           const currentScores = student.scores || {};
           const currentScoreObj = currentScores[scoreField] || {};
           const currentDetailObj = currentScores[detailField] || {};
+          const currentMetaObj = currentScores.weeklyMeta || {};
 
           const { [weekKey]: removedScore, ...nextScoreObj } = currentScoreObj;
           const { [weekKey]: removedDetail, ...nextDetailObj } = currentDetailObj;
+          const { [testId]: removedMeta, ...nextMetaObj } = currentMetaObj;
 
           return {
             ...student,
             scores: {
               ...currentScores,
               [scoreField]: nextScoreObj,
-              [detailField]: nextDetailObj
+              [detailField]: nextDetailObj,
+              weeklyMeta: nextMetaObj
             }
           };
         }));
@@ -5130,6 +6722,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
       const currentMonthData = s.scores.monthly[detailSelectedMonth] || generateEmptyMonthlyData()[detailSelectedMonth];
       return { ...s, scores: { ...s.scores, monthly: { ...s.scores.monthly, [detailSelectedMonth]: { ...currentMonthData, [subject]: { ...currentMonthData[subject], [field]: value } } } } };
     }));
+
+    markStudentDirty(studentId, 'scores');
   };
 
   const handleAttendanceChange = (studentId, timeOfDay, dayIndex, value) => {
@@ -5155,6 +6749,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
         }
       };
     }));
+
+    markStudentDirty(studentId, 'attendance');
   };
 
   const handleAttendanceMemoChange = (studentId, timeOfDay, dayIndex, value) => {
@@ -5180,15 +6776,19 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
         }
       };
     }));
+
+    markStudentDirty(studentId, 'attendance');
   };
 
   const handleStudyTimeChange = (studentId, dayIndex, field, value) => {
     setStudents(prev => prev.map(student => {
       if (student.id !== studentId) return student;
-      const newDaily = [...student.studyTime[studyTimeMonth]];
+      const newDaily = [...(student.studyTime?.[studyTimeMonth] || Array.from({ length: 31 }, () => ({ in: '', out: '' })))];
       newDaily[dayIndex] = { ...newDaily[dayIndex], [field]: value };
       return { ...student, studyTime: { ...student.studyTime, [studyTimeMonth]: newDaily } };
     }));
+
+    markStudentDirty(studentId, 'studyTime');
   };
 
   const handleDailyScoreChange = (studentId, dayIndex, testIndex, value) => {
@@ -5199,6 +6799,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
       newDaily[dayIndex] = { ...newDaily[dayIndex], [testIndex]: value };
       return { ...student, dailyRecords: { ...student.dailyRecords, [dailyMonth]: newDaily } };
     }));
+
+    markStudentDirty(studentId, 'dailyRecords');
   };
 
   const studentProfileToView = useMemo(() => students.find(s => s.id === viewingProfileId), [viewingProfileId, students]);
@@ -5249,7 +6851,6 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
           </button>
 
           <h2 className="text-4xl font-black tracking-tight">{className}</h2>
-          <p className="text-sm font-bold text-white/82 mt-1">영어 기초반 1A</p>
         </div>
 
         <nav className="relative z-10 flex flex-col gap-2">
@@ -5434,20 +7035,46 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
           </button>
         </nav>
 
-        <div className="relative z-10 mt-auto rounded-2xl border border-white/25 bg-white/14 backdrop-blur-md p-4 flex items-center gap-3">
-          <div className="w-10 h-10 rounded-full bg-white/90 text-blue-600 flex items-center justify-center">
-            <Users size={20} />
-          </div>
-          <div>
-            <p className="text-sm font-black">김지혜 선생님</p>
-            <p className="text-xs font-bold text-white/75">담임교사</p>
-          </div>
-        </div>
+
       </aside>
 
       {/* ---------------- 메인 컨텐츠 영역 ---------------- */}
       <main className="flex-1 flex flex-col h-screen overflow-hidden bg-slate-50 relative print:bg-white print:overflow-visible">
         <div className="flex-1 overflow-auto p-4 md:p-8 print:p-0">
+          <div className="print:hidden sticky top-0 z-30 mb-4 flex items-center justify-end gap-3">
+            <span
+              className={`px-3 py-2 rounded-full text-xs font-black shadow-sm ${
+                manualSaveStatus === 'saving'
+                  ? 'bg-blue-50 text-blue-600 border border-blue-100'
+                  : manualSaveStatus === 'saved'
+                    ? 'bg-emerald-50 text-emerald-600 border border-emerald-100'
+                    : manualSaveStatus === 'error'
+                      ? 'bg-red-50 text-red-600 border border-red-100'
+                      : getDirtyCountForScope('class') > 0
+                        ? 'bg-orange-50 text-orange-600 border border-orange-100'
+                        : 'bg-white text-slate-500 border border-slate-200'
+              }`}
+            >
+              {manualSaveMessage || (getDirtyCountForScope('class') > 0 ? '변경사항 있음' : '저장 대기')}
+            </span>
+
+            <button
+              type="button"
+              disabled={manualSaveStatus === 'saving' || getDirtyCountForScope('class') === 0}
+              onClick={() => saveDirtyStudentsToFirebase('class')}
+              title="현재 반의 변경사항을 Firebase에 저장합니다. 저장완료 표시 후 다른 사용자에게 반영됩니다."
+              className={`h-10 px-4 rounded-xl text-sm font-black flex items-center gap-2 shadow-sm transition-colors ${
+                getDirtyCountForScope('class') === 0
+                  ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                  : manualSaveStatus === 'error'
+                    ? 'bg-red-600 text-white hover:bg-red-700'
+                    : 'bg-blue-600 text-white hover:bg-blue-700'
+              }`}
+            >
+              <CheckCircle2 size={16} />
+              현재 반 변경사항 저장{getDirtyCountForScope('class') > 0 ? ` (${getDirtyCountForScope('class')}건)` : ''}
+            </button>
+          </div>
           
           {/* [0] 대시보드 탭 (Feature 1) */}
           {activeTab === 'dashboard' && (() => {
@@ -5922,12 +7549,6 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                       <h1 className="text-[34px] leading-tight font-black tracking-tight text-slate-950 mb-2">
                         {className} 클래스 대시보드
                       </h1>
-                      <p className="text-base font-bold text-slate-600 mb-2">
-                        영어 기초반 1A · 종합 1학년
-                      </p>
-                      <p className="text-sm font-black text-blue-600">
-                        담임교사: 김지혜 선생님
-                      </p>
                     </div>
 
                     <select
@@ -6074,28 +7695,54 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
 
                         {trendData.map((item, index) => {
                           const x = 52 + index * 92;
+                          const hoverLeft = Math.max(48, x - 46);
+                          const hoverRight = Math.min(704, x + 46);
+                          const hoverWidth = hoverRight - hoverLeft;
+                          const tooltipX = x > 540 ? x - 155 : x + 10;
+                          const tooltipTextX = tooltipX + 12;
+
                           return (
-                            <g key={`hover-${item.label}`}>
+                            <g
+                              key={`hover-${item.label}`}
+                              onMouseEnter={() => setHoveredTrendIndex(index)}
+                              onMouseMove={() => setHoveredTrendIndex(index)}
+                              onMouseLeave={() => setHoveredTrendIndex(null)}
+                              onClick={() => setHoveredTrendIndex(index)}
+                              onTouchStart={(e) => {
+                                e.preventDefault();
+                                setHoveredTrendIndex(index);
+                              }}
+                              style={{ cursor: 'default' }}
+                            >
                               <rect
-                                x={x - 32}
+                                x={hoverLeft}
                                 y="20"
-                                width="64"
-                                height="170"
-                                fill="transparent"
-                                onMouseEnter={() => setHoveredTrendIndex(index)}
-                                onMouseLeave={() => setHoveredTrendIndex(null)}
+                                width={hoverWidth}
+                                height="195"
+                                fill="rgba(255,255,255,0.001)"
+                                pointerEvents="all"
                               />
+
                               {hoveredTrendIndex === index && (
-                                <g>
+                                <g pointerEvents="none">
+                                  <rect
+                                    x={hoverLeft}
+                                    y="20"
+                                    width={hoverWidth}
+                                    height="195"
+                                    fill="#dbeafe"
+                                    opacity="0.18"
+                                    rx="10"
+                                  />
                                   <line x1={x} x2={x} y1="28" y2="180" stroke="#94a3b8" strokeDasharray="4 4" />
-                                  <rect x={Math.min(x + 10, 560)} y="28" width="145" height="92" rx="12" fill="white" stroke="#dbeafe" />
-                                  <text x={Math.min(x + 22, 572)} y="48" fontSize="12" fill="#0f172a" fontWeight="800">{item.label}</text>
-                                  <text x={Math.min(x + 22, 572)} y="68" fontSize="11" fill="#2563eb" fontWeight="700">출석률 {Math.round(item.attendance)}%</text>
-                                  <text x={Math.min(x + 22, 572)} y="84" fontSize="11" fill="#10b981" fontWeight="700">Daily {Math.round(item.daily)}%</text>
-                                  <text x={Math.min(x + 22, 572)} y="100" fontSize="11" fill="#7c3aed" fontWeight="700">
+                                  <rect x={tooltipX} y="28" width="145" height="92" rx="12" fill="white" stroke="#dbeafe" />
+                                  <text x={tooltipTextX} y="48" fontSize="12" fill="#0f172a" fontWeight="800">{item.label}</text>
+                                  <text x={tooltipTextX} y="68" fontSize="11" fill="#2563eb" fontWeight="700">출석률 {Math.round(item.attendance)}%</text>
+                                  <text x={tooltipTextX} y="84" fontSize="11" fill="#10b981" fontWeight="700">Daily {Math.round(item.daily)}%</text>
+                                  <text x={tooltipTextX} y="100" fontSize="11" fill="#7c3aed" fontWeight="700">
                                     Weekly 평균 {item.scoreText || '데이터 없음'}
                                   </text>
-                                  <text x={Math.min(x + 22, 572)} y="116" fontSize="11" fill="#f97316" fontWeight="700">학습시간 {Math.round(item.study)}%</text>
+                                  <text x={tooltipTextX} y="116" fontSize="11" fill="#f97316" fontWeight="700">학습시간 {Math.round(item.study)}%</text>
                                 </g>
                               )}
                             </g>
@@ -6358,7 +8005,34 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                   </div>
                   <div className="h-10 w-px bg-slate-200"></div>
                   <button onClick={handleExportAttendanceExcel} className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 transition-colors shadow-sm"><DownloadCloud size={18} />출결 다운로드</button>
-                  <div className="bg-emerald-50 text-emerald-700 px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 border border-emerald-100"><CheckCircle2 size={18} />자동 저장중</div>
+
+                  <button
+                    type="button"
+                    onClick={() => downloadAttendanceDailyTemplate('attendance')}
+                    className="bg-white hover:bg-emerald-50 text-emerald-700 px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 border border-emerald-200 transition-colors shadow-sm"
+                  >
+                    <FileSpreadsheet size={18} />
+                    출석/Daily 양식
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => attendanceDailyExcelInputRef.current?.click()}
+                    className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 border border-emerald-200 transition-colors shadow-sm"
+                  >
+                    <UploadCloud size={18} />
+                    출석/Daily 업로드
+                  </button>
+
+                  <input
+                    ref={attendanceDailyExcelInputRef}
+                    type="file"
+                    accept=".xlsx,.xls"
+                    className="hidden"
+                    onChange={(event) => handleAttendanceDailyExcelUpload(event, 'attendance')}
+                  />
+
+                  <div className="bg-emerald-50 text-emerald-700 px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 border border-emerald-100"><CheckCircle2 size={18} />화면 반영 후 저장</div>
                 </div>
               </div>
 
@@ -6758,10 +8432,38 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                   )}
 
                   {activeTestTab === 'daily' && (
-                    <div className="flex bg-slate-100 p-1 rounded-xl shadow-inner w-fit">
-                      <button onClick={()=>setActiveDailyTab('input')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${activeDailyTab === 'input' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>✏️ 일별 기입</button>
-                      <button onClick={()=>setActiveDailyTab('summary')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${activeDailyTab === 'summary' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>📊 월간 종합 리포트</button>
-                    </div>
+                    <>
+                      <div className="flex bg-slate-100 p-1 rounded-xl shadow-inner w-fit">
+                        <button onClick={()=>setActiveDailyTab('input')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${activeDailyTab === 'input' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>✏️ 일별 기입</button>
+                        <button onClick={()=>setActiveDailyTab('summary')} className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${activeDailyTab === 'summary' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>📊 월간 종합 리포트</button>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => downloadAttendanceDailyTemplate('daily')}
+                        className="bg-white hover:bg-indigo-50 text-indigo-700 px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 border border-indigo-200 transition-colors shadow-sm"
+                      >
+                        <FileSpreadsheet size={18} />
+                        출석/Daily 양식
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => testDailyExcelInputRef.current?.click()}
+                        className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 border border-indigo-200 transition-colors shadow-sm"
+                      >
+                        <UploadCloud size={18} />
+                        출석/Daily 업로드
+                      </button>
+
+                      <input
+                        ref={testDailyExcelInputRef}
+                        type="file"
+                        accept=".xlsx,.xls"
+                        className="hidden"
+                        onChange={(event) => handleAttendanceDailyExcelUpload(event, 'daily')}
+                      />
+                    </>
                   )}
                   
                   {activeTestTab === 'weekly' && (
@@ -7058,42 +8760,113 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
 
                   {activeWeeklyTab === 'setup' && (
                     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col max-w-5xl">
-                      <div className="bg-slate-50 p-4 border-b border-slate-200 flex justify-between items-center">
-                        <h2 className="font-bold text-slate-800 flex items-center gap-2">
-                          <LayoutList size={18} className={weeklySubject === 'english' ? 'text-indigo-500' : 'text-teal-500'}/> 
-                          {weeklyMonth} {selectedWeek}주차 [{weeklySubject === 'english' ? '영어' : '수학'}] 정답/유형 설정표
-                        </h2>
-                        {weeklySubject === 'math' ? (
-                            <div className="flex items-center gap-4">
-                                <div className="flex items-center gap-2">
-                                    <span className="text-xs font-bold text-slate-500">문항 수</span>
-                                    <input type="number" className="w-16 border border-slate-300 rounded px-2 py-1 text-sm outline-none font-bold" 
-                                        value={weeklySettings.math[weeklyMonth]?.[selectedWeek]?.qCount || 20} 
-                                        onChange={e => {
-                                            const val = Number(e.target.value);
-                                            setWeeklySettings(prev => ({
-                                                ...prev, math: { ...prev.math, [weeklyMonth]: { ...prev.math[weeklyMonth], [selectedWeek]: { ...prev.math[weeklyMonth]?.[selectedWeek], qCount: val } } }
-                                            }));
-                                        }}
-                                    />
-                                </div>
-                                <div className="flex items-center gap-2">
-                                    <span className="text-xs font-bold text-slate-500">문항당 점수</span>
-                                    <input type="number" step="0.1" className="w-16 border border-slate-300 rounded px-2 py-1 text-sm outline-none font-bold" 
-                                        value={weeklySettings.math[weeklyMonth]?.[selectedWeek]?.qScore || 5} 
-                                        onChange={e => {
-                                            const val = Number(e.target.value);
-                                            setWeeklySettings(prev => ({
-                                                ...prev, math: { ...prev.math, [weeklyMonth]: { ...prev.math[weeklyMonth], [selectedWeek]: { ...prev.math[weeklyMonth]?.[selectedWeek], qScore: val } } }
-                                            }));
-                                        }}
-                                    />
-                                </div>
+                      {(() => {
+                        const currentWeeklySetup = getWeeklySetting(weeklySubject, weeklyMonth, selectedWeek);
+                        const targetClassText = Array.isArray(currentWeeklySetup.targetClasses)
+                          ? currentWeeklySetup.targetClasses.join(', ')
+                          : '';
+
+                        return (
+                          <div className="bg-slate-50 p-4 border-b border-slate-200 space-y-4">
+                            <div className="flex justify-between items-center gap-4">
+                              <h2 className="font-bold text-slate-800 flex items-center gap-2">
+                                <LayoutList size={18} className={weeklySubject === 'english' ? 'text-indigo-500' : 'text-teal-500'}/> 
+                                {weeklyMonth} {selectedWeek}주차 [{weeklySubject === 'english' ? '영어' : '수학'}] 정답/유형 설정표
+                              </h2>
+
+                              {weeklySubject === 'math' ? (
+                                  <div className="flex items-center gap-4">
+                                      <div className="flex items-center gap-2">
+                                          <span className="text-xs font-bold text-slate-500">문항 수</span>
+                                          <input
+                                              type="number"
+                                              className="w-16 border border-slate-300 rounded px-2 py-1 text-sm outline-none font-bold"
+                                              value={currentWeeklySetup.qCount || 20}
+                                              onChange={e => updateWeeklySetting({ qCount: Number(e.target.value) })}
+                                          />
+                                      </div>
+                                      <div className="flex items-center gap-2">
+                                          <span className="text-xs font-bold text-slate-500">문항당 점수</span>
+                                          <input
+                                              type="number"
+                                              step="0.1"
+                                              className="w-16 border border-slate-300 rounded px-2 py-1 text-sm outline-none font-bold"
+                                              value={currentWeeklySetup.qScore || 5}
+                                              onChange={e => updateWeeklySetting({ qScore: Number(e.target.value) })}
+                                          />
+                                      </div>
+                                  </div>
+                              ) : (
+                                  <span className="bg-indigo-100 text-indigo-700 text-xs px-2 py-1 rounded font-bold">40문항 고정 (2.5점)</span>
+                              )}
                             </div>
-                        ) : (
-                            <span className="bg-indigo-100 text-indigo-700 text-xs px-2 py-1 rounded font-bold">40문항 고정 (2.5점)</span>
-                        )}
-                      </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+                              <div>
+                                <label className="block text-[11px] font-black text-slate-500 mb-1">시험명</label>
+                                <input
+                                  type="text"
+                                  value={currentWeeklySetup.testName || ''}
+                                  onChange={e => updateWeeklySetting({ testName: e.target.value })}
+                                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100"
+                                  placeholder="5월 3주차 Weekly"
+                                />
+                              </div>
+
+                              <div>
+                                <label className="block text-[11px] font-black text-slate-500 mb-1">시험일</label>
+                                <input
+                                  type="date"
+                                  value={currentWeeklySetup.testDate || ''}
+                                  onChange={e => updateWeeklySetting({ testDate: e.target.value })}
+                                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100"
+                                />
+                              </div>
+
+                              <div>
+                                <label className="block text-[11px] font-black text-slate-500 mb-1">과목</label>
+                                <div className={`h-[38px] flex items-center px-3 rounded-lg text-sm font-black border ${
+                                  weeklySubject === 'english'
+                                    ? 'bg-indigo-50 text-indigo-700 border-indigo-100'
+                                    : 'bg-teal-50 text-teal-700 border-teal-100'
+                                }`}>
+                                  {weeklySubject === 'english' ? '영어 Weekly' : '수학 Weekly'}
+                                </div>
+                              </div>
+
+                              <div>
+                                <label className="block text-[11px] font-black text-slate-500 mb-1">대상반</label>
+                                <input
+                                  type="text"
+                                  value={targetClassText}
+                                  onChange={e => updateWeeklySetting({
+                                    targetClasses: e.target.value
+                                      .split(',')
+                                      .map(v => v.trim())
+                                      .filter(Boolean)
+                                  })}
+                                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100"
+                                  placeholder="GB1A, GD3A"
+                                />
+                              </div>
+
+                              <div>
+                                <label className="block text-[11px] font-black text-slate-500 mb-1">만점</label>
+                                <input
+                                  type="number"
+                                  value={currentWeeklySetup.maxScore || 100}
+                                  onChange={e => updateWeeklySetting({ maxScore: Number(e.target.value) })}
+                                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100"
+                                />
+                              </div>
+                            </div>
+
+                            <p className="text-[11px] font-bold text-slate-400">
+                              ※ 시험일은 홈화면 분석 탭의 Weekly 지난주 vs 2주 전 비교 기준으로 사용됩니다.
+                            </p>
+                          </div>
+                        );
+                      })()}
                       <div className="p-6 overflow-x-auto">
                         <div className="min-w-[800px] flex flex-col gap-6">
                           {(() => {
@@ -7199,39 +8972,82 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                     </div>
                   )}
 
-                  {activeWeeklyTab === 'omr' && (
-                    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-12 flex flex-col justify-center items-center">
-                        <h2 className="font-bold text-slate-800 mb-4 flex items-center gap-2 text-xl">
-                          <UploadCloud className="text-indigo-500" size={28}/>
-                          OMR 리딩 엑셀 업로드 [{weeklySubject === 'english' ? '영어' : '수학'}]
-                        </h2>
+                  {activeWeeklyTab === 'omr' && (() => {
+                    const currentWeeklyTest = getWeeklySetting(weeklySubject, weeklyMonth, selectedWeek);
+                    const targetClassText = Array.isArray(currentWeeklyTest.targetClasses) && currentWeeklyTest.targetClasses.length
+                      ? currentWeeklyTest.targetClasses.join(', ')
+                      : className;
 
-                        <div
-                          className="border-2 border-dashed border-slate-300 rounded-xl p-16 text-center cursor-pointer hover:bg-indigo-50 hover:border-indigo-400 transition-colors w-full max-w-2xl"
-                          onClick={() => triggerDirectUpload('weekly')}
-                        >
-                          <FileSpreadsheet size={64} className="mx-auto text-indigo-300 mb-4"/>
-                          <p className="text-lg font-bold text-indigo-600 mb-2">
-                            클릭하여 {weeklyMonth} {selectedWeek}주차 OMR 첨부
+                    return (
+                      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-12 flex flex-col justify-center items-center">
+                          <h2 className="font-bold text-slate-800 mb-4 flex items-center gap-2 text-xl">
+                            <UploadCloud className="text-indigo-500" size={28}/>
+                            OMR 리딩 엑셀 업로드 [{weeklySubject === 'english' ? '영어' : '수학'}]
+                          </h2>
+
+                          <div className="w-full max-w-2xl mb-5 rounded-2xl bg-slate-50 border border-slate-200 p-4">
+                            <p className="text-sm font-black text-slate-800 mb-3">선택된 Weekly 시험 회차</p>
+
+                            <div className="grid grid-cols-2 gap-3 text-xs font-bold text-slate-600">
+                              <div>
+                                <span className="text-slate-400">시험명</span>
+                                <p className="text-slate-800 mt-1">{currentWeeklyTest.testName || `${weeklyMonth} ${selectedWeek}주차 Weekly`}</p>
+                              </div>
+                              <div>
+                                <span className="text-slate-400">시험일</span>
+                                <p className={currentWeeklyTest.testDate ? 'text-blue-600 mt-1' : 'text-rose-500 mt-1'}>
+                                  {getWeeklySettingDateText(weeklySubject, weeklyMonth, selectedWeek)}
+                                </p>
+                              </div>
+                              <div>
+                                <span className="text-slate-400">과목</span>
+                                <p className="text-slate-800 mt-1">{weeklySubject === 'english' ? '영어 Weekly' : '수학 Weekly'}</p>
+                              </div>
+                              <div>
+                                <span className="text-slate-400">대상반</span>
+                                <p className="text-slate-800 mt-1">{targetClassText}</p>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div
+                            className={`border-2 border-dashed rounded-xl p-16 text-center transition-colors w-full max-w-2xl ${
+                              currentWeeklyTest.testDate
+                                ? 'border-slate-300 cursor-pointer hover:bg-indigo-50 hover:border-indigo-400'
+                                : 'border-rose-200 bg-rose-50/50 cursor-not-allowed'
+                            }`}
+                            onClick={() => {
+                              if (!currentWeeklyTest.testDate) {
+                                showAlert('정답 셋업에서 시험일을 먼저 설정해주세요.');
+                                return;
+                              }
+
+                              triggerDirectUpload('weekly');
+                            }}
+                          >
+                            <FileSpreadsheet size={64} className="mx-auto text-indigo-300 mb-4"/>
+                            <p className="text-lg font-bold text-indigo-600 mb-2">
+                              클릭하여 {weeklyMonth} {selectedWeek}주차 OMR 첨부
+                            </p>
+                            <p className="text-sm text-slate-500 leading-relaxed">
+                              정답 셋업에서 생성된 Weekly 시험 회차에 OMR 점수가 연결됩니다.<br/>
+                              (※ 헤더 없이 A열 수험번호, B열부터 답안이 나열된 양식을 자동 지원합니다.)
+                            </p>
+                          </div>
+
+                          <button
+                            onClick={handleResetWeeklyOmrScores}
+                            className="mt-6 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 px-5 py-2.5 rounded-xl text-sm font-extrabold transition-colors"
+                          >
+                            {weeklyMonth} {selectedWeek}주차 {weeklySubject === 'english' ? '영어' : '수학'} OMR 점수 초기화
+                          </button>
+
+                          <p className="text-xs text-slate-400 mt-3 font-medium">
+                            ※ OMR을 잘못 업로드한 경우, 해당 주차 점수를 초기화한 뒤 다시 업로드하세요.
                           </p>
-                          <p className="text-sm text-slate-500 leading-relaxed">
-                            수험번호 자동인식 후 설정된 정답과 대조하여 성적을 산출합니다.<br/>
-                            (※ 헤더 없이 A열 수험번호, B열부터 답안이 나열된 양식을 자동 지원합니다.)
-                          </p>
-                        </div>
-
-                        <button
-                          onClick={handleResetWeeklyOmrScores}
-                          className="mt-6 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 px-5 py-2.5 rounded-xl text-sm font-extrabold transition-colors"
-                        >
-                          {weeklyMonth} {selectedWeek}주차 {weeklySubject === 'english' ? '영어' : '수학'} OMR 점수 초기화
-                        </button>
-
-                        <p className="text-xs text-slate-400 mt-3 font-medium">
-                          ※ OMR을 잘못 업로드한 경우, 해당 주차 점수를 초기화한 뒤 다시 업로드하세요.
-                        </p>
-                    </div>
-                  )}
+                      </div>
+                    );
+                  })()}
 
                   {activeWeeklyTab === 'scores' && (
                     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
