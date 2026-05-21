@@ -377,6 +377,13 @@ export default function App() {
     return String(currentValue ?? '').trim() === String(nextValue ?? '').trim();
   };
 
+  // ✅ 엑셀 업로드 함수명 오타 방어용 alias
+  // 이전 수정/배포 과정에서 잘못 입력된 함수명이 남아 있어도 업로드가 중단되지 않도록 처리
+  const issamevaluefordirthcheck = isSameValueForDirtyCheck;
+  const issamevaluefordirtycheck = isSameValueForDirtyCheck;
+  const isSameValueForDirtCheck = isSameValueForDirtyCheck;
+  const isSameValueForDirthCheck = isSameValueForDirtyCheck;
+
   const isSameObjectForDirtyCheck = (currentValue, nextValue) => {
     return JSON.stringify(currentValue ?? null) === JSON.stringify(nextValue ?? null);
   };
@@ -3021,6 +3028,18 @@ function ClassDashboard({
   const showConfirm = (msg, onConfirm) => {
     setConfirmDialog({ msg, onConfirm });
   };
+
+  // ✅ ClassDashboard 내부 엑셀 업로드 값 비교 helper
+  // App 컴포넌트 내부 helper는 이 컴포넌트 스코프에서 직접 접근할 수 없으므로 여기에도 별도로 정의
+  const isSameValueForDirtyCheck = (currentValue, nextValue) => {
+    return String(currentValue ?? '').trim() === String(nextValue ?? '').trim();
+  };
+
+  // ✅ 이전 수정 과정에서 남을 수 있는 함수명 오타 방어용 alias
+  const issamevaluefordirthcheck = isSameValueForDirtyCheck;
+  const issamevaluefordirtycheck = isSameValueForDirtyCheck;
+  const isSameValueForDirtCheck = isSameValueForDirtyCheck;
+  const isSameValueForDirthCheck = isSameValueForDirtyCheck;
   
   const [searchTerm, setSearchTerm] = useState('');
   const [sortKey, setSortKey] = useState('name'); 
@@ -3063,6 +3082,35 @@ function ClassDashboard({
   const attendanceDailyExcelInputRef = useRef(null);
   const testDailyExcelInputRef = useRef(null);
 
+  // ✅ 출석/학습시간/Daily 공통 학생 선택 기능
+  const toggleStudentSelection = (studentId) => {
+    if (!studentId) return;
+
+    setSelectedStudents(prev => {
+      if (prev.includes(studentId)) {
+        return prev.filter(id => id !== studentId);
+      }
+
+      return [...prev, studentId];
+    });
+  };
+
+  const handleSelectAllStudents = (shouldSelect, targetStudentIds) => {
+    const ids = Array.isArray(targetStudentIds)
+      ? targetStudentIds.filter(Boolean)
+      : filteredStudents.map(student => student.id).filter(Boolean);
+
+    if (!ids.length) return;
+
+    setSelectedStudents(prev => {
+      if (shouldSelect) {
+        return Array.from(new Set([...prev, ...ids]));
+      }
+
+      return prev.filter(id => !ids.includes(id));
+    });
+  };
+
   const handleBatchDailyChange = () => {
     if (selectedStudents.length === 0) { showAlert('일괄 적용할 학생을 선택해주세요.'); return; }
     const subjectLabel = dailySubject === 'math' ? '수학 Daily' : '영어 Daily';
@@ -3102,42 +3150,53 @@ function ClassDashboard({
   };
 
   const normalizeExcelHeader = (header = '') => {
-    const key = String(header || '').replace(/\s+/g, '').toLowerCase();
+    const key = String(header || '')
+      .replace(/\s+/g, '')
+      .replace(/_/g, '')
+      .toLowerCase();
 
     const headerMap = {
       '반': 'className',
       'class': 'className',
       'classname': 'className',
       '수강반': 'className',
+
       '이름': 'name',
       '성명': 'name',
       'name': 'name',
       '학생명': 'name',
+
       '학번': 'studentId',
       '학생번호': 'studentId',
       'id': 'studentId',
       'studentid': 'studentId',
       '수험번호': 'studentId',
+
       '아이디': 'userId',
       'userid': 'userId',
       '로그인id': 'userId',
       '로그인아이디': 'userId',
+
       '날짜': 'date',
       '일자': 'date',
       'day': 'date',
       'date': 'date',
+
       '출석유형': 'attendanceStatus',
       '출석': 'attendanceStatus',
       '출결': 'attendanceStatus',
       'attendance': 'attendanceStatus',
+
       'daily1차': 'dailyT1',
       '데일리1차': 'dailyT1',
       '1차': 'dailyT1',
       't1': 'dailyT1',
+
       'daily2차': 'dailyT2',
       '데일리2차': 'dailyT2',
       '2차': 'dailyT2',
       't2': 'dailyT2',
+
       '수학daily': 'dailyMath',
       '수학데일리': 'dailyMath',
       'math': 'dailyMath',
@@ -3148,8 +3207,13 @@ function ClassDashboard({
   };
 
   const normalizeAttendanceStatus = (value) => {
-    const status = String(value ?? '').trim();
+    const status = String(value ?? '')
+      .replace(/\u00A0/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
     if (!status) return '';
+
     return ATTENDANCE_OPTIONS.includes(status) ? status : null;
   };
 
@@ -3164,23 +3228,81 @@ function ClassDashboard({
     return foundKey ? row[foundKey] : '';
   };
 
+  const normalizeExcelIdValue = (value) => {
+    if (value === null || value === undefined) return '';
+
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(Math.trunc(value)).trim();
+    }
+
+    return String(value).trim();
+  };
+
+  const parseExcelSerialDate = (value) => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    if (value < 30000) return null;
+
+    if (window.XLSX?.SSF?.parse_date_code) {
+      const parsed = window.XLSX.SSF.parse_date_code(value);
+
+      if (parsed?.m && parsed?.d) {
+        return {
+          month: `${Number(parsed.m)}월`,
+          dayIndex: Number(parsed.d) - 1
+        };
+      }
+    }
+
+    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
+    const parsedDate = new Date(excelEpoch.getTime() + value * 24 * 60 * 60 * 1000);
+
+    if (!Number.isNaN(parsedDate.getTime())) {
+      return {
+        month: `${parsedDate.getUTCMonth() + 1}월`,
+        dayIndex: parsedDate.getUTCDate() - 1
+      };
+    }
+
+    return null;
+  };
+
   const parseExcelDateToDayIndex = (value, fallbackMonth, fallbackDayIndex = 0) => {
-    const raw = String(value ?? '').trim();
     const safeFallbackDayIndex = Math.max(0, Math.min(30, Number(fallbackDayIndex || 0)));
 
-    if (!raw) {
+    if (value === null || value === undefined || value === '') {
       return { month: fallbackMonth, dayIndex: safeFallbackDayIndex };
     }
 
+    if (value instanceof Date && !Number.isNaN(value.getTime())) {
+      return {
+        month: `${value.getMonth() + 1}월`,
+        dayIndex: value.getDate() - 1
+      };
+    }
+
     if (typeof value === 'number' && Number.isFinite(value)) {
+      const serialParsed = parseExcelSerialDate(value);
+      if (serialParsed && serialParsed.dayIndex >= 0 && serialParsed.dayIndex <= 30) {
+        return serialParsed;
+      }
+
       const day = Math.round(value);
-      if (day >= 1 && day <= 31) return { month: fallbackMonth, dayIndex: day - 1 };
+      if (day >= 1 && day <= 31) {
+        return { month: fallbackMonth, dayIndex: day - 1 };
+      }
+    }
+
+    const raw = String(value ?? '').trim();
+
+    if (!raw) {
+      return { month: fallbackMonth, dayIndex: safeFallbackDayIndex };
     }
 
     const isoMatch = raw.match(/^(\d{4})[-./](\d{1,2})[-./](\d{1,2})$/);
     if (isoMatch) {
       const monthNumber = Number(isoMatch[2]);
       const day = Number(isoMatch[3]);
+
       if (monthNumber >= 1 && monthNumber <= 12 && day >= 1 && day <= 31) {
         return { month: `${monthNumber}월`, dayIndex: day - 1 };
       }
@@ -3190,6 +3312,7 @@ function ClassDashboard({
     if (koreanMatch) {
       const monthNumber = Number(koreanMatch[1]);
       const day = Number(koreanMatch[2]);
+
       if (monthNumber >= 1 && monthNumber <= 12 && day >= 1 && day <= 31) {
         return { month: `${monthNumber}월`, dayIndex: day - 1 };
       }
@@ -3199,6 +3322,7 @@ function ClassDashboard({
     if (slashMatch) {
       const monthNumber = Number(slashMatch[1]);
       const day = Number(slashMatch[2]);
+
       if (monthNumber >= 1 && monthNumber <= 12 && day >= 1 && day <= 31) {
         return { month: `${monthNumber}월`, dayIndex: day - 1 };
       }
@@ -3215,31 +3339,63 @@ function ClassDashboard({
   const findStudentByAttendanceDailyExcelRow = (row, studentList = students) => {
     const rowClassName = String(getRowValueByNormalizedKey(row, 'className') || '').trim();
     const rowName = String(getRowValueByNormalizedKey(row, 'name') || '').trim();
-    const rowStudentId = String(getRowValueByNormalizedKey(row, 'studentId') || '').trim();
-    const rowUserId = String(getRowValueByNormalizedKey(row, 'userId') || '').trim();
-    const scopeClassName = rowClassName || className;
-
-    const candidates = studentList.filter(student => {
-      if (className === '대구캠퍼스 전체' && !scopeClassName) return true;
-
-      const classList = getStudentClassNamesForExcel(student);
-      return scopeClassName ? classList.includes(scopeClassName) : classList.includes(className);
-    });
+    const rowStudentId = normalizeExcelIdValue(getRowValueByNormalizedKey(row, 'studentId'));
+    const rowUserId = normalizeExcelIdValue(getRowValueByNormalizedKey(row, 'userId'));
 
     if (rowStudentId) {
-      const matched = candidates.find(student => String(student.id || '').trim() === rowStudentId);
-      if (matched) return { student: matched, error: null };
+      const matchedByStudentId = studentList.find(student => {
+        return String(student.id || '').trim() === rowStudentId;
+      });
+
+      if (matchedByStudentId) return { student: matchedByStudentId, error: null };
     }
 
     if (rowUserId) {
-      const matched = candidates.find(student => String(student.userId || '').trim() === rowUserId);
-      if (matched) return { student: matched, error: null };
+      const matchedByUserId = studentList.find(student => {
+        return String(student.userId || '').trim() === rowUserId;
+      });
+
+      if (matchedByUserId) return { student: matchedByUserId, error: null };
     }
 
-    if (rowName) {
-      const nameMatches = candidates.filter(student => String(student.name || '').trim() === rowName);
-      if (nameMatches.length === 1) return { student: nameMatches[0], error: null };
-      if (nameMatches.length > 1) return { student: null, error: '중복 이름 확인 필요' };
+    if (!rowName) {
+      return { student: null, error: '학생 매칭 실패' };
+    }
+
+    const currentClassNameMatches = studentList.filter(student => {
+      const classList = getStudentClassNamesForExcel(student);
+      return classList.includes(className) && String(student.name || '').trim() === rowName;
+    });
+
+    if (currentClassNameMatches.length === 1) {
+      return { student: currentClassNameMatches[0], error: null };
+    }
+
+    if (currentClassNameMatches.length > 1) {
+      return { student: null, error: '중복 이름 확인 필요' };
+    }
+
+    if (rowClassName) {
+      const rowClassNameMatches = studentList.filter(student => {
+        const classList = getStudentClassNamesForExcel(student);
+        return classList.includes(rowClassName) && String(student.name || '').trim() === rowName;
+      });
+
+      if (rowClassNameMatches.length === 1) {
+        return { student: rowClassNameMatches[0], error: null };
+      }
+
+      if (rowClassNameMatches.length > 1) {
+        return { student: null, error: '중복 이름 확인 필요' };
+      }
+    }
+
+    const allNameMatches = studentList.filter(student => {
+      return String(student.name || '').trim() === rowName;
+    });
+
+    if (allNameMatches.length > 1) {
+      return { student: null, error: '중복 이름 확인 필요' };
     }
 
     return { student: null, error: '학생 매칭 실패' };
@@ -3390,7 +3546,11 @@ function ClassDashboard({
     reader.onload = (loadEvent) => {
       try {
         const data = new Uint8Array(loadEvent.target.result);
-        const workbook = window.XLSX.read(data, { type: 'array' });
+        const workbook = window.XLSX.read(data, {
+          type: 'array',
+          cellDates: true
+        });
+
         const firstSheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[firstSheetName];
 
@@ -3399,7 +3559,10 @@ function ClassDashboard({
           return;
         }
 
-        const rows = window.XLSX.utils.sheet_to_json(worksheet, { defval: '' });
+        const rows = window.XLSX.utils.sheet_to_json(worksheet, {
+          defval: '',
+          raw: true
+        });
 
         if (!rows.length) {
           showAlert('업로드할 데이터가 없습니다.');
@@ -3407,7 +3570,10 @@ function ClassDashboard({
         }
 
         const baseMonth = source === 'daily' ? dailyMonth : attendanceMonth;
-        const fallbackDayIndex = source === 'daily' ? Number(batchDailyDate || 0) : Number(batchAttendanceDate || 0);
+        const fallbackDayIndex = source === 'daily'
+          ? Number(batchDailyDate || 0)
+          : Number(batchAttendanceDate || 0);
+
         const result = {
           total: rows.length,
           matchedStudents: new Set(),
@@ -3415,12 +3581,19 @@ function ClassDashboard({
           dailyCount: 0,
           matchFailCount: 0,
           statusErrorCount: 0,
+          dateErrorCount: 0,
           duplicateNameCount: 0,
+          noChangeCount: 0,
           errors: []
         };
 
         const dirtyMap = {};
-        const nextStudents = students.map(student => ({ ...student }));
+        const nextStudents = students.map(student => ({
+          ...student,
+          attendance: student.attendance ? { ...student.attendance } : generateEmptyMonthlyAttendance(),
+          dailyRecords: student.dailyRecords ? { ...student.dailyRecords } : generateEmptyMonthlyDaily()
+        }));
+
         const studentIndexMap = {};
 
         nextStudents.forEach((student, index) => {
@@ -3432,14 +3605,18 @@ function ClassDashboard({
           const { student, error } = findStudentByAttendanceDailyExcelRow(row, nextStudents);
 
           if (!student) {
-            if (error === '중복 이름 확인 필요') result.duplicateNameCount += 1;
-            else result.matchFailCount += 1;
+            if (error === '중복 이름 확인 필요') {
+              result.duplicateNameCount += 1;
+            } else {
+              result.matchFailCount += 1;
+            }
 
             result.errors.push(`${excelRowNumber}행: ${error}`);
             return;
           }
 
           const targetIndex = studentIndexMap[student.id];
+
           if (targetIndex === undefined) {
             result.matchFailCount += 1;
             result.errors.push(`${excelRowNumber}행: 학생 매칭 실패`);
@@ -3450,20 +3627,24 @@ function ClassDashboard({
           const parsedDate = parseExcelDateToDayIndex(dateValue, baseMonth, fallbackDayIndex);
 
           if (!parsedDate || parsedDate.dayIndex < 0 || parsedDate.dayIndex > 30) {
+            result.dateErrorCount += 1;
             result.errors.push(`${excelRowNumber}행: 날짜 형식 오류`);
             return;
           }
 
           const targetMonth = parsedDate.month || baseMonth;
           const dayIndex = parsedDate.dayIndex;
+
           const rawAttendanceStatus = getRowValueByNormalizedKey(row, 'attendanceStatus');
           const attendanceStatus = normalizeAttendanceStatus(rawAttendanceStatus);
+
           const dailyT1 = String(getRowValueByNormalizedKey(row, 'dailyT1') ?? '').trim();
           const dailyT2 = String(getRowValueByNormalizedKey(row, 'dailyT2') ?? '').trim();
           const dailyMath = String(getRowValueByNormalizedKey(row, 'dailyMath') ?? '').trim();
 
           let changedAttendance = false;
           let changedDaily = false;
+
           const currentStudent = nextStudents[targetIndex];
 
           if (attendanceStatus === null) {
@@ -3471,7 +3652,7 @@ function ClassDashboard({
             result.errors.push(`${excelRowNumber}행: 출석유형 값 오류 - "${rawAttendanceStatus}"`);
           } else if (attendanceStatus !== '') {
             const currentMonth = currentStudent.attendance?.[targetMonth] || generateEmptyMonthlyAttendance()[targetMonth];
-            const currentAttendanceValue = currentMonth.am?.[dayIndex] || '';
+            const currentAttendanceValue = currentMonth.am?.[dayIndex] || currentMonth.pm?.[dayIndex] || '';
 
             if (!isSameValueForDirtyCheck(currentAttendanceValue, attendanceStatus)) {
               const updatedAm = [...(currentMonth.am || Array(31).fill(''))];
@@ -3500,7 +3681,7 @@ function ClassDashboard({
           if (dailyT1 !== '' || dailyT2 !== '' || dailyMath !== '') {
             const studentAfterAttendance = nextStudents[targetIndex];
             const baseDaily = studentAfterAttendance.dailyRecords?.[targetMonth] || generateEmptyMonthlyDaily()[targetMonth];
-            const currentDaily = baseDaily[dayIndex] || { t1: '', t2: '', math: '' };
+            const currentDaily = { t1: '', t2: '', math: '', ...(baseDaily[dayIndex] || {}) };
 
             const shouldChangeDaily =
               (dailyT1 !== '' && !isSameValueForDirtyCheck(currentDaily.t1, dailyT1)) ||
@@ -3532,9 +3713,12 @@ function ClassDashboard({
 
           if (changedAttendance || changedDaily) {
             result.matchedStudents.add(student.id);
+
             if (!dirtyMap[student.id]) dirtyMap[student.id] = new Set();
             if (changedAttendance) dirtyMap[student.id].add('attendance');
             if (changedDaily) dirtyMap[student.id].add('dailyRecords');
+          } else {
+            result.noChangeCount += 1;
           }
         });
 
@@ -3549,11 +3733,11 @@ function ClassDashboard({
         }
 
         showAlert(
-          `엑셀 업로드 완료\n총 ${result.total}행 중 ${result.matchedStudents.size}명 반영\n출석 ${result.attendanceCount}건, Daily ${result.dailyCount}건 반영\n매칭 실패 ${result.matchFailCount}건, 출석유형 오류 ${result.statusErrorCount}건, 중복 이름 ${result.duplicateNameCount}건`
+          `엑셀 업로드 완료\n총 ${result.total}행 중 ${result.matchedStudents.size}명 반영\n출석 ${result.attendanceCount}건, Daily ${result.dailyCount}건 반영\n매칭 실패 ${result.matchFailCount}건, 출석유형 오류 ${result.statusErrorCount}건, 날짜 오류 ${result.dateErrorCount}건, 중복 이름 ${result.duplicateNameCount}건\n변경 없음 ${result.noChangeCount}건`
         );
       } catch (error) {
         console.error('출석/Daily 엑셀 업로드 오류:', error);
-        showAlert('엑셀 업로드 중 오류가 발생했습니다.');
+        showAlert(`엑셀 업로드 중 오류가 발생했습니다.\n${error?.message || error}`);
       } finally {
         event.target.value = '';
       }
