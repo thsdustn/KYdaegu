@@ -42,6 +42,117 @@ const getAttendanceValueType = (value) => {
   if (ATTENDANCE_NEUTRAL_STATUSES.includes(status)) return 'neutral';
   return 'empty';
 };
+
+const getMonthNumber = (month) => {
+  return Number(String(month ?? '').replace('월', '')) || new Date().getMonth() + 1;
+};
+
+const getRealMonthLastDay = (year, month) => {
+  const targetYear = Number(year) || new Date().getFullYear();
+  const targetMonth = getMonthNumber(month);
+  return new Date(targetYear, targetMonth, 0).getDate();
+};
+
+const getMetricDayLimit = (year, month, { useTodayLimit = true, dayLimitOverride = null } = {}) => {
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonthNumber = now.getMonth() + 1;
+  const targetYear = Number(year) || currentYear;
+  const targetMonth = getMonthNumber(month);
+  const lastDay = getRealMonthLastDay(targetYear, targetMonth);
+
+  if (Number.isFinite(dayLimitOverride)) {
+    return Math.max(0, Math.min(lastDay, Number(dayLimitOverride)));
+  }
+
+  if (!useTodayLimit) return lastDay;
+
+  if (targetYear > currentYear || (targetYear === currentYear && targetMonth > currentMonthNumber)) {
+    return 0;
+  }
+
+  if (targetYear === currentYear && targetMonth === currentMonthNumber) {
+    return Math.max(1, Math.min(lastDay, now.getDate()));
+  }
+
+  return lastDay;
+};
+
+const calculateAttendanceRatePartsFromArray = ({
+  attendanceArray = [],
+  excludedDays = [],
+  year,
+  month,
+  dayLimitOverride = null,
+  useTodayLimit = true
+}) => {
+  const dayLimit = getMetricDayLimit(year, month, { useTodayLimit, dayLimitOverride });
+  let denominator = 0;
+  let presentCount = 0;
+
+  for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+    if (excludedDays.includes(dayIndex)) continue;
+
+    const type = getAttendanceValueType(attendanceArray?.[dayIndex]);
+
+    if (type === 'neutral') continue;
+
+    if (type === 'present') {
+      denominator += 1;
+      presentCount += 1;
+    } else if (type === 'absent' || type === 'empty') {
+      denominator += 1;
+    }
+  }
+
+  return {
+    denominator,
+    presentCount,
+    rate: denominator === 0 ? 0 : Math.round((presentCount / denominator) * 100)
+  };
+};
+
+const calculateAttendanceRateFromArray = (options) => {
+  return calculateAttendanceRatePartsFromArray(options).rate;
+};
+
+const calculateDailyDayParticipationRatePartsFromArray = ({
+  dailyArray = [],
+  excludedDays = [],
+  year,
+  month,
+  dayLimitOverride = null,
+  useTodayLimit = true
+}) => {
+  const dayLimit = getMetricDayLimit(year, month, { useTodayLimit, dayLimitOverride });
+  let denominator = 0;
+  let participatedCount = 0;
+
+  for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+    if (excludedDays.includes(dayIndex)) continue;
+
+    denominator += 1;
+
+    const day = dailyArray?.[dayIndex] || {};
+    const t1 = String(day?.t1 ?? '').trim();
+    const t2 = String(day?.t2 ?? '').trim();
+    const math = String(day?.math ?? '').trim();
+
+    if (t1 !== '' || t2 !== '' || math !== '') {
+      participatedCount += 1;
+    }
+  }
+
+  return {
+    denominator,
+    participatedCount,
+    rate: denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100)
+  };
+};
+
+const calculateDailyDayParticipationRateFromArray = (options) => {
+  return calculateDailyDayParticipationRatePartsFromArray(options).rate;
+};
 const MONTHS = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8월', '9월', '10월', '11월', '12월'];
 const DISPLAY_MONTHS = MONTHS.slice(0, 11); 
 
@@ -911,13 +1022,7 @@ export default function App() {
   };
 
   const getHomeMonthDayLimit = (month = homeSelectedMonth) => {
-    const currentMonth = `${new Date().getMonth() + 1}월`;
-
-    if (month === currentMonth) {
-      return Math.max(1, Math.min(31, new Date().getDate()));
-    }
-
-    return 31;
+    return getMetricDayLimit(academicYear, month);
   };
 
   const homeTodayIndex = Math.max(0, Math.min(30, getHomeMonthDayLimit(homeSelectedMonth) - 1));
@@ -981,47 +1086,26 @@ export default function App() {
   const getHomeAttendanceRateForStudent = (student, month = homeSelectedMonth) => {
     const monthData = student.attendance?.[month] || {};
     const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
-    const dayLimit = getHomeMonthDayLimit(month);
     const excluded = getHomeAttendanceExcludedDaysForStudent(student, month);
 
-    let denominator = 0;
-    let presentCount = 0;
-
-    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
-      if (excluded.includes(dayIndex)) continue;
-
-      const value = attendanceArray?.[dayIndex];
-      const type = getAttendanceValueType(value);
-
-      if (type === 'neutral') continue;
-
-      denominator += 1;
-      if (type === 'present') presentCount += 1;
-    }
-
-    return denominator === 0 ? 0 : Math.round((presentCount / denominator) * 100);
+    return calculateAttendanceRateFromArray({
+      attendanceArray,
+      excludedDays: excluded,
+      year: academicYear,
+      month
+    });
   };
 
   const getHomeDailyRateForStudent = (student, month = homeSelectedMonth) => {
     const dailyArray = student.dailyRecords?.[month] || [];
-    const dayLimit = getHomeMonthDayLimit(month);
     const excluded = getHomeDailyExcludedDaysForStudent(student, month);
 
-    let denominator = 0;
-    let participatedCount = 0;
-
-    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
-      if (excluded.includes(dayIndex)) continue;
-
-      denominator += 1;
-      const day = dailyArray[dayIndex] || {};
-      const t1 = String(day?.t1 ?? '').trim();
-      const t2 = String(day?.t2 ?? '').trim();
-      const math = String(day?.math ?? '').trim();
-      if (t1 !== '' || t2 !== '' || math !== '') participatedCount += 1;
-    }
-
-    return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
+    return calculateDailyDayParticipationRateFromArray({
+      dailyArray,
+      excludedDays: excluded,
+      year: academicYear,
+      month
+    });
   };
 
   const hasHomeDailyMissingUntilToday = (student, month = homeSelectedMonth) => {
@@ -1170,29 +1254,27 @@ export default function App() {
     const targetStudents = getHomeClassStudents(clsName);
     if (targetStudents.length === 0) return 0;
 
-    const dayLimit = getHomeMonthDayLimit(homeSelectedMonth);
     let denominator = 0;
     let presentTotal = 0;
 
-    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
-      targetStudents.forEach(student => {
-        const excluded = clsName === '대구캠퍼스 전체'
-          ? getHomeAttendanceExcludedDaysForStudent(student, homeSelectedMonth)
-          : getHomeAttendanceExcludedDays(clsName, homeSelectedMonth);
+    targetStudents.forEach(student => {
+      const excluded = clsName === '대구캠퍼스 전체'
+        ? getHomeAttendanceExcludedDaysForStudent(student, homeSelectedMonth)
+        : getHomeAttendanceExcludedDays(clsName, homeSelectedMonth);
 
-        if (excluded.includes(dayIndex)) return;
+      const monthData = student.attendance?.[homeSelectedMonth] || {};
+      const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
 
-        const monthData = student.attendance?.[homeSelectedMonth] || {};
-        const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
-        const value = attendanceArray?.[dayIndex];
-        const type = getAttendanceValueType(value);
-
-        if (type === 'neutral') return;
-
-        denominator += 1;
-        if (type === 'present') presentTotal += 1;
+      const parts = calculateAttendanceRatePartsFromArray({
+        attendanceArray,
+        excludedDays: excluded,
+        year: academicYear,
+        month: homeSelectedMonth
       });
-    }
+
+      denominator += parts.denominator;
+      presentTotal += parts.presentCount;
+    });
 
     return denominator === 0 ? 0 : Math.round((presentTotal / denominator) * 100);
   };
@@ -1201,29 +1283,28 @@ export default function App() {
     const targetStudents = getHomeClassStudents(clsName);
     if (!targetStudents.length) return 0;
 
-    const dayLimit = Math.max(1, Math.min(31, dayLimitOverride));
     let denominator = 0;
     let presentTotal = 0;
 
-    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
-      targetStudents.forEach(student => {
-        const excluded = clsName === '대구캠퍼스 전체'
-          ? getHomeAttendanceExcludedDaysForStudent(student, month)
-          : getHomeAttendanceExcludedDays(clsName, month);
+    targetStudents.forEach(student => {
+      const excluded = clsName === '대구캠퍼스 전체'
+        ? getHomeAttendanceExcludedDaysForStudent(student, month)
+        : getHomeAttendanceExcludedDays(clsName, month);
 
-        if (excluded.includes(dayIndex)) return;
+      const monthData = student.attendance?.[month] || {};
+      const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
 
-        const monthData = student.attendance?.[month] || {};
-        const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
-        const value = attendanceArray?.[dayIndex];
-        const type = getAttendanceValueType(value);
-
-        if (type === 'neutral') return;
-
-        denominator += 1;
-        if (type === 'present') presentTotal += 1;
+      const parts = calculateAttendanceRatePartsFromArray({
+        attendanceArray,
+        excludedDays: excluded,
+        year: academicYear,
+        month,
+        dayLimitOverride
       });
-    }
+
+      denominator += parts.denominator;
+      presentTotal += parts.presentCount;
+    });
 
     return denominator === 0 ? 0 : Math.round((presentTotal / denominator) * 100);
   };
@@ -1232,27 +1313,26 @@ export default function App() {
     const targetStudents = getHomeClassStudents(clsName);
     if (targetStudents.length === 0) return 0;
 
-    const dayLimit = getHomeMonthDayLimit(homeSelectedMonth);
     let denominator = 0;
     let participatedCount = 0;
 
-    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
-      targetStudents.forEach(student => {
-        const excluded = clsName === '대구캠퍼스 전체'
-          ? getHomeDailyExcludedDaysForStudent(student, homeSelectedMonth)
-          : getHomeDailyExcludedDays(clsName, homeSelectedMonth);
+    targetStudents.forEach(student => {
+      const excluded = clsName === '대구캠퍼스 전체'
+        ? getHomeDailyExcludedDaysForStudent(student, homeSelectedMonth)
+        : getHomeDailyExcludedDays(clsName, homeSelectedMonth);
 
-        if (excluded.includes(dayIndex)) return;
+      const dailyArray = student.dailyRecords?.[homeSelectedMonth] || [];
 
-        denominator += 1;
-        const dailyArray = student.dailyRecords?.[homeSelectedMonth] || [];
-        const day = dailyArray[dayIndex] || {};
-        const t1 = String(day?.t1 ?? '').trim();
-        const t2 = String(day?.t2 ?? '').trim();
-        const math = String(day?.math ?? '').trim();
-        if (t1 !== '' || t2 !== '' || math !== '') participatedCount += 1;
+      const parts = calculateDailyDayParticipationRatePartsFromArray({
+        dailyArray,
+        excludedDays: excluded,
+        year: academicYear,
+        month: homeSelectedMonth
       });
-    }
+
+      denominator += parts.denominator;
+      participatedCount += parts.participatedCount;
+    });
 
     return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
   };
@@ -1261,27 +1341,27 @@ export default function App() {
     const targetStudents = getHomeClassStudents(clsName);
     if (!targetStudents.length) return 0;
 
-    const dayLimit = Math.max(1, Math.min(31, dayLimitOverride));
     let denominator = 0;
     let participatedCount = 0;
 
-    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
-      targetStudents.forEach(student => {
-        const excluded = clsName === '대구캠퍼스 전체'
-          ? getHomeDailyExcludedDaysForStudent(student, month)
-          : getHomeDailyExcludedDays(clsName, month);
+    targetStudents.forEach(student => {
+      const excluded = clsName === '대구캠퍼스 전체'
+        ? getHomeDailyExcludedDaysForStudent(student, month)
+        : getHomeDailyExcludedDays(clsName, month);
 
-        if (excluded.includes(dayIndex)) return;
+      const dailyArray = student.dailyRecords?.[month] || [];
 
-        denominator += 1;
-        const dailyArray = student.dailyRecords?.[month] || [];
-        const day = dailyArray[dayIndex] || {};
-        const t1 = String(day?.t1 ?? '').trim();
-        const t2 = String(day?.t2 ?? '').trim();
-        const math = String(day?.math ?? '').trim();
-        if (t1 !== '' || t2 !== '' || math !== '') participatedCount += 1;
+      const parts = calculateDailyDayParticipationRatePartsFromArray({
+        dailyArray,
+        excludedDays: excluded,
+        year: academicYear,
+        month,
+        dayLimitOverride
       });
-    }
+
+      denominator += parts.denominator;
+      participatedCount += parts.participatedCount;
+    });
 
     return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
   };
@@ -1503,13 +1583,16 @@ export default function App() {
 
         const monthData = student.attendance?.[month] || {};
         const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
-        const value = attendanceArray?.[dayIndex];
-        const type = getAttendanceValueType(value);
+        const type = getAttendanceValueType(attendanceArray?.[dayIndex]);
 
         if (type === 'neutral') return;
 
-        denominator += 1;
-        if (type === 'present') presentCount += 1;
+        if (type === 'present') {
+          denominator += 1;
+          presentCount += 1;
+        } else if (type === 'absent' || type === 'empty') {
+          denominator += 1;
+        }
       });
 
       if (denominator > 0) trend.push(Math.round((presentCount / denominator) * 100));
@@ -3044,6 +3127,15 @@ function ClassDashboard({
   const [searchTerm, setSearchTerm] = useState('');
   const [sortKey, setSortKey] = useState('name'); 
   const [sortOrder, setSortOrder] = useState('asc'); 
+
+  const [studentCurrentPage, setStudentCurrentPage] = useState(1);
+  const [studentsPerPage, setStudentsPerPage] = useState(10);
+  const [studentClassFilter, setStudentClassFilter] = useState('전체');
+  const [studentTrackFilter, setStudentTrackFilter] = useState('전체');
+  const [studentTransferFilter, setStudentTransferFilter] = useState('전체');
+  const [studentGenderFilter, setStudentGenderFilter] = useState('전체');
+  const [profileMemoDraft, setProfileMemoDraft] = useState('');
+
   const [viewingProfileId, setViewingProfileId] = useState(null);
   const [viewingGradeId, setViewingGradeId] = useState(null); 
   const [editingMonthlyStudentId, setEditingMonthlyStudentId] = useState(null); 
@@ -5018,55 +5110,32 @@ function ClassDashboard({
   const isAttendancePresent = (value) => ATTENDANCE_PRESENT_STATUSES.includes(value);
 
   const getAttendanceDayLimit = (month) => {
-      const currentMonth = `${new Date().getMonth() + 1}월`;
-
-      if (month === currentMonth) {
-          return Math.max(1, Math.min(31, new Date().getDate()));
-      }
-
-      return 31;
+      return getMetricDayLimit(academicYear, month);
   };
 
   const getAttendanceRate = (student, month) => {
       const excluded = attendanceSettings[month]?.excludedDays || [];
       const attendanceData = getUnifiedAttendanceArray(student.attendance?.[month] || {});
-      const dayLimit = getAttendanceDayLimit(month);
-      let totalDays = 0, attendedDays = 0;
+      const rate = calculateAttendanceRateFromArray({
+          attendanceArray: attendanceData,
+          excludedDays: excluded,
+          year: academicYear,
+          month
+      });
 
-      for(let i=0; i<dayLimit; i++) {
-          if(excluded.includes(i)) continue;
-
-          const value = attendanceData[i];
-          const type = getAttendanceValueType(value);
-
-          if (type === 'neutral') continue;
-
-          totalDays++;
-          if (type === 'present') attendedDays++;
-      }
-
-      return totalDays === 0 ? "0%" : `${Math.round((attendedDays / totalDays) * 100)}%`;
+      return `${rate}%`;
   }
 
   const getAttendanceRateNum = (student, month) => {
       const excluded = attendanceSettings[month]?.excludedDays || [];
       const attendanceData = getUnifiedAttendanceArray(student.attendance?.[month] || {});
-      const dayLimit = getAttendanceDayLimit(month);
-      let totalDays = 0, attendedDays = 0;
 
-      for(let i=0; i<dayLimit; i++) {
-          if(excluded.includes(i)) continue;
-
-          const value = attendanceData[i];
-          const type = getAttendanceValueType(value);
-
-          if (type === 'neutral') continue;
-
-          totalDays++;
-          if (type === 'present') attendedDays++;
-      }
-
-      return totalDays === 0 ? 0 : Math.round((attendedDays / totalDays) * 100);
+      return calculateAttendanceRateFromArray({
+          attendanceArray: attendanceData,
+          excludedDays: excluded,
+          year: academicYear,
+          month
+      });
   }
 
   const getDashboardAlerts = () => {
@@ -5252,30 +5321,24 @@ function ClassDashboard({
     if (classStudents.length === 0) return 0;
 
     const excluded = attendanceSettings[attendanceMonth]?.excludedDays || [];
-    const currentMonth = `${new Date().getMonth() + 1}월`;
-    const dayLimit = attendanceMonth === currentMonth
-      ? Math.max(1, Math.min(31, new Date().getDate()))
-      : 31;
-
     let denominator = 0;
     let presentCount = 0;
 
-    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
-      if (excluded.includes(dayIndex)) continue;
-
-      classStudents.forEach(student => {
-        const attendanceData = getUnifiedAttendanceArray(student.attendance?.[attendanceMonth] || {});
-        const type = getAttendanceValueType(attendanceData?.[dayIndex]);
-
-        if (type === 'neutral') return;
-
-        denominator += 1;
-        if (type === 'present') presentCount += 1;
+    classStudents.forEach(student => {
+      const attendanceData = getUnifiedAttendanceArray(student.attendance?.[attendanceMonth] || {});
+      const parts = calculateAttendanceRatePartsFromArray({
+        attendanceArray: attendanceData,
+        excludedDays: excluded,
+        year: academicYear,
+        month: attendanceMonth
       });
-    }
+
+      denominator += parts.denominator;
+      presentCount += parts.presentCount;
+    });
 
     return denominator === 0 ? 0 : Math.round((presentCount / denominator) * 100);
-  }, [classStudents, attendanceMonth, attendanceSettings]);
+  }, [classStudents, attendanceMonth, attendanceSettings, academicYear]);
 
   const classAvgStudyTime = useMemo(() => {
     if (classStudents.length === 0) return '0시간 0분';
@@ -5328,27 +5391,21 @@ function ClassDashboard({
     if (classStudents.length === 0) return 0;
 
     const excluded = attendanceSettings[month]?.excludedDays || [];
-    const dayLimit = getClassMonthDayLimit(month);
-
     let denominator = 0;
     let presentCount = 0;
 
-    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
-      if (excluded.includes(dayIndex)) continue;
-
-      classStudents.forEach(student => {
-        const attendanceData = getUnifiedAttendanceArray(student.attendance?.[month] || {});
-        const type = getAttendanceValueType(attendanceData?.[dayIndex]);
-
-        if (type === 'neutral') return;
-
-        denominator += 1;
-
-        if (type === 'present') {
-          presentCount += 1;
-        }
+    classStudents.forEach(student => {
+      const attendanceData = getUnifiedAttendanceArray(student.attendance?.[month] || {});
+      const parts = calculateAttendanceRatePartsFromArray({
+        attendanceArray: attendanceData,
+        excludedDays: excluded,
+        year: academicYear,
+        month
       });
-    }
+
+      denominator += parts.denominator;
+      presentCount += parts.presentCount;
+    });
 
     return denominator === 0 ? 0 : Math.round((presentCount / denominator) * 100);
   };
@@ -5416,15 +5473,7 @@ function ClassDashboard({
 
   
   const getClassMonthDayLimit = (month = dashboardMonth) => {
-    const currentMonth = `${new Date().getMonth() + 1}월`;
-
-    // 현재 월은 오늘 날짜까지만 계산
-    if (month === currentMonth) {
-      return Math.max(1, Math.min(31, new Date().getDate()));
-    }
-
-    // 과거 월은 전체 날짜 기준
-    return 31;
+    return getMetricDayLimit(academicYear, month);
   };
 
   const getClassAttendanceRate = (month = dashboardMonth) => {
@@ -5456,28 +5505,13 @@ function ClassDashboard({
 const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
     const excluded = attendanceSettings[month]?.excludedDays || [];
     const attendanceData = getUnifiedAttendanceArray(student.attendance?.[month] || {});
-    const dayLimit = getClassMonthDayLimit(month);
 
-    let denominator = 0;
-    let presentCount = 0;
-
-    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
-      if (excluded.includes(dayIndex)) continue;
-
-      const type = getAttendanceValueType(attendanceData?.[dayIndex]);
-
-      // 조퇴/지각/사전통보/병결 등 중립 유형과 빈 값은 출석률 계산 제외
-      if (type === 'neutral') continue;
-
-      // 출석/Live는 출석 인정, 결석은 출석률 하락
-      denominator += 1;
-
-      if (type === 'present') {
-        presentCount += 1;
-      }
-    }
-
-    return denominator === 0 ? 0 : Math.round((presentCount / denominator) * 100);
+    return calculateAttendanceRateFromArray({
+      attendanceArray: attendanceData,
+      excludedDays: excluded,
+      year: academicYear,
+      month
+    });
   };
 
   const getClassStudentDailyRate = (student, month = dashboardMonth, subject = 'all') => {
@@ -5894,8 +5928,69 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
       };
     }));
 
-    markStudentDirty(studentId, 'studentInfo');
+    markStudentDirty(studentId, field === 'notes' ? 'notes' : 'studentInfo');
   };
+
+  const formatConsultingDateKey = () => {
+    const now = new Date();
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const hh = String(now.getHours()).padStart(2, '0');
+    const min = String(now.getMinutes()).padStart(2, '0');
+
+    return `${yyyy}.${mm}.${dd} ${hh}:${min}`;
+  };
+
+  const handleSaveConsultingMemo = (studentId) => {
+    const memo = String(profileMemoDraft || '').trim();
+    if (!studentId || !memo) return;
+
+    const dateKey = formatConsultingDateKey();
+
+    setStudents(prev => prev.map(student => {
+      if (student.id !== studentId) return student;
+
+      return {
+        ...student,
+        consulting: {
+          ...(student.consulting || {}),
+          [dateKey]: memo
+        }
+      };
+    }));
+
+    setProfileMemoDraft('');
+    markStudentDirty(studentId, 'consulting');
+  };
+
+  const handleDeleteConsultingMemo = (studentId, memoKey) => {
+    if (!studentId || !memoKey) return;
+
+    if (!window.confirm('해당 관리 메모를 삭제하시겠습니까?')) return;
+
+    setStudents(prev => prev.map(student => {
+      if (student.id !== studentId) return student;
+
+      const nextConsulting = { ...(student.consulting || {}) };
+      delete nextConsulting[memoKey];
+
+      return {
+        ...student,
+        consulting: nextConsulting
+      };
+    }));
+
+    markStudentDirty(studentId, 'consulting');
+  };
+
+  useEffect(() => {
+    setStudentCurrentPage(1);
+  }, [searchTerm, studentClassFilter, studentTrackFilter, studentTransferFilter, studentGenderFilter, studentsPerPage]);
+
+  useEffect(() => {
+    setProfileMemoDraft('');
+  }, [viewingProfileId]);
 
   const toggleDailyExcluded = (month, dayIndex) => {
     setDailySettings(prev => {
@@ -6892,6 +6987,10 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
     });
   
     setTimeout(() => {
+      matchedKeys.forEach(studentId => {
+        markStudentDirty(studentId, 'studyTime');
+      });
+
       const duplicateMsg = duplicateWarnings > 0
         ? ` 동명이인으로 제외된 항목 ${duplicateWarnings}건이 있습니다.`
         : '';
@@ -7088,13 +7187,14 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                     setActiveTab('attendance');
                     setActiveAttendanceTab('calendar');
                   }}
-                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black transition-all ${
+                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black transition-all flex items-center gap-2 ${
                     activeAttendanceTab === 'calendar'
                       ? 'bg-white/28 text-white shadow-inner'
                       : 'text-white/78 hover:bg-white/18 hover:text-white hover:translate-x-0.5'
                   }`}
                 >
-                  출석
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${activeAttendanceTab === 'calendar' ? 'bg-white' : 'bg-transparent'}`} />
+                  <span>출석</span>
                 </button>
                 <button
                   type="button"
@@ -7102,13 +7202,14 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                     setActiveTab('attendance');
                     setActiveAttendanceTab('studyTime');
                   }}
-                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black transition-all ${
+                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-black transition-all flex items-center gap-2 ${
                     activeAttendanceTab === 'studyTime'
                       ? 'bg-white/28 text-white shadow-inner'
                       : 'text-white/78 hover:bg-white/18 hover:text-white hover:translate-x-0.5'
                   }`}
                 >
-                  학습시간
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${activeAttendanceTab === 'studyTime' ? 'bg-white' : 'bg-transparent'}`} />
+                  <span>학습시간</span>
                 </button>
               </div>
             )}
@@ -7226,38 +7327,50 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
       <main className="flex-1 flex flex-col h-screen overflow-hidden bg-slate-50 relative print:bg-white print:overflow-visible">
         <div className="flex-1 overflow-auto p-4 md:p-8 print:p-0">
           <div className="print:hidden sticky top-0 z-30 mb-4 flex items-center justify-end gap-3">
-            <span
-              className={`px-3 py-2 rounded-full text-xs font-black shadow-sm ${
-                manualSaveStatus === 'saving'
-                  ? 'bg-blue-50 text-blue-600 border border-blue-100'
-                  : manualSaveStatus === 'saved'
-                    ? 'bg-emerald-50 text-emerald-600 border border-emerald-100'
-                    : manualSaveStatus === 'error'
-                      ? 'bg-red-50 text-red-600 border border-red-100'
-                      : getDirtyCountForScope('class') > 0
-                        ? 'bg-orange-50 text-orange-600 border border-orange-100'
-                        : 'bg-white text-slate-500 border border-slate-200'
-              }`}
-            >
-              {manualSaveMessage || (getDirtyCountForScope('class') > 0 ? '변경사항 있음' : '저장 대기')}
-            </span>
+            {(() => {
+              const currentSaveScope = className === '대구캠퍼스 전체' ? 'all' : 'class';
+              const currentDirtyCount = getDirtyCountForScope(currentSaveScope);
+              const saveButtonLabel = className === '대구캠퍼스 전체'
+                ? '전체 변경사항 저장'
+                : '현재 반 변경사항 저장';
 
-            <button
-              type="button"
-              disabled={manualSaveStatus === 'saving' || getDirtyCountForScope('class') === 0}
-              onClick={() => saveDirtyStudentsToFirebase('class')}
-              title="현재 반의 변경사항을 Firebase에 저장합니다. 저장완료 표시 후 다른 사용자에게 반영됩니다."
-              className={`h-10 px-4 rounded-xl text-sm font-black flex items-center gap-2 shadow-sm transition-colors ${
-                getDirtyCountForScope('class') === 0
-                  ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
-                  : manualSaveStatus === 'error'
-                    ? 'bg-red-600 text-white hover:bg-red-700'
-                    : 'bg-blue-600 text-white hover:bg-blue-700'
-              }`}
-            >
-              <CheckCircle2 size={16} />
-              현재 반 변경사항 저장{getDirtyCountForScope('class') > 0 ? ` (${getDirtyCountForScope('class')}건)` : ''}
-            </button>
+              return (
+                <>
+                  <span
+                    className={`px-3 py-2 rounded-full text-xs font-black shadow-sm ${
+                      manualSaveStatus === 'saving'
+                        ? 'bg-blue-50 text-blue-600 border border-blue-100'
+                        : manualSaveStatus === 'saved'
+                          ? 'bg-emerald-50 text-emerald-600 border border-emerald-100'
+                          : manualSaveStatus === 'error'
+                            ? 'bg-red-50 text-red-600 border border-red-100'
+                            : currentDirtyCount > 0
+                              ? 'bg-orange-50 text-orange-600 border border-orange-100'
+                              : 'bg-white text-slate-500 border border-slate-200'
+                    }`}
+                  >
+                    {manualSaveMessage || (currentDirtyCount > 0 ? '변경사항 있음' : '저장 대기')}
+                  </span>
+
+                  <button
+                    type="button"
+                    disabled={manualSaveStatus === 'saving' || currentDirtyCount === 0}
+                    onClick={() => saveDirtyStudentsToFirebase(currentSaveScope)}
+                    title="변경사항을 Firebase에 저장합니다. 저장완료 표시 후 다른 사용자에게 반영됩니다."
+                    className={`h-10 px-4 rounded-xl text-sm font-black flex items-center gap-2 shadow-sm transition-colors ${
+                      currentDirtyCount === 0
+                        ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                        : manualSaveStatus === 'error'
+                          ? 'bg-red-600 text-white hover:bg-red-700'
+                          : 'bg-blue-600 text-white hover:bg-blue-700'
+                    }`}
+                  >
+                    <CheckCircle2 size={16} />
+                    {saveButtonLabel}{currentDirtyCount > 0 ? ` (${currentDirtyCount}건)` : ''}
+                  </button>
+                </>
+              );
+            })()}
           </div>
           
           {/* [0] 대시보드 탭 (Feature 1) */}
@@ -7454,13 +7567,16 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                     classStudents.forEach(student => {
                       const monthData = student.attendance?.[month] || {};
                       const attendanceArray = getUnifiedAttendanceArray(monthData);
-                      const value = attendanceArray?.[dayIndex];
-                      const type = getAttendanceValueType(value);
+                      const type = getAttendanceValueType(attendanceArray?.[dayIndex]);
 
                       if (type === 'neutral') return;
 
-                      denominator += 1;
-                      if (type === 'present') presentCount += 1;
+                      if (type === 'present') {
+                        denominator += 1;
+                        presentCount += 1;
+                      } else if (type === 'absent' || type === 'empty') {
+                        denominator += 1;
+                      }
                     });
                   }
                 }
@@ -7692,7 +7808,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                 onClick: () => setActiveTab('grades')
               },
               {
-                title: '이번 달 평균 학습시간',
+                title: '이번 주 평균 학습시간',
                 value: avgStudyHours,
                 unit: '시간',
                 sub: studyDelta.text,
@@ -8084,206 +8200,933 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
             );
           })()}
           {/* [1] 학생목록 탭 */}
-          {activeTab === 'students' && (
-             <div className="max-w-6xl mx-auto animate-in fade-in duration-300">
-               <div className="flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-4">
-                 <div><h1 className="text-2xl font-extrabold text-slate-900">수강생 통합 명단</h1></div>
-                 <div className="flex gap-2">
-                   <button onClick={handleExportStudentsExcel} className="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-xl font-bold flex gap-2 transition-colors shadow-sm"><DownloadCloud size={18}/>명단 다운로드</button>
-                   <button onClick={() => setShowAddModal(true)} className="bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-50 px-5 py-2.5 rounded-xl font-bold flex gap-2 transition-colors"><UserPlus size={18}/>수기 등록</button>
-                   <button onClick={() => openImportModal('student')} className="bg-indigo-600 text-white px-5 py-2.5 rounded-xl font-bold flex gap-2 transition-colors"><FileSpreadsheet size={18}/>신상정보 엑셀 파싱</button>
+          {activeTab === 'students' && (() => {
+            const getUniqueClassList = (student) => {
+              return [...new Set([
+                ...(Array.isArray(student.classNames) ? student.classNames : []),
+                ...(Array.isArray(student.classes) ? student.classes : []),
+                student.className
+              ].filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ko'));
+            };
+
+            const isEmptyValue = (value) => {
+              const text = String(value ?? '').trim();
+              return text === '' || text === '-' || text === '미지정' || text === '미배정';
+            };
+
+            const studentBaseList = classStudents || [];
+            const studentTotal = studentBaseList.length;
+
+            const studentScopedList = filteredStudents.filter(student => {
+              const classList = getUniqueClassList(student);
+              const track = String(student.targetTrack || '').trim();
+              const transferType = String(student.transferType || '').trim();
+              const gender = String(student.gender || '').trim();
+
+              const matchClass = studentClassFilter === '전체' || classList.includes(studentClassFilter);
+              const matchTrack = studentTrackFilter === '전체' || track === studentTrackFilter;
+              const matchTransfer = studentTransferFilter === '전체' || transferType === studentTransferFilter;
+              const matchGender = studentGenderFilter === '전체' || gender === studentGenderFilter;
+
+              return matchClass && matchTrack && matchTransfer && matchGender;
+            });
+
+            const filteredTotal = studentScopedList.length;
+            const totalPages = Math.max(1, Math.ceil(filteredTotal / studentsPerPage));
+            const safeCurrentPage = Math.min(studentCurrentPage, totalPages);
+            const startIndex = (safeCurrentPage - 1) * studentsPerPage;
+            const endIndex = startIndex + studentsPerPage;
+            const paginatedStudents = studentScopedList.slice(startIndex, endIndex);
+
+            if (studentCurrentPage !== safeCurrentPage) {
+              setTimeout(() => setStudentCurrentPage(safeCurrentPage), 0);
+            }
+
+            const getPercent = (count, total = studentTotal) => {
+              if (!total) return 0;
+              return Math.round((count / total) * 100);
+            };
+
+            const genderCounts = studentBaseList.reduce((acc, student) => {
+              const gender = String(student.gender || '').trim();
+              if (gender === '남') acc.male += 1;
+              else if (gender === '여') acc.female += 1;
+              else acc.empty += 1;
+              return acc;
+            }, { male: 0, female: 0, empty: 0 });
+
+            const transferCounts = studentBaseList.reduce((acc, student) => {
+              const type = String(student.transferType || '').trim();
+              if (type.includes('학사')) acc.academic += 1;
+              else if (type.includes('일반')) acc.general += 1;
+              else acc.empty += 1;
+              return acc;
+            }, { general: 0, academic: 0, empty: 0 });
+
+            const trackCounts = studentBaseList.reduce((acc, student) => {
+              const rawTrack = String(student.targetTrack || '').trim();
+              const track = isEmptyValue(rawTrack) ? '미지정' : rawTrack;
+              acc[track] = (acc[track] || 0) + 1;
+              return acc;
+            }, {});
+
+            const managementNeeds = {
+              contact: studentBaseList.filter(student => isEmptyValue(student.contact)).length,
+              parentContact: studentBaseList.filter(student => isEmptyValue(student.parentContact)).length,
+              transfer: studentBaseList.filter(student => isEmptyValue(student.transferType)).length,
+              track: studentBaseList.filter(student => isEmptyValue(student.targetTrack)).length,
+              className: studentBaseList.filter(student => getUniqueClassList(student).length === 0 || getUniqueClassList(student).includes('미배정')).length
+            };
+
+            const totalNeedCount = Object.values(managementNeeds).reduce((sum, value) => sum + value, 0);
+
+            const recentItems = [];
+            if (dirtyStudentIds.size > 0) {
+              recentItems.push({
+                label: `저장 대기 학생 ${dirtyStudentIds.size}명`,
+                time: manualSaveMessage || '변경사항 있음',
+                color: 'bg-orange-500'
+              });
+            }
+            if (manualSaveStatus === 'saved') {
+              recentItems.push({
+                label: '최근 저장 완료',
+                time: manualSaveMessage || '저장완료',
+                color: 'bg-emerald-500'
+              });
+            }
+            if (manualSaveStatus === 'saving') {
+              recentItems.push({
+                label: '변경사항 저장 중',
+                time: '저장중',
+                color: 'bg-blue-500'
+              });
+            }
+
+            const classBadgeClass = (cls) => {
+              const value = String(cls || '').toUpperCase();
+              if (value.includes('GC')) return 'bg-emerald-50 text-emerald-700 border-emerald-100';
+              if (value.includes('GB3')) return 'bg-orange-50 text-orange-700 border-orange-100';
+              if (value.includes('GJ')) return 'bg-violet-50 text-violet-700 border-violet-100';
+              if (value.includes('GB')) return 'bg-blue-50 text-blue-700 border-blue-100';
+              return 'bg-slate-100 text-slate-600 border-slate-200';
+            };
+
+            const genderBadgeClass = (gender) => {
+              if (gender === '여') return 'bg-pink-50 text-pink-600 border-pink-100';
+              if (gender === '남') return 'bg-blue-50 text-blue-600 border-blue-100';
+              return 'bg-slate-100 text-slate-500 border-slate-200';
+            };
+
+            const transferBadgeClass = (type) => {
+              if (String(type || '').includes('학사')) return 'bg-violet-50 text-violet-700 border-violet-100';
+              if (String(type || '').includes('일반')) return 'bg-blue-50 text-blue-700 border-blue-100';
+              return 'bg-slate-100 text-slate-500 border-slate-200';
+            };
+
+            const trackBadgeClass = (track) => {
+              const value = String(track || '');
+              if (value.includes('자연')) return 'bg-emerald-50 text-emerald-700 border-emerald-100';
+              if (value.includes('인문')) return 'bg-rose-50 text-rose-600 border-rose-100';
+              if (value.includes('사범')) return 'bg-blue-50 text-blue-700 border-blue-100';
+              if (value.includes('의약')) return 'bg-teal-50 text-teal-700 border-teal-100';
+              if (value.includes('예체능')) return 'bg-purple-50 text-purple-700 border-purple-100';
+              return 'bg-slate-100 text-slate-500 border-slate-200';
+            };
+
+            const renderClassBadges = (student) => {
+              const classList = getUniqueClassList(student);
+
+              if (!classList.length) {
+                return <span className="inline-flex items-center justify-center px-2.5 py-1 rounded-md text-xs font-extrabold bg-slate-100 text-slate-500 border border-slate-200">-</span>;
+              }
+
+              return (
+                <div className="flex flex-col items-center gap-1">
+                  {classList.map(cls => (
+                    <span key={cls} className={`inline-flex min-w-[52px] items-center justify-center px-2.5 py-1 rounded-md border text-xs font-extrabold leading-none ${classBadgeClass(cls)}`}>
+                      {cls}
+                    </span>
+                  ))}
+                </div>
+              );
+            };
+
+            const transferGeneralPercent = getPercent(transferCounts.general);
+            const transferAcademicPercent = getPercent(transferCounts.academic);
+            const malePercent = getPercent(genderCounts.male);
+            const femalePercent = getPercent(genderCounts.female);
+            const trackEntries = Object.entries(trackCounts).sort((a, b) => b[1] - a[1]);
+
+            const trackColorMap = {
+              '사범계': 'bg-blue-500',
+              '자연계': 'bg-teal-500',
+              '인문계': 'bg-fuchsia-500',
+              '의약계': 'bg-emerald-500',
+              '예체능': 'bg-purple-500',
+              '미지정': 'bg-slate-300'
+            };
+
+            const pageNumbers = Array.from({ length: totalPages }, (_, index) => index + 1)
+              .filter(page => page === 1 || page === totalPages || Math.abs(page - safeCurrentPage) <= 2)
+              .slice(0, 7);
+
+            return (
+             <div className="max-w-[1540px] mx-auto animate-in fade-in duration-300">
+               <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
+                 <div>
+                   <div className="flex items-center gap-2">
+                     <h1 className="text-3xl font-extrabold text-slate-950 tracking-tight">학생 관리</h1>
+                     <div className="w-7 h-7 rounded-lg bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-600">
+                       <CheckCircle2 size={17} />
+                     </div>
+                   </div>
+                   <p className="mt-1.5 text-sm font-medium text-slate-500">등록된 학생 정보를 조회하고 관리할 수 있습니다.</p>
+                 </div>
+
+                 <div className="flex flex-wrap items-center justify-end gap-3">
+                   <button
+                     type="button"
+                     onClick={() => saveDirtyStudentsToFirebase('class')}
+                     className={`h-11 px-5 rounded-xl border text-sm font-extrabold flex items-center gap-2 transition-all ${
+                       manualSaveStatus === 'dirty'
+                         ? 'bg-orange-50 text-orange-600 border-orange-200'
+                         : 'bg-white text-slate-500 border-slate-200'
+                     }`}
+                   >
+                     <CheckCircle2 size={16} />
+                     {manualSaveStatus === 'dirty' ? '변경사항 있음' : '저장 대기'}
+                   </button>
+                   <button onClick={handleExportStudentsExcel} className="h-11 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 px-5 rounded-xl font-extrabold flex items-center gap-2 transition-colors shadow-sm">
+                     <DownloadCloud size={18}/>명단 다운로드
+                   </button>
+                   <button onClick={() => setShowAddModal(true)} className="h-11 bg-white border border-slate-200 text-slate-700 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200 px-5 rounded-xl font-extrabold flex items-center gap-2 transition-colors shadow-sm">
+                     <UserPlus size={18}/>수기 등록
+                   </button>
+                   <button onClick={() => openImportModal('student')} className="h-11 bg-blue-600 hover:bg-blue-700 text-white px-5 rounded-xl font-extrabold flex items-center gap-2 transition-colors shadow-sm shadow-blue-200">
+                     <FileSpreadsheet size={18}/>신상정보 엑셀 파일
+                   </button>
                  </div>
                </div>
-               <div className="bg-white rounded-2xl shadow-sm border border-slate-100 flex flex-col overflow-hidden">
-                 <div className="p-5 border-b border-slate-100 flex flex-wrap justify-between items-center gap-4 bg-slate-50/50">
-                  <div className="flex items-center gap-3 w-full md:w-auto">
-                    <div className="relative flex-1 md:w-64">
-                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 w-5 h-5" />
-                      <input type="text" placeholder="이름, 학번, 연락처 검색..." className="w-full pl-10 pr-4 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all bg-white" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+
+               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-4">
+                 <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4 flex items-center gap-4">
+                   <div className="w-12 h-12 rounded-full bg-blue-600 text-white flex items-center justify-center shadow-lg shadow-blue-100">
+                     <Users size={24} />
+                   </div>
+                   <div>
+                     <p className="text-sm font-extrabold text-slate-700">전체 학생 수</p>
+                     <p className="mt-1 text-3xl font-black text-slate-950">{studentTotal}<span className="ml-1 text-base font-extrabold">명</span></p>
+                     <p className="mt-1 text-xs font-bold text-slate-400">현재 기준 등록 학생</p>
+                   </div>
+                 </div>
+
+                 <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4 flex items-center justify-between gap-4">
+                   <div className="flex items-center gap-4">
+                     <div className="w-12 h-12 rounded-full bg-pink-50 text-pink-500 flex items-center justify-center">
+                       <Users size={24} />
+                     </div>
+                     <div>
+                       <p className="text-sm font-extrabold text-slate-700">남 / 여 비율</p>
+                       <p className="mt-1 text-2xl font-black text-slate-950">{malePercent}% / {femalePercent}%</p>
+                       <p className="mt-1 text-xs font-bold text-slate-400">남 {genderCounts.male}명 · 여 {genderCounts.female}명</p>
+                     </div>
+                   </div>
+                   <div
+                     className="w-16 h-16 rounded-full relative shrink-0"
+                     style={{ background: `conic-gradient(#2563eb 0 ${malePercent}%, #ec4899 ${malePercent}% ${malePercent + femalePercent}%, #e2e8f0 ${malePercent + femalePercent}% 100%)` }}
+                   >
+                     <div className="absolute inset-3 rounded-full bg-white"></div>
+                   </div>
+                 </div>
+
+                 <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4">
+                   <div className="flex items-center gap-3 mb-3">
+                     <div className="w-11 h-11 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center">
+                       <BarChart3 size={23} />
+                     </div>
+                     <div>
+                       <p className="text-sm font-extrabold text-slate-700">편입구분 분포</p>
+                       <div className="mt-1 flex flex-wrap gap-3 text-xs font-bold text-slate-500">
+                         <span><span className="inline-block w-2 h-2 rounded-full bg-blue-600 mr-1"></span>일반 {transferGeneralPercent}%</span>
+                         <span><span className="inline-block w-2 h-2 rounded-full bg-violet-500 mr-1"></span>학사 {transferAcademicPercent}%</span>
+                       </div>
+                     </div>
+                   </div>
+                   <div className="h-3 bg-slate-100 rounded-full overflow-hidden flex">
+                     <div className="h-full bg-blue-600" style={{ width: `${transferGeneralPercent}%` }}></div>
+                     <div className="h-full bg-violet-500" style={{ width: `${transferAcademicPercent}%` }}></div>
+                   </div>
+                 </div>
+
+                 <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4">
+                   <div className="flex items-center gap-3 mb-3">
+                     <div className="w-11 h-11 rounded-full bg-teal-50 text-teal-600 flex items-center justify-center">
+                       <LayoutList size={23} />
+                     </div>
+                     <div>
+                       <p className="text-sm font-extrabold text-slate-700">계열 분포</p>
+                       <div className="mt-1 flex flex-wrap gap-3 text-xs font-bold text-slate-500">
+                         {trackEntries.slice(0, 3).map(([track, count]) => (
+                           <span key={track}><span className={`inline-block w-2 h-2 rounded-full mr-1 ${trackColorMap[track] || 'bg-slate-300'}`}></span>{track} {getPercent(count)}%</span>
+                         ))}
+                       </div>
+                     </div>
+                   </div>
+                   <div className="h-3 bg-slate-100 rounded-full overflow-hidden flex">
+                     {trackEntries.map(([track, count]) => (
+                       <div key={track} className={`h-full ${trackColorMap[track] || 'bg-slate-300'}`} style={{ width: `${getPercent(count)}%` }}></div>
+                     ))}
+                   </div>
+                 </div>
+               </div>
+
+               <div className="grid grid-cols-1 xl:grid-cols-[1fr_330px] gap-4">
+                 <div className="bg-white rounded-2xl shadow-sm border border-slate-100 flex flex-col overflow-hidden">
+                   <div className="p-4 border-b border-slate-100 bg-white">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="relative flex-1 min-w-[280px] max-w-[420px]">
+                        <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 w-5 h-5" />
+                        <input type="text" placeholder="이름, 아이디, 연락처로 검색하세요" className="w-full pl-12 pr-4 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white text-sm font-semibold" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <select value={studentClassFilter} onChange={(e) => setStudentClassFilter(e.target.value)} className="h-10 px-4 rounded-xl border border-slate-200 bg-white text-sm font-extrabold text-slate-700 outline-none">
+                          <option value="전체">수강반 전체</option>
+                          {classes.map(cls => <option key={cls} value={cls}>{cls}</option>)}
+                        </select>
+                        <select value={studentTrackFilter} onChange={(e) => setStudentTrackFilter(e.target.value)} className="h-10 px-4 rounded-xl border border-slate-200 bg-white text-sm font-extrabold text-slate-700 outline-none">
+                          <option value="전체">계열 전체</option>
+                          <option value="인문계">인문계</option>
+                          <option value="자연계">자연계</option>
+                          <option value="사범계">사범계</option>
+                          <option value="의약계">의약계</option>
+                          <option value="예체능">예체능</option>
+                        </select>
+                        <select value={studentTransferFilter} onChange={(e) => setStudentTransferFilter(e.target.value)} className="h-10 px-4 rounded-xl border border-slate-200 bg-white text-sm font-extrabold text-slate-700 outline-none">
+                          <option value="전체">편입구분 전체</option>
+                          <option value="일반">일반</option>
+                          <option value="학사">학사</option>
+                        </select>
+                        <select value={studentGenderFilter} onChange={(e) => setStudentGenderFilter(e.target.value)} className="h-10 px-4 rounded-xl border border-slate-200 bg-white text-sm font-extrabold text-slate-700 outline-none">
+                          <option value="전체">성별 전체</option>
+                          <option value="남">남</option>
+                          <option value="여">여</option>
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSearchTerm('');
+                            setStudentClassFilter('전체');
+                            setStudentTrackFilter('전체');
+                            setStudentTransferFilter('전체');
+                            setStudentGenderFilter('전체');
+                          }}
+                          className="h-10 px-4 rounded-xl border border-slate-200 bg-white text-sm font-extrabold text-slate-700 hover:bg-slate-50 flex items-center gap-2"
+                        >
+                          <Settings size={15} />필터 초기화
+                        </button>
+                      </div>
                     </div>
                   </div>
-                  <div className="text-sm font-bold text-slate-500">총 <span className="text-indigo-600">{filteredStudents.length}</span> 명</div>
-                </div>
-                 <div className="overflow-x-auto">
-                   <table className="w-full text-center text-sm whitespace-nowrap">
-                     <thead className="bg-slate-100 text-slate-600 font-bold border-b border-slate-200">
-                       <tr>
-                         <th className="px-4 py-3">NO</th>
-                         <th className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors" onClick={() => handleSort('name')}>
-                            <div className="flex items-center justify-center gap-1">학생명 {sortKey === 'name' ? (sortOrder === 'asc' ? <ArrowDownAZ size={14}/> : <ArrowUpZA size={14}/>) : <ArrowDownAZ size={14} className="opacity-30"/>}</div>
-                         </th>
-                         <th className="px-4 py-3">아이디/수험번호</th>
-                         <th className="px-4 py-3">수강반</th>
-                         <th className="px-4 py-3">연락처</th>
-                         <th className="px-4 py-3">성별</th>
-                         <th className="px-4 py-3">편입구분</th>
-                         <th className="px-4 py-3">계열</th>
-                         <th className="px-4 py-3 text-rose-500">관리</th>
-                       </tr>
-                     </thead>
-                     <tbody className="divide-y divide-slate-100">
-                       {filteredStudents.map((student, index) => (
-                           <tr key={student.id} className="hover:bg-indigo-50/40 transition-colors group cursor-pointer" onClick={() => setViewingProfileId(student.id)}>
-                             <td className="px-4 py-3 text-slate-400 font-medium">{index + 1}</td>
-                             <td className="px-4 py-3 font-bold text-slate-900 group-hover:text-indigo-600">{student.name}</td>
-                             <td className="px-4 py-3 font-mono text-slate-600">
-                              <div className="font-bold text-slate-700">{student.userId || '-'}</div>
-                              <div className="text-[11px] text-slate-400">{student.id || '-'}</div>
-                            </td>
-                            <td className="px-4 py-3 font-bold text-indigo-600">
-                              <div className="flex flex-col items-center gap-1">
-                                {[...new Set([
-                                  ...(Array.isArray(student.classNames) ? student.classNames : []),
-                                  ...(Array.isArray(student.classes) ? student.classes : []),
-                                  student.className
-                                ].filter(Boolean))]
-                                  .sort((a, b) => a.localeCompare(b, 'ko'))
-                                  .map(cls => (
-                                    <div key={cls} className="leading-tight">
-                                      {cls}
-                                    </div>
-                                  ))}
-                              </div>
-                            </td>
-                            <td className="px-4 py-3 text-slate-600">{student.contact || '-'}</td>
-                            <td className="px-4 py-3 text-slate-600">{student.gender || '-'}</td>
-                             <td className="px-4 py-3"><span className="bg-slate-100 text-slate-600 px-2 py-1 rounded text-xs font-bold">{student.transferType || '-'}</span></td>
-                             <td className="px-4 py-3">
-                               <span className={`px-2 py-1 rounded text-xs font-bold ${
-                                 student.targetTrack === '인문계'
-                                   ? 'bg-rose-50 text-rose-600'
-                                   : 'bg-blue-50 text-blue-600'
-                               }`}>
-                                 {student.targetTrack || '-'}
-                               </span>
-                             </td>
-                             <td className="px-4 py-3">
-                               <button onClick={(e) => handleDeleteStudent(e, student.id, student.name)} className="p-1.5 bg-rose-50 text-rose-500 rounded hover:bg-rose-500 hover:text-white transition-colors">
-                                 <Trash2 size={16} />
-                               </button>
-                             </td>
-                           </tr>
-                         ))}
-                     </tbody>
-                   </table>
+
+                   <div className="overflow-x-auto">
+                     <table className="w-full text-center text-sm whitespace-nowrap">
+                       <thead className="bg-slate-50 text-slate-600 font-extrabold border-b border-slate-200">
+                         <tr>
+                           <th className="px-4 py-3 w-10">
+                             <input type="checkbox" className="w-4 h-4 rounded border-slate-300" />
+                           </th>
+                           <th className="px-4 py-3">NO</th>
+                           <th className="px-4 py-3 cursor-pointer hover:bg-slate-100 transition-colors" onClick={() => handleSort('name')}>
+                              <div className="flex items-center justify-center gap-1">학생명 {sortKey === 'name' ? (sortOrder === 'asc' ? <ArrowDownAZ size={14}/> : <ArrowUpZA size={14}/>) : <ArrowDownAZ size={14} className="opacity-30"/>}</div>
+                           </th>
+                           <th className="px-4 py-3">아이디 / 수험번호</th>
+                           <th className="px-4 py-3">수강반</th>
+                           <th className="px-4 py-3">연락처</th>
+                           <th className="px-4 py-3">성별</th>
+                           <th className="px-4 py-3">편입구분</th>
+                           <th className="px-4 py-3">계열</th>
+                           <th className="px-4 py-3 text-rose-500">관리</th>
+                         </tr>
+                       </thead>
+                       <tbody className="divide-y divide-slate-100">
+                         {paginatedStudents.map((student, index) => (
+                             <tr key={student.id} className="hover:bg-blue-50/40 transition-colors group cursor-pointer" onClick={() => setViewingProfileId(student.id)}>
+                               <td className="px-4 py-2.5" onClick={(e) => e.stopPropagation()}>
+                                 <input type="checkbox" className="w-4 h-4 rounded border-slate-300" />
+                               </td>
+                               <td className="px-4 py-2.5 text-slate-400 font-bold">{startIndex + index + 1}</td>
+                               <td className="px-4 py-2.5 font-extrabold text-slate-900 group-hover:text-blue-600">{student.name}</td>
+                               <td className="px-4 py-2.5 font-mono text-slate-600">
+                                <div className="font-extrabold text-slate-700">{student.userId || '-'}</div>
+                                <div className="text-[11px] text-slate-400">{student.id || '-'}</div>
+                              </td>
+                              <td className="px-4 py-2.5">
+                                {renderClassBadges(student)}
+                              </td>
+                              <td className="px-4 py-2.5 text-slate-700 font-medium">{student.contact || '-'}</td>
+                              <td className="px-4 py-2.5">
+                                <span className={`inline-flex items-center justify-center min-w-[34px] px-2.5 py-1 rounded-md border text-xs font-extrabold ${genderBadgeClass(student.gender)}`}>
+                                  {student.gender || '-'}
+                                </span>
+                              </td>
+                               <td className="px-4 py-2.5">
+                                 <span className={`inline-flex items-center justify-center min-w-[46px] px-2.5 py-1 rounded-md border text-xs font-extrabold ${transferBadgeClass(student.transferType)}`}>
+                                   {student.transferType || '-'}
+                                 </span>
+                               </td>
+                               <td className="px-4 py-2.5">
+                                 <span className={`inline-flex items-center justify-center min-w-[54px] px-2.5 py-1 rounded-md border text-xs font-extrabold ${trackBadgeClass(student.targetTrack)}`}>
+                                   {student.targetTrack || '-'}
+                                 </span>
+                               </td>
+                               <td className="px-4 py-2.5">
+                                 <button onClick={(e) => handleDeleteStudent(e, student.id, student.name)} className="p-1.5 bg-rose-50 text-rose-500 rounded-lg hover:bg-rose-500 hover:text-white transition-colors">
+                                   <Trash2 size={16} />
+                                 </button>
+                               </td>
+                             </tr>
+                           ))}
+                       </tbody>
+                     </table>
+                   </div>
+
+                   <div className="px-5 py-3 border-t border-slate-100 bg-white flex flex-wrap items-center justify-between gap-3">
+                     <div className="text-sm font-bold text-slate-500">전체 <span className="text-blue-600">{filteredTotal}</span>명</div>
+                     <div className="flex items-center gap-2">
+                       <button
+                         type="button"
+                         disabled={safeCurrentPage <= 1}
+                         onClick={() => setStudentCurrentPage(prev => Math.max(1, prev - 1))}
+                         className={`w-9 h-9 rounded-lg border border-slate-200 flex items-center justify-center ${safeCurrentPage <= 1 ? 'text-slate-300 bg-slate-50' : 'text-slate-500 hover:bg-slate-50'}`}
+                       >
+                         <ChevronLeft size={16}/>
+                       </button>
+
+                       {pageNumbers.map(page => (
+                         <button
+                           key={page}
+                           type="button"
+                           onClick={() => setStudentCurrentPage(page)}
+                           className={`w-9 h-9 rounded-lg font-extrabold ${
+                             safeCurrentPage === page
+                               ? 'bg-blue-600 text-white shadow-sm'
+                               : 'text-slate-600 hover:bg-slate-50'
+                           }`}
+                         >
+                           {page}
+                         </button>
+                       ))}
+
+                       <button
+                         type="button"
+                         disabled={safeCurrentPage >= totalPages}
+                         onClick={() => setStudentCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                         className={`w-9 h-9 rounded-lg border border-slate-200 flex items-center justify-center ${safeCurrentPage >= totalPages ? 'text-slate-300 bg-slate-50' : 'text-slate-500 hover:bg-slate-50'}`}
+                       >
+                         <ChevronRight size={16}/>
+                       </button>
+                     </div>
+                     <select
+                       value={studentsPerPage}
+                       onChange={(e) => {
+                         setStudentsPerPage(Number(e.target.value));
+                         setStudentCurrentPage(1);
+                       }}
+                       className="h-10 px-4 rounded-xl border border-slate-200 bg-white text-sm font-extrabold text-slate-700 outline-none"
+                     >
+                       <option value={10}>10개씩 보기</option>
+                       <option value={20}>20개씩 보기</option>
+                       <option value={50}>50개씩 보기</option>
+                     </select>
+                   </div>
+                 </div>
+
+                 <div className="space-y-3">
+                   <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4">
+                     <div className="flex items-center justify-between mb-3">
+                       <h3 className="font-extrabold text-slate-900">최근 변경 내역</h3>
+                       <span className="text-xs font-extrabold text-slate-400">실시간 상태</span>
+                     </div>
+                     <div className="space-y-3">
+                       {recentItems.length > 0 ? recentItems.map((item, index) => (
+                         <div key={index} className="flex items-center justify-between gap-3 text-sm">
+                           <div className="flex items-center gap-2 min-w-0">
+                             <span className={`w-2 h-2 rounded-full shrink-0 ${item.color}`}></span>
+                             <span className="font-bold text-slate-600 truncate">{item.label}</span>
+                           </div>
+                           <span className="text-xs font-bold text-slate-400 shrink-0">{item.time}</span>
+                         </div>
+                       )) : (
+                         <div className="text-sm font-bold text-slate-400 py-2">최근 변경 내역 없음</div>
+                       )}
+                     </div>
+                   </div>
+
+                   <div className="bg-rose-50/70 rounded-2xl border border-rose-100 shadow-sm p-4">
+                     <div className="flex items-center justify-between mb-3">
+                       <h3 className="font-extrabold text-rose-600">관리 필요 학생</h3>
+                       <span className="text-xs font-extrabold text-slate-500">전체 {totalNeedCount}건</span>
+                     </div>
+                     <div className="space-y-2.5">
+                       <div className="flex items-center justify-between text-sm">
+                         <span className="flex items-center gap-2 font-bold text-slate-700"><Phone size={16} className="text-rose-500"/>연락처 미등록</span>
+                         <span className="font-black text-slate-900">{managementNeeds.contact}명</span>
+                       </div>
+                       <div className="flex items-center justify-between text-sm">
+                         <span className="flex items-center gap-2 font-bold text-slate-700"><Phone size={16} className="text-pink-500"/>부모님 연락처 미등록</span>
+                         <span className="font-black text-slate-900">{managementNeeds.parentContact}명</span>
+                       </div>
+                       <div className="flex items-center justify-between text-sm">
+                         <span className="flex items-center gap-2 font-bold text-slate-700"><Bookmark size={16} className="text-violet-500"/>편입구분 미지정</span>
+                         <span className="font-black text-slate-900">{managementNeeds.transfer}명</span>
+                       </div>
+                       <div className="flex items-center justify-between text-sm">
+                         <span className="flex items-center gap-2 font-bold text-slate-700"><AlertTriangle size={16} className="text-orange-500"/>계열 미지정</span>
+                         <span className="font-black text-slate-900">{managementNeeds.track}명</span>
+                       </div>
+                     </div>
+                   </div>
+
+                   <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4">
+                     <h3 className="font-extrabold text-slate-900 mb-3">편입구분 분포</h3>
+                     <div className="flex items-center gap-5">
+                       <div
+                         className="w-20 h-20 rounded-full relative shrink-0"
+                         style={{ background: `conic-gradient(#2563eb 0 ${transferGeneralPercent}%, #a855f7 ${transferGeneralPercent}% ${transferGeneralPercent + transferAcademicPercent}%, #e2e8f0 ${transferGeneralPercent + transferAcademicPercent}% 100%)` }}
+                       >
+                         <div className="absolute inset-4 rounded-full bg-white flex items-center justify-center text-sm font-black text-slate-900">{studentTotal}</div>
+                       </div>
+                       <div className="flex-1 space-y-2 text-sm">
+                         <div className="flex items-center justify-between">
+                           <span className="font-bold text-slate-600"><span className="inline-block w-2 h-2 rounded-full bg-blue-600 mr-2"></span>일반</span>
+                           <span className="font-extrabold text-slate-900">{transferGeneralPercent}% ({transferCounts.general}명)</span>
+                         </div>
+                         <div className="flex items-center justify-between">
+                           <span className="font-bold text-slate-600"><span className="inline-block w-2 h-2 rounded-full bg-violet-500 mr-2"></span>학사</span>
+                           <span className="font-extrabold text-slate-900">{transferAcademicPercent}% ({transferCounts.academic}명)</span>
+                         </div>
+                       </div>
+                     </div>
+                   </div>
+
+                   <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4">
+                     <h3 className="font-extrabold text-slate-900 mb-3">오늘 요약</h3>
+                     <div className="grid grid-cols-2 gap-3">
+                       <div className="rounded-xl border border-emerald-100 bg-emerald-50/60 p-3">
+                         <div className="flex items-center gap-2 text-emerald-600 font-extrabold text-xs"><Users size={16}/>표시 학생</div>
+                         <div className="mt-2 text-xl font-black text-slate-900">{filteredTotal}명</div>
+                       </div>
+                       <div className="rounded-xl border border-blue-100 bg-blue-50/60 p-3">
+                         <div className="flex items-center gap-2 text-blue-600 font-extrabold text-xs"><PenTool size={16}/>저장 대기</div>
+                         <div className="mt-2 text-xl font-black text-slate-900">{dirtyStudentIds.size}건</div>
+                       </div>
+                       <div className="rounded-xl border border-violet-100 bg-violet-50/60 p-3">
+                         <div className="flex items-center gap-2 text-violet-600 font-extrabold text-xs"><Users size={16}/>전체 학생</div>
+                         <div className="mt-2 text-xl font-black text-slate-900">{studentTotal}명</div>
+                       </div>
+                       <div className="rounded-xl border border-rose-100 bg-rose-50/60 p-3">
+                         <div className="flex items-center gap-2 text-rose-600 font-extrabold text-xs"><AlertTriangle size={16}/>관리 필요</div>
+                         <div className="mt-2 text-xl font-black text-slate-900">{totalNeedCount}건</div>
+                       </div>
+                     </div>
+                   </div>
                  </div>
                </div>
              </div>
-          )}
-
+            );
+          })()}
           {/* [2] 31일 출결 캘린더 */}
-          {activeTab === 'attendance' && activeAttendanceTab === 'calendar' && (
+          {activeTab === 'attendance' && activeAttendanceTab === 'calendar' && (() => {
+            const attendanceMonthNumber = Number(String(attendanceMonth).replace('월', '')) || 1;
+            const attendanceMonthPeriod = `${academicYear}.${String(attendanceMonthNumber).padStart(2, '0')}.01 ~ ${academicYear}.${String(attendanceMonthNumber).padStart(2, '0')}.31`;
+            const excludedDays = attendanceSettings[attendanceMonth]?.excludedDays || [];
+            const attendanceLegendItems = [
+              { label: '출석', dot: 'bg-emerald-500' },
+              { label: '결석', dot: 'bg-rose-500' },
+              { label: '지각', dot: 'bg-amber-500' },
+              { label: '조퇴', dot: 'bg-violet-500' },
+              { label: '사전통보', dot: 'bg-blue-500' },
+              { label: '미등원', dot: 'bg-slate-400' },
+              { label: '공휴일', dot: 'bg-slate-300' },
+              { label: '시험/행사', dot: 'bg-purple-500' }
+            ];
+            const getDayLabel = (dayIndex) => {
+              const day = new Date(Number(academicYear), attendanceMonthNumber - 1, dayIndex + 1).getDay();
+              return ['일', '월', '화', '수', '목', '금', '토'][day];
+            };
+            const getDayHeaderClass = (dayIndex) => {
+              const day = new Date(Number(academicYear), attendanceMonthNumber - 1, dayIndex + 1).getDay();
+              const isExcluded = excludedDays.includes(dayIndex);
+              if (isExcluded || day === 0) return 'bg-rose-50 text-rose-500';
+              if (day === 6) return 'bg-blue-50 text-blue-600';
+              return 'bg-white text-slate-700';
+            };
+            const getAttendanceSelectClass = (value, isExcluded) => {
+              if (isExcluded) return 'bg-slate-50 text-slate-300 cursor-not-allowed border-slate-100';
+              if (value === '출석' || value === 'Live') return 'bg-emerald-50 text-emerald-700 border-emerald-100';
+              if (value === '결석') return 'bg-rose-50 text-rose-600 border-rose-100 font-black';
+              if (value === '지각') return 'bg-amber-50 text-amber-600 border-amber-100';
+              if (value === '조퇴') return 'bg-violet-50 text-violet-600 border-violet-100';
+              if (value === '사전통보') return 'bg-blue-50 text-blue-600 border-blue-100';
+              if (value) return 'bg-slate-50 text-slate-600 border-slate-100';
+              return 'bg-white text-slate-400 border-slate-100 hover:bg-slate-50';
+            };
+            const getAttendanceRateClass = (rate) => {
+              const num = Number(String(rate).replace('%', '')) || 0;
+              if (num >= 90) return 'text-emerald-600 bg-emerald-50';
+              if (num >= 80) return 'text-orange-600 bg-orange-50';
+              return 'text-rose-600 bg-rose-50';
+            };
+
+            return (
             <div className="max-w-[1600px] mx-auto animate-in fade-in duration-300">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-4 border-l-4 border-l-emerald-500">
+              <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-4 mb-5">
                 <div>
-                  <h1 className="text-2xl font-extrabold text-slate-900 flex items-center gap-2"><CalendarCheck className="text-emerald-500" size={24} />31일 출결 관리</h1>
-                  <p className="text-slate-500 text-sm mt-1">출석확인을 기록하면 개인별/반 평균 출석률과 벌점이 자동 계산됩니다.</p>
+                  <h1 className="text-3xl font-black text-slate-950 tracking-tight flex items-center gap-3">
+                    <span className="w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center shadow-lg shadow-blue-500/20">
+                      <CalendarCheck size={23} />
+                    </span>
+                    출석 관리
+                  </h1>
+                  <p className="text-slate-500 text-sm font-bold mt-2">학생별 출석 현황을 확인하고 관리하세요.</p>
                 </div>
-                <div className="flex items-center gap-6">
-                  <select className="border border-emerald-200 rounded-xl px-4 py-2.5 text-sm font-bold text-emerald-700 outline-none bg-emerald-50 shadow-sm mr-4" value={attendanceMonth} onChange={(e) => setAttendanceMonth(e.target.value)}>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <select
+                    className="border border-blue-100 rounded-2xl px-4 py-2.5 text-sm font-black text-blue-700 outline-none bg-white shadow-sm"
+                    value={attendanceMonth}
+                    onChange={(e) => setAttendanceMonth(e.target.value)}
+                  >
                     {MONTHS.map(m => <option key={m} value={m}>{m}</option>)}
                   </select>
-                  <div className="text-right">
-                    <div className="text-xs text-slate-500 font-bold mb-1">{className} 평균 출석률</div>
-                    <div className="text-2xl font-extrabold text-emerald-600">{classAvgAttendance}%</div>
-                  </div>
-                  <div className="h-10 w-px bg-slate-200"></div>
-                  <button onClick={handleExportAttendanceExcel} className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 transition-colors shadow-sm"><DownloadCloud size={18} />출결 다운로드</button>
 
-                  <button
-                    type="button"
-                    onClick={() => downloadAttendanceDailyTemplate('attendance')}
-                    className="bg-white hover:bg-emerald-50 text-emerald-700 px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 border border-emerald-200 transition-colors shadow-sm"
-                  >
-                    <FileSpreadsheet size={18} />
-                    출석/Daily 양식
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => attendanceDailyExcelInputRef.current?.click()}
-                    className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 border border-emerald-200 transition-colors shadow-sm"
-                  >
-                    <UploadCloud size={18} />
-                    출석/Daily 업로드
-                  </button>
-
-                  <input
-                    ref={attendanceDailyExcelInputRef}
-                    type="file"
-                    accept=".xlsx,.xls"
-                    className="hidden"
-                    onChange={(event) => handleAttendanceDailyExcelUpload(event, 'attendance')}
-                  />
-
-                  <div className="bg-emerald-50 text-emerald-700 px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 border border-emerald-100"><CheckCircle2 size={18} />화면 반영 후 저장</div>
-                </div>
-              </div>
-
-              <div className="mb-4 bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
-                <div className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2"><Calendar size={18} className="text-rose-500"/> 🚫 미등원 일자 (휴원 및 공휴일) 설정</div>
-                <div className="flex flex-wrap gap-2">
-                    {Array.from({length:31}, (_, i) => {
-                        const isExcluded = attendanceSettings[attendanceMonth].excludedDays.includes(i);
-                        return (
-                            <button key={i} onClick={() => toggleAttendanceExcluded(attendanceMonth, i)}
-                                className={`w-9 h-9 rounded-xl text-xs font-bold transition-colors ${isExcluded ? 'bg-rose-500 text-white shadow-inner' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>
-                                {i+1}
-                            </button>
-                        )
-                    })}
-                </div>
-                <p className="text-[11px] font-bold text-slate-400 mt-3">※ 빨간색으로 선택된 일자는 출석부에서 비활성화되며 <span className="text-rose-500">출석률 및 벌점 계산에서 완전히 제외</span>됩니다.</p>
-              </div>
-
-              {/* 출결 일괄 처리 영역 */}
-              <div className="mb-4 bg-emerald-50/50 p-4 rounded-2xl shadow-sm border border-emerald-100">
-                <div className="text-sm font-bold text-emerald-800 mb-3 flex items-center gap-2"><CheckCircle2 size={18} className="text-emerald-500"/> 👥 선택 학생 일괄 출결 처리 (현재 {selectedStudents.length}명 선택됨)</div>
-                <div className="flex flex-wrap items-center gap-3">
-                  <select className="border border-emerald-200 rounded-lg px-3 py-2 outline-none text-sm font-bold text-slate-700 bg-white" value={batchAttendanceDate} onChange={e => setBatchAttendanceDate(e.target.value)}>
-                    {Array.from({length: 31}, (_, i) => <option key={i} value={i}>{i+1}일</option>)}
-                  </select>
-                  <div className="bg-white border border-emerald-200 rounded-lg px-3 py-2 text-sm font-bold text-emerald-700">
-                    {ATTENDANCE_SESSION_LABEL}
-                  </div>
-                  <select className="border border-emerald-200 rounded-lg px-3 py-2 outline-none text-sm font-bold text-slate-700 bg-white" value={batchAttendanceStatus} onChange={e => setBatchAttendanceStatus(e.target.value)}>
-                    <option value="">출결 사유 선택</option>
-                    {ATTENDANCE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                  </select>
-                  <button onClick={handleBatchAttendanceChange} className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-bold transition-colors shadow-sm disabled:opacity-50" disabled={selectedStudents.length === 0}>
-                    일괄 적용
-                  </button>
-                  <button onClick={() => handleResetAttendance(false)} className="bg-rose-100 hover:bg-rose-200 text-rose-600 px-3 py-2 rounded-lg text-sm font-bold transition-colors shadow-sm disabled:opacity-50 ml-2" disabled={selectedStudents.length === 0}>
-                    선택일자 삭제
-                  </button>
-                  <button onClick={() => handleResetAttendance(true)} className="bg-rose-600 hover:bg-rose-700 text-white px-3 py-2 rounded-lg text-sm font-bold transition-colors shadow-sm disabled:opacity-50" disabled={selectedStudents.length === 0}>
-                    월 전체 삭제
-                  </button>
-                  <button onClick={() => handleSelectAllStudents(selectedStudents.length !== filteredStudents.length)} className="ml-auto text-sm font-bold text-emerald-700 hover:text-emerald-800 underline">
-                    {selectedStudents.length === filteredStudents.length ? '전체 해제' : '전체 선택'}
-                  </button>
-                </div>
-              </div>
-
-              <div className="mb-4 bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
-                <div className="flex justify-between items-center mb-3">
-                    <div className="text-sm font-bold text-slate-700 flex items-center gap-2"><AlertTriangle size={18} className="text-amber-500"/> ⚠️ 벌점 기준 설정</div>
-                    <div className="flex items-center gap-2 text-xs font-bold text-slate-600">
-                        최대 벌점 기준: <input type="number" className="w-16 border border-slate-300 rounded px-2 py-1 outline-none text-center focus:ring-2 focus:ring-indigo-400" value={penaltyRules.maxPenalty} onChange={e => setPenaltyRules(p => ({...p, maxPenalty: Number(e.target.value)}))} /> 점
+                  {manualSaveStatus === 'dirty' && (
+                    <div className="bg-orange-50 text-orange-600 px-4 py-2.5 rounded-2xl text-sm font-black flex items-center gap-2 border border-orange-100 shadow-sm">
+                      <AlertTriangle size={17} />
+                      변경사항 있음
                     </div>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                    {ATTENDANCE_OPTIONS.map(opt => (
-                        <div key={opt} className="flex items-center gap-2 text-[11px] bg-slate-50 border border-slate-200 p-2 rounded-lg">
-                            <input type="checkbox" checked={penaltyRules.rules[opt]?.apply} onChange={(e) => handlePenaltyRuleChange(opt, 'apply', e.target.checked)} className="cursor-pointer" />
-                            <span className="font-bold text-slate-600 w-12 text-center">{opt}</span>
-                            <input type="number" disabled={!penaltyRules.rules[opt]?.apply} className="w-10 border border-slate-300 rounded px-1 py-0.5 text-center outline-none focus:ring-1 focus:ring-indigo-400 disabled:bg-slate-100 disabled:text-slate-300" value={penaltyRules.rules[opt]?.score} onChange={e => handlePenaltyRuleChange(opt, 'score', Number(e.target.value))} />
-                        </div>
-                    ))}
+                  )}
+
+                  <div className="bg-blue-50 text-blue-700 px-4 py-2.5 rounded-2xl text-sm font-black flex items-center gap-2 border border-blue-100 shadow-sm">
+                    <CheckCircle2 size={18} />
+                    화면 반영 후 저장
+                  </div>
                 </div>
               </div>
 
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
+              <div className="mb-5 rounded-[28px] border border-blue-100 bg-gradient-to-r from-blue-50 via-white to-sky-50 p-6 shadow-sm overflow-hidden relative">
+                <div className="absolute inset-0 bg-[radial-gradient(circle_at_12%_0%,rgba(59,130,246,0.14),transparent_34%),radial-gradient(circle_at_90%_10%,rgba(14,165,233,0.10),transparent_30%)] pointer-events-none" />
+                <div className="relative flex flex-col xl:flex-row xl:items-center justify-between gap-6">
+                  <div className="flex items-center gap-5">
+                    <div className="w-16 h-16 rounded-3xl bg-blue-600 text-white flex items-center justify-center shadow-lg shadow-blue-500/20">
+                      <CalendarCheck size={30} />
+                    </div>
+                    <div>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <h2 className="text-2xl font-black text-slate-900">
+                          {academicYear}년 {attendanceMonth} 출석 현황
+                        </h2>
+                        <span className="px-3 py-1 rounded-full bg-white/80 border border-blue-100 text-xs font-black text-blue-600">
+                          {className}
+                        </span>
+                      </div>
+                      <p className="text-sm font-bold text-slate-500 mt-1">
+                        {attendanceMonthPeriod} 기준
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="hidden xl:block h-16 w-px bg-blue-100" />
+
+                  <div className="min-w-[210px]">
+                    <div className="text-sm font-black text-slate-500">{className} 평균 출석률</div>
+                    <div className="flex items-end gap-2 mt-1">
+                      <span className="text-4xl font-black text-blue-600">{classAvgAttendance}%</span>
+                    </div>
+                    <div className="text-xs font-bold text-slate-400 mt-1">출석확인 기준 자동 계산</div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3 xl:justify-end">
+                    <button
+                      onClick={handleExportAttendanceExcel}
+                      className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-3 rounded-2xl text-sm font-black flex items-center gap-2 transition-colors shadow-lg shadow-blue-500/20"
+                    >
+                      <DownloadCloud size={18} />
+                      출결 다운로드
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => downloadAttendanceDailyTemplate('attendance')}
+                      className="bg-white hover:bg-blue-50 text-blue-700 px-5 py-3 rounded-2xl text-sm font-black flex items-center gap-2 border border-blue-100 transition-colors shadow-sm"
+                    >
+                      <FileSpreadsheet size={18} />
+                      출석/Daily 양식
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => attendanceDailyExcelInputRef.current?.click()}
+                      className="bg-white hover:bg-blue-50 text-blue-700 px-5 py-3 rounded-2xl text-sm font-black flex items-center gap-2 border border-blue-100 transition-colors shadow-sm"
+                    >
+                      <UploadCloud size={18} />
+                      출석/Daily 업로드
+                    </button>
+
+                    <input
+                      ref={attendanceDailyExcelInputRef}
+                      type="file"
+                      accept=".xlsx,.xls"
+                      className="hidden"
+                      onChange={(event) => handleAttendanceDailyExcelUpload(event, 'attendance')}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 xl:grid-cols-4 gap-4 mb-5">
+                <div className="rounded-[24px] border border-violet-100 bg-violet-50/50 p-5 shadow-sm min-h-[190px]">
+                  <div className="flex items-start justify-between gap-3 mb-4">
+                    <div>
+                      <div className="flex items-center gap-2 text-violet-700 font-black">
+                        <Calendar size={19} />
+                        미등원/공휴일 설정
+                      </div>
+                      <p className="text-xs font-bold text-slate-500 mt-2">특정 일자를 미등원 또는 공휴일로 설정합니다.</p>
+                    </div>
+                    <span className="px-3 py-1.5 rounded-full bg-white border border-violet-100 text-violet-700 text-xs font-black">
+                      미등원 {excludedDays.length}일
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap gap-1.5 max-h-[92px] overflow-y-auto pr-1">
+                    {Array.from({length:31}, (_, i) => {
+                      const isExcluded = excludedDays.includes(i);
+                      return (
+                        <button
+                          key={i}
+                          onClick={() => toggleAttendanceExcluded(attendanceMonth, i)}
+                          className={`w-8 h-8 rounded-xl text-xs font-black transition-colors ${
+                            isExcluded
+                              ? 'bg-violet-600 text-white shadow-inner'
+                              : 'bg-white text-slate-500 border border-violet-100 hover:bg-violet-50'
+                          }`}
+                        >
+                          {i + 1}
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  <p className="text-[11px] font-bold text-slate-400 mt-3">
+                    ※ 선택된 일자는 출석률 및 벌점 계산에서 제외됩니다.
+                  </p>
+                </div>
+
+                <div className="rounded-[24px] border border-emerald-100 bg-emerald-50/50 p-5 shadow-sm min-h-[190px]">
+                  <div className="flex items-start justify-between gap-3 mb-4">
+                    <div>
+                      <div className="flex items-center gap-2 text-emerald-700 font-black">
+                        <Users size={19} />
+                        선택 학생 일괄 처리
+                      </div>
+                      <p className="text-xs font-bold text-slate-500 mt-2">선택한 학생의 출결을 한 번에 변경합니다.</p>
+                    </div>
+                    <span className="px-3 py-1.5 rounded-full bg-white border border-emerald-100 text-emerald-700 text-xs font-black">
+                      {selectedStudents.length}명 선택됨
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      className="border border-emerald-100 rounded-xl px-3 py-2 outline-none text-xs font-black text-slate-700 bg-white"
+                      value={batchAttendanceDate}
+                      onChange={e => setBatchAttendanceDate(e.target.value)}
+                    >
+                      {Array.from({length: 31}, (_, i) => <option key={i} value={i}>{i+1}일</option>)}
+                    </select>
+
+                    <div className="bg-white border border-emerald-100 rounded-xl px-3 py-2 text-xs font-black text-emerald-700">
+                      {ATTENDANCE_SESSION_LABEL}
+                    </div>
+
+                    <select
+                      className="border border-emerald-100 rounded-xl px-3 py-2 outline-none text-xs font-black text-slate-700 bg-white"
+                      value={batchAttendanceStatus}
+                      onChange={e => setBatchAttendanceStatus(e.target.value)}
+                    >
+                      <option value="">출결 사유 선택</option>
+                      {ATTENDANCE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                    </select>
+
+                    <button
+                      onClick={handleBatchAttendanceChange}
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl text-xs font-black transition-colors shadow-sm disabled:opacity-50"
+                      disabled={selectedStudents.length === 0}
+                    >
+                      일괄 적용
+                    </button>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2 mt-3">
+                    {['출석', '결석', '지각', '조퇴', '사전통보'].map(status => (
+                      <button
+                        key={status}
+                        type="button"
+                        onClick={() => setBatchAttendanceStatus(status)}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-black border transition-colors ${
+                          batchAttendanceStatus === status
+                            ? 'bg-emerald-600 text-white border-emerald-600'
+                            : 'bg-white text-slate-600 border-emerald-100 hover:bg-emerald-50'
+                        }`}
+                      >
+                        {status}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 mt-3">
+                    <button onClick={() => handleResetAttendance(false)} className="bg-white hover:bg-rose-50 text-rose-600 px-3 py-2 rounded-xl text-xs font-black transition-colors shadow-sm border border-rose-100 disabled:opacity-50" disabled={selectedStudents.length === 0}>
+                      선택일자 삭제
+                    </button>
+                    <button onClick={() => handleResetAttendance(true)} className="bg-rose-600 hover:bg-rose-700 text-white px-3 py-2 rounded-xl text-xs font-black transition-colors shadow-sm disabled:opacity-50" disabled={selectedStudents.length === 0}>
+                      월 전체 삭제
+                    </button>
+                    <button onClick={() => handleSelectAllStudents(selectedStudents.length !== filteredStudents.length)} className="ml-auto text-xs font-black text-emerald-700 hover:text-emerald-800 underline">
+                      {selectedStudents.length === filteredStudents.length ? '전체 해제' : '전체 선택'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="rounded-[24px] border border-orange-100 bg-orange-50/50 p-5 shadow-sm min-h-[190px]">
+                  <div className="flex items-start justify-between gap-3 mb-4">
+                    <div>
+                      <div className="flex items-center gap-2 text-orange-700 font-black">
+                        <AlertTriangle size={19} />
+                        벌점 기준
+                      </div>
+                      <p className="text-xs font-bold text-slate-500 mt-2">출결 사유별 벌점 기준을 설정합니다.</p>
+                    </div>
+
+                    <div className="flex items-center gap-2 text-xs font-black text-slate-600 bg-white border border-orange-100 rounded-2xl px-3 py-2">
+                      최대
+                      <input
+                        type="number"
+                        className="w-14 border border-orange-100 rounded-xl px-2 py-1 outline-none text-center focus:ring-2 focus:ring-orange-200"
+                        value={penaltyRules.maxPenalty}
+                        onChange={e => setPenaltyRules(p => ({...p, maxPenalty: Number(e.target.value)}))}
+                      />
+                      점
+                    </div>
+                  </div>
+
+                  <div className="text-sm font-black text-orange-700 mb-3">
+                    설정된 항목 {ATTENDANCE_OPTIONS.filter(opt => penaltyRules.rules[opt]?.apply).length}개
+                  </div>
+
+                  <div className="flex flex-wrap gap-1.5 max-h-[124px] overflow-y-auto pr-1">
+                    {ATTENDANCE_OPTIONS.map(opt => (
+                      <div key={opt} className="flex items-center gap-1.5 text-[11px] bg-white border border-orange-100 px-2 py-1.5 rounded-xl">
+                        <input type="checkbox" checked={penaltyRules.rules[opt]?.apply} onChange={(e) => handlePenaltyRuleChange(opt, 'apply', e.target.checked)} className="cursor-pointer" />
+                        <span className="font-bold text-slate-600 min-w-[42px] text-center">{opt}</span>
+                        <input
+                          type="number"
+                          disabled={!penaltyRules.rules[opt]?.apply}
+                          className="w-9 border border-slate-200 rounded-lg px-1 py-0.5 text-center outline-none focus:ring-1 focus:ring-orange-200 disabled:bg-slate-50 disabled:text-slate-300"
+                          value={penaltyRules.rules[opt]?.score}
+                          onChange={e => handlePenaltyRuleChange(opt, 'score', Number(e.target.value))}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-[24px] border border-blue-100 bg-blue-50/50 p-5 shadow-sm min-h-[190px]">
+                  <div className="flex items-start justify-between gap-3 mb-4">
+                    <div>
+                      <div className="flex items-center gap-2 text-blue-700 font-black">
+                        <Settings size={19} />
+                        빠른 필터
+                      </div>
+                      <p className="text-xs font-bold text-slate-500 mt-2">조건을 선택해 학생을 빠르게 찾으세요.</p>
+                    </div>
+                    <span className="w-9 h-9 rounded-2xl bg-white border border-blue-100 flex items-center justify-center text-blue-600">
+                      <Search size={17} />
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    <select className="w-full bg-white border border-blue-100 rounded-xl px-3 py-2 text-xs font-black text-slate-700 outline-none">
+                      <option>전체 학생</option>
+                      <option>선택 학생</option>
+                    </select>
+                    <select className="w-full bg-white border border-blue-100 rounded-xl px-3 py-2 text-xs font-black text-slate-700 outline-none">
+                      <option>전체 상태</option>
+                      {ATTENDANCE_OPTIONS.map(opt => <option key={opt}>{opt}</option>)}
+                    </select>
+                    <select className="w-full bg-white border border-blue-100 rounded-xl px-3 py-2 text-xs font-black text-slate-700 outline-none">
+                      <option>전체 기간</option>
+                      <option>{attendanceMonth} 전체</option>
+                      <option>선택일 기준</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-[28px] shadow-sm border border-slate-200 overflow-hidden flex flex-col">
+                <div className="p-5 border-b border-slate-100 bg-white">
+                  <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 mb-4">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <div className="relative w-full sm:w-[300px]">
+                        <Search size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <input
+                          value={searchTerm}
+                          onChange={(e) => setSearchTerm(e.target.value)}
+                          placeholder="학생 이름 또는 학번 검색"
+                          className="w-full h-12 pl-11 pr-4 rounded-2xl border border-slate-200 bg-white text-sm font-bold outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-300"
+                        />
+                      </div>
+                      <select className="h-12 rounded-2xl border border-slate-200 bg-white px-4 text-sm font-black text-slate-700 outline-none">
+                        <option>전체 반</option>
+                        <option>{className}</option>
+                      </select>
+                      <select className="h-12 rounded-2xl border border-slate-200 bg-white px-4 text-sm font-black text-slate-700 outline-none">
+                        <option>전체 학생</option>
+                        <option>선택 학생</option>
+                      </select>
+                      <button type="button" className="h-12 px-4 rounded-2xl border border-slate-200 bg-white text-sm font-black text-slate-700 flex items-center gap-2 hover:bg-slate-50">
+                        {attendanceMonthPeriod}
+                        <ChevronRight size={16} />
+                      </button>
+                      <button type="button" className="h-12 px-4 rounded-2xl border border-slate-200 bg-white text-sm font-black text-slate-700 flex items-center gap-2 hover:bg-blue-50 hover:text-blue-700">
+                        <Settings size={16} />
+                        상세 필터
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSearchTerm('');
+                        handleSelectAllStudents(false);
+                      }}
+                      className="h-12 px-4 rounded-2xl border border-slate-200 bg-white text-sm font-black text-slate-600 hover:bg-slate-50"
+                    >
+                      초기화
+                    </button>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    {attendanceLegendItems.map(item => (
+                      <span key={item.label} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-slate-100 bg-slate-50 text-xs font-black text-slate-600">
+                        <span className={`w-2 h-2 rounded-full ${item.dot}`} />
+                        {item.label}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
                 <div
                   ref={attendanceTopScrollRef}
                   className="overflow-x-auto custom-scrollbar h-5 bg-slate-50 border-b border-slate-200"
@@ -8294,72 +9137,110 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
 
                 <div
                   ref={attendanceBodyScrollRef}
-                  className="overflow-x-auto custom-scrollbar pb-4"
+                  className="overflow-x-auto custom-scrollbar"
                   onScroll={() => syncAttendanceScroll('body')}
                 >
                   <table className="w-max min-w-full text-center text-sm border-collapse">
-                    <thead className="bg-slate-800 text-white font-medium sticky top-0 z-20">
-                      <tr>
-                        <th rowSpan={2} className="px-3 py-3 border-r border-slate-700 sticky left-0 z-30 bg-slate-900 shadow-[2px_0_5px_rgba(0,0,0,0.1)] w-10 text-center">
-                           <input type="checkbox" className="cursor-pointer" checked={filteredStudents.length > 0 && selectedStudents.length === filteredStudents.length} onChange={(e) => handleSelectAllStudents(e.target.checked)} />
+                    <thead className="bg-white text-slate-700 font-black sticky top-0 z-20 shadow-sm">
+                      <tr className="border-b border-slate-200">
+                        <th rowSpan={2} className="px-3 py-4 border-r border-slate-100 sticky left-0 z-30 bg-white shadow-[2px_0_8px_rgba(15,23,42,0.04)] w-11 text-center">
+                          <input type="checkbox" className="cursor-pointer accent-blue-600" checked={filteredStudents.length > 0 && selectedStudents.length === filteredStudents.length} onChange={(e) => handleSelectAllStudents(e.target.checked)} />
                         </th>
-                        <th rowSpan={2} className="px-4 py-3 border-r border-slate-700 sticky left-[40px] z-30 bg-slate-900 shadow-[2px_0_5px_rgba(0,0,0,0.1)] w-40 cursor-pointer hover:bg-slate-800 transition-colors" onClick={() => handleSort('name')}>
-                          <div className="flex items-center justify-between">이름 (출석률) {sortKey === 'name' ? (sortOrder === 'asc' ? <ArrowDownAZ size={16}/> : <ArrowUpZA size={16}/>) : <ArrowDownAZ size={16} className="opacity-30"/>}</div>
+                        <th rowSpan={2} className="px-3 py-4 border-r border-slate-100 sticky left-[44px] z-30 bg-white shadow-[2px_0_8px_rgba(15,23,42,0.04)] min-w-[64px] text-center">No.</th>
+                        <th rowSpan={2} className="px-4 py-4 border-r border-slate-100 sticky left-[108px] z-30 bg-white shadow-[2px_0_8px_rgba(15,23,42,0.04)] min-w-[190px] text-left cursor-pointer" onClick={() => { setSortKey('name'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
+                          이름 ↕
                         </th>
-                        <th rowSpan={2} className="px-3 py-3 border-r border-slate-700 sticky left-[200px] z-30 bg-slate-900 shadow-[2px_0_5px_rgba(0,0,0,0.1)] w-20">구분</th>
-                        <th colSpan={31} className="py-2 border-b border-slate-700 bg-slate-800">{attendanceMonth} 일별 출석 사유 (1일 ~ 31일)</th>
-                        <th rowSpan={2} className="px-4 py-3 border-l border-slate-700 bg-slate-900 text-rose-300 w-24">벌점 현황<br/><span className="text-[10px] text-slate-400 font-normal text-rose-200/50">(자동계산)</span></th>
+                        <th rowSpan={2} className="px-4 py-4 border-r border-slate-100 sticky left-[298px] z-30 bg-white shadow-[2px_0_8px_rgba(15,23,42,0.04)] min-w-[96px] cursor-pointer" onClick={() => { setSortKey('attendanceRate'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
+                          출석률 ↕
+                        </th>
+                        {Array.from({length:31}, (_, i) => (
+                          <th key={`day-head-${i}`} className={`min-w-[74px] w-[74px] px-2 py-3 border-r border-slate-100 ${getDayHeaderClass(i)}`}>
+                            {i + 1}
+                          </th>
+                        ))}
+                        <th rowSpan={2} className="min-w-[86px] px-3 py-4 border-l border-slate-100 bg-rose-50 text-rose-600">벌점</th>
                       </tr>
-                      <tr className="bg-slate-700 text-xs">
-                        {Array.from({length: 31}, (_, i) => {
-                          const isExcluded = attendanceSettings[attendanceMonth].excludedDays.includes(i);
-                          return (<th key={i} className={`min-w-[70px] w-[70px] px-1 py-1.5 border-r border-slate-600 font-bold ${isExcluded ? 'bg-rose-900/50 text-rose-300' : ''}`}>{i+1}</th>);
-                        })}
+                      <tr className="border-b border-slate-200">
+                        {Array.from({length:31}, (_, i) => (
+                          <th key={`day-week-${i}`} className={`min-w-[74px] w-[74px] px-2 py-2 border-r border-slate-100 text-xs ${getDayHeaderClass(i)}`}>
+                            {excludedDays.includes(i) ? '휴' : getDayLabel(i)}
+                          </th>
+                        ))}
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-200 text-xs">
-                      {filteredStudents.map((student) => {
+                    <tbody className="divide-y divide-slate-100 text-xs bg-white">
+                      {filteredStudents.map((student, studentIndex) => {
                         const attendanceData = getUnifiedAttendanceArray(student.attendance?.[attendanceMonth] || {});
                         const memoData = getUnifiedAttendanceMemoArray(student.attendance?.[attendanceMonth] || {});
                         const isSelected = selectedStudents.includes(student.id);
+                        const rateText = getAttendanceRate(student, attendanceMonth);
                         return (
                           <React.Fragment key={student.id}>
-                            <tr className={`hover:bg-emerald-50/50 group ${isSelected ? 'bg-emerald-50/30' : ''}`}>
-                              <td className="border-r border-slate-200 sticky left-0 z-10 bg-white group-hover:bg-emerald-50/50 shadow-[2px_0_5px_rgba(0,0,0,0.05)] text-center px-3 cursor-pointer" onClick={(e) => { e.stopPropagation(); toggleStudentSelection(student.id); }}>
-                                 <input type="checkbox" className="cursor-pointer" checked={isSelected} onChange={() => {}} />
+                            <tr className={`group transition-colors hover:bg-blue-50/30 ${isSelected ? 'bg-blue-50/40' : 'bg-white'}`}>
+                              <td className="border-r border-slate-100 sticky left-0 z-10 bg-inherit group-hover:bg-blue-50/30 shadow-[2px_0_8px_rgba(15,23,42,0.04)] text-center px-3 cursor-pointer" onClick={(e) => { e.stopPropagation(); toggleStudentSelection(student.id); }}>
+                                <input type="checkbox" className="cursor-pointer accent-blue-600" checked={isSelected} onChange={() => {}} />
                               </td>
-                              <td className="border-r border-slate-200 sticky left-[40px] z-10 bg-white group-hover:bg-emerald-50/50 shadow-[2px_0_5px_rgba(0,0,0,0.05)] text-left px-4 cursor-pointer" onClick={() => setViewingAttendanceSummary(student)}>
-                                <div className="flex flex-col w-full gap-1">
-                                  <div className="flex items-center justify-between w-full">
-                                    <span className="font-bold text-slate-900 text-[13px]">{student.name}</span>
-                                    <span className="font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded text-[11px]">{getAttendanceRate(student, attendanceMonth)}</span>
+                              <td className="border-r border-slate-100 sticky left-[44px] z-10 bg-inherit group-hover:bg-blue-50/30 shadow-[2px_0_8px_rgba(15,23,42,0.04)] text-center font-black text-slate-500 px-3">
+                                {studentIndex + 1}
+                              </td>
+                              <td className="border-r border-slate-100 sticky left-[108px] z-10 bg-inherit group-hover:bg-blue-50/30 shadow-[2px_0_8px_rgba(15,23,42,0.04)] text-left px-4 py-3 cursor-pointer" onClick={() => setViewingAttendanceSummary(student)}>
+                                <div className="flex items-center gap-3 min-w-[160px]">
+                                  <div className="w-9 h-9 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-sm font-black">
+                                    {String(student.name || '?').slice(0, 1)}
                                   </div>
-                                  <div className="text-[10px] text-slate-400 font-mono text-left">{student.id}</div>
+                                  <div className="min-w-0">
+                                    <div className="font-black text-slate-900 text-[13px] truncate">{student.name}</div>
+                                    <div className="text-[10px] text-slate-400 font-mono truncate">{student.id}</div>
+                                  </div>
                                 </div>
                               </td>
-                              <td className="border-r border-slate-200 sticky left-[200px] z-10 bg-slate-50 text-slate-500 font-semibold shadow-[2px_0_5px_rgba(0,0,0,0.05)]">{ATTENDANCE_SESSION_LABEL}</td>
+                              <td className="border-r border-slate-100 sticky left-[298px] z-10 bg-inherit group-hover:bg-blue-50/30 shadow-[2px_0_8px_rgba(15,23,42,0.04)] px-3">
+                                <span className={`inline-flex items-center justify-center min-w-[58px] px-2.5 py-1 rounded-full text-xs font-black ${getAttendanceRateClass(rateText)}`}>
+                                  {rateText}
+                                </span>
+                              </td>
                               {attendanceData.map((val, dayIdx) => {
-                                const isExcluded = attendanceSettings[attendanceMonth].excludedDays.includes(dayIdx);
+                                const isExcluded = excludedDays.includes(dayIdx);
                                 const memoVal = memoData[dayIdx] || '';
                                 return (
-                                <td key={`attendance-${dayIdx}`} className={`border-r border-slate-200 p-0 relative group/cell ${isExcluded ? 'bg-slate-100' : ''}`} onContextMenu={(e) => { if(isExcluded) return; e.preventDefault(); e.stopPropagation(); const newMemo = prompt(`${dayIdx+1}일 ${ATTENDANCE_SESSION_LABEL} 메모 입력:`, memoVal); if (newMemo !== null) handleAttendanceMemoChange(student.id, ATTENDANCE_SESSION_KEY, dayIdx, newMemo); }}>
-                                  <select disabled={isExcluded} value={isExcluded ? '' : val} onChange={(e) => handleAttendanceChange(student.id, ATTENDANCE_SESSION_KEY, dayIdx, e.target.value)} className={`w-full h-full py-2.5 px-1 outline-none cursor-pointer appearance-none text-center font-medium tracking-tight ${isExcluded ? 'cursor-not-allowed opacity-0' : val === '출석' || val === 'Live' ? 'text-emerald-600 bg-emerald-50/30' : val === '결석' ? 'text-rose-600 bg-rose-100/50 font-bold' : val === '지각' ? 'text-amber-600 bg-amber-50/30' : val === '조퇴' ? 'text-orange-600 bg-orange-50/30' : val !== '' ? 'text-slate-600 bg-slate-100/50' : 'bg-transparent text-slate-400 hover:bg-slate-100 transition-colors'}`}>
-                                    <option value=""></option>{ATTENDANCE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                                  </select>
-                                  {!isExcluded && (
-                                      <div className={`absolute top-0 right-0 w-3 h-3 z-10 cursor-pointer ${memoVal ? 'bg-red-500 rounded-bl-sm shadow-sm' : 'opacity-0 group-hover/cell:opacity-100 bg-slate-300 hover:bg-red-400 rounded-bl-sm'}`} onClick={(e) => {
+                                  <td
+                                    key={`attendance-${dayIdx}`}
+                                    className={`border-r border-slate-100 p-2 relative group/cell ${isExcluded ? 'bg-slate-50' : ''}`}
+                                    onContextMenu={(e) => {
+                                      if(isExcluded) return;
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      const newMemo = prompt(`${dayIdx+1}일 ${ATTENDANCE_SESSION_LABEL} 메모 입력:`, memoVal);
+                                      if (newMemo !== null) handleAttendanceMemoChange(student.id, ATTENDANCE_SESSION_KEY, dayIdx, newMemo);
+                                    }}
+                                  >
+                                    <select
+                                      disabled={isExcluded}
+                                      value={isExcluded ? '' : val}
+                                      onChange={(e) => handleAttendanceChange(student.id, ATTENDANCE_SESSION_KEY, dayIdx, e.target.value)}
+                                      className={`w-full h-9 rounded-xl border px-1 outline-none cursor-pointer appearance-none text-center text-xs font-black tracking-tight transition-colors ${getAttendanceSelectClass(val, isExcluded)}`}
+                                    >
+                                      <option value="">-</option>{ATTENDANCE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                                    </select>
+                                    {!isExcluded && (
+                                      <div
+                                        className={`absolute top-1 right-1 w-2.5 h-2.5 z-10 cursor-pointer rounded-full ${memoVal ? 'bg-red-500 shadow-sm' : 'opacity-0 group-hover/cell:opacity-100 bg-slate-300 hover:bg-red-400'}`}
+                                        onClick={(e) => {
                                           e.stopPropagation();
                                           e.preventDefault();
                                           const newMemo = prompt(`${dayIdx+1}일 ${ATTENDANCE_SESSION_LABEL} 메모 입력:`, memoVal);
                                           if (newMemo !== null) handleAttendanceMemoChange(student.id, ATTENDANCE_SESSION_KEY, dayIdx, newMemo);
-                                      }} title={memoVal ? `메모: ${memoVal}` : "메모 추가 (우클릭 가능)"}></div>
-                                  )}
-                                </td>
-                              )})}
-                              <td className="border-l border-slate-200 align-middle bg-rose-50/40">
-                                  <div className={`font-extrabold text-[14px] flex justify-center w-full ${(typeof penaltyRules !== 'undefined' ? getAttendancePenalty(student, attendanceMonth) >= penaltyRules.maxPenalty : false) ? 'text-white bg-red-500 py-1 rounded px-2 animate-pulse' : 'text-rose-500'}`}>
-                                      {getAttendancePenalty(student, attendanceMonth)} 점
-                                  </div>
+                                        }}
+                                        title={memoVal ? `메모: ${memoVal}` : '메모 추가 (우클릭 가능)'}
+                                      />
+                                    )}
+                                  </td>
+                                )
+                              })}
+                              <td className="border-l border-slate-100 align-middle bg-rose-50/40 px-3">
+                                <div className={`font-black text-[13px] flex justify-center w-full ${(typeof penaltyRules !== 'undefined' ? getAttendancePenalty(student, attendanceMonth) >= penaltyRules.maxPenalty : false) ? 'text-white bg-red-500 py-1 rounded-xl px-2 animate-pulse' : 'text-rose-500'}`}>
+                                  {getAttendancePenalty(student, attendanceMonth)}점
+                                </div>
                               </td>
                             </tr>
                           </React.Fragment>
@@ -8368,9 +9249,31 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                     </tbody>
                   </table>
                 </div>
+
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 px-5 py-4 border-t border-slate-100 bg-white">
+                  <div className="text-sm font-black text-slate-500">전체 {filteredStudents.length}명</div>
+                  <div className="flex items-center gap-2 justify-center">
+                    <button type="button" className="w-9 h-9 rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50 flex items-center justify-center">
+                      <ChevronLeft size={16} />
+                    </button>
+                    <button type="button" className="w-9 h-9 rounded-xl bg-blue-600 text-white text-sm font-black shadow-lg shadow-blue-500/20">1</button>
+                    <button type="button" className="w-9 h-9 rounded-xl border border-slate-200 text-slate-600 text-sm font-black hover:bg-slate-50">2</button>
+                    <button type="button" className="w-9 h-9 rounded-xl border border-slate-200 text-slate-600 text-sm font-black hover:bg-slate-50">3</button>
+                    <button type="button" className="w-9 h-9 rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50 flex items-center justify-center">
+                      <ChevronRight size={16} />
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-end gap-3">
+                    <span className="text-xs font-bold text-slate-400">마지막 업데이트: {manualSaveStatus === 'saved' ? (manualSaveMessage || '저장 완료') : '저장 전'}</span>
+                    <button type="button" className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-black text-slate-600 hover:bg-slate-50">
+                      새로고침
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
-          )}
+            );
+          })()}
 
           {/* [2-2] 학습시간 기입 (날짜별 엑셀 업로드 지원) */}
           {activeTab === 'attendance' && activeAttendanceTab === 'studyTime' && (
@@ -8760,7 +9663,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                             )
                         })}
                     </div>
-                    <p className="text-[11px] font-bold text-slate-400 mt-3">※ 빨간색으로 선택된 일자는 데일리 테스트가 없는 날로 지정되어 <span className="text-rose-500">참여율 계산(분모)에서 완벽히 제외</span>됩니다.</p>
+                    <p className="text-[11px] font-bold text-slate-400 mt-3">※ 빨간색으로 선택된 일자는 데일리 테스트가 없는 날로 지정되어 <span className="text-rose-500">응시율 계산(분모)에서 완벽히 제외</span>됩니다.</p>
                   </div>
 
                   <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
@@ -8787,7 +9690,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                     <div className="bg-slate-50 p-4 border-b border-slate-200 flex justify-between items-center">
                        <div className="font-bold text-slate-700 flex items-center gap-2">
                          <PenTool size={18} className="text-indigo-500" />
-                         {dailyMonth} {dailySubject === 'math' ? '수학 DAILY' : '영어 DAILY'} 현황 (전체 반 평균 참여율: <span className="text-emerald-600">{dailyClassStats.avgRate}%</span> / 반 평균 점수: <span className="text-indigo-600">{dailyClassStats.avgScore}점</span>)
+                         {dailyMonth} {dailySubject === 'math' ? '수학 DAILY' : '영어 DAILY'} 현황 (전체 반 평균 응시율: <span className="text-emerald-600">{dailyClassStats.avgRate}%</span> / 반 평균 점수: <span className="text-indigo-600">{dailyClassStats.avgScore}점</span>)
                        </div>
                     </div>
                     <div
@@ -8810,7 +9713,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                              <input type="checkbox" className="cursor-pointer" checked={filteredStudents.length > 0 && selectedStudents.length === filteredStudents.length} onChange={(e) => handleSelectAllStudents(e.target.checked)} />
                           </th>
                           <th rowSpan={2} className="px-4 py-3 border-r border-slate-700 sticky left-[40px] z-30 bg-slate-900 w-44 cursor-pointer hover:bg-slate-800 transition-colors" onClick={() => handleSort('name')}>
-                             <div className="flex items-center justify-between">학생 정보 (참여율) {sortKey === 'name' ? (sortOrder === 'asc' ? <ArrowDownAZ size={16}/> : <ArrowUpZA size={16}/>) : <ArrowDownAZ size={16} className="opacity-30"/>}</div>
+                             <div className="flex items-center justify-between">학생 정보 (응시율) {sortKey === 'name' ? (sortOrder === 'asc' ? <ArrowDownAZ size={16}/> : <ArrowUpZA size={16}/>) : <ArrowDownAZ size={16} className="opacity-30"/>}</div>
                           </th>
                           <th rowSpan={2} className="px-3 py-3 border-r border-slate-700 sticky left-[216px] z-30 bg-slate-900 w-28 text-indigo-200">누적 / 평균</th>
                           <th colSpan={31} className="py-2 border-b border-slate-700 bg-slate-800">{dailyMonth} {dailySubject === 'math' ? '수학 DAILY SCORE' : '영어 DAILY SCORE'} (1일 ~ 31일)</th>
@@ -8884,7 +9787,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                             학생명 {sortKey === 'name' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}
                           </th>
                           <th className="py-4 px-4 text-slate-600 font-bold cursor-pointer hover:bg-slate-50" onClick={() => handleSort('dailyRate')}>
-                            참여율 {sortKey === 'dailyRate' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}
+                            응시율 {sortKey === 'dailyRate' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}
                           </th>
                           <th className="py-4 px-4 text-slate-600 font-bold">누적 점수</th>
                           <th className="py-4 px-4 text-indigo-600 font-bold cursor-pointer hover:bg-indigo-50" onClick={() => handleSort('dailyAvg')}>
@@ -10539,168 +11442,513 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
       )}
 
       {/* --- 모달 영역 5. 학생 신상정보 상세 모달 --- */}
-      {viewingProfileId && studentProfileToView && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
-          <div className="bg-white rounded-3xl w-full max-w-4xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="bg-slate-900 text-white p-6 md:p-8 border-b flex justify-between items-center relative overflow-hidden">
-              <div className="absolute right-0 top-0 opacity-10 transform translate-x-4 -translate-y-4">
-                <School size={150}/>
-              </div>
+      {viewingProfileId && studentProfileToView && (() => {
+        const getProfileClassList = (student) => {
+          return [...new Set([
+            ...(Array.isArray(student.classNames) ? student.classNames : []),
+            ...(Array.isArray(student.classes) ? student.classes : []),
+            student.className
+          ].filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ko'));
+        };
 
-              <div className="flex items-center gap-5 relative z-10 w-full pr-12">
-                <div className="w-16 h-16 bg-white/10 rounded-2xl flex items-center justify-center font-bold text-3xl shadow-inner border border-white/20 shrink-0">
-                  {studentProfileToView.name.charAt(0)}
-                </div>
+        const getProfileClassBadgeClass = (cls) => {
+          const value = String(cls || '').toUpperCase();
+          if (value.includes('GC')) return 'bg-emerald-50 text-emerald-700 border-emerald-100';
+          if (value.includes('GB3')) return 'bg-orange-50 text-orange-700 border-orange-100';
+          if (value.includes('GJ')) return 'bg-violet-50 text-violet-700 border-violet-100';
+          if (value.includes('GB')) return 'bg-blue-50 text-blue-700 border-blue-100';
+          return 'bg-slate-100 text-slate-600 border-slate-200';
+        };
 
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-3 mb-1 flex-wrap">
-                    <input
-                      className="text-3xl font-extrabold bg-transparent border-b border-transparent hover:border-white/30 focus:border-white outline-none w-40 transition-colors px-1 -ml-1"
-                      value={studentProfileToView.name}
-                      onChange={e => handleProfileChange(studentProfileToView.id, 'name', e.target.value)}
-                    />
+        const getProfileGenderBadgeClass = (gender) => {
+          if (gender === '여') return 'bg-pink-50 text-pink-600 border-pink-100';
+          if (gender === '남') return 'bg-blue-50 text-blue-600 border-blue-100';
+          return 'bg-slate-100 text-slate-500 border-slate-200';
+        };
 
-                    <select
-                      className="bg-transparent border-b border-transparent hover:border-white/30 focus:border-white outline-none text-slate-300 font-medium cursor-pointer transition-colors"
-                      value={studentProfileToView.gender || ''}
-                      onChange={e => handleProfileChange(studentProfileToView.id, 'gender', e.target.value)}
-                    >
-                      <option className="text-black" value="남">남</option>
-                      <option className="text-black" value="여">여</option>
-                    </select>
+        const getProfileTransferBadgeClass = (type) => {
+          if (String(type || '').includes('학사')) return 'bg-violet-50 text-violet-700 border-violet-100';
+          if (String(type || '').includes('일반')) return 'bg-blue-50 text-blue-700 border-blue-100';
+          return 'bg-slate-100 text-slate-500 border-slate-200';
+        };
 
-                    <select
-                      className="bg-indigo-500 hover:bg-indigo-400 text-white px-2 py-0.5 rounded text-xs font-bold shadow-sm outline-none border border-indigo-400 ml-2 cursor-pointer transition-colors"
-                      value={className === '대구캠퍼스 전체' ? (studentProfileToView.className || '') : className}
-                      onChange={e => {
-                        const targetClass = e.target.value;
-                        const currentClass = className === '대구캠퍼스 전체' ? studentProfileToView.className : className;
+        const getProfileTrackBadgeClass = (track) => {
+          const value = String(track || '');
+          if (value.includes('자연')) return 'bg-emerald-50 text-emerald-700 border-emerald-100';
+          if (value.includes('인문')) return 'bg-rose-50 text-rose-600 border-rose-100';
+          if (value.includes('사범')) return 'bg-blue-50 text-blue-700 border-blue-100';
+          if (value.includes('의약')) return 'bg-teal-50 text-teal-700 border-teal-100';
+          if (value.includes('예체능')) return 'bg-purple-50 text-purple-700 border-purple-100';
+          return 'bg-slate-100 text-slate-500 border-slate-200';
+        };
 
-                        showConfirm(
-                          `해당 학생의 소속을 [${currentClass}] → [${targetClass}](으)로 변경하시겠습니까?\n(다른 반 수강 정보는 유지됩니다.)`,
-                          () => {
-                            setStudents(prev => prev.map(s => {
-                              if (s.id !== studentProfileToView.id) return s;
+        const renderProfileClassBadges = (student) => {
+          const classList = getProfileClassList(student);
 
-                              let cNames = Array.isArray(s.classNames)
-                                ? [...s.classNames]
-                                : [s.className].filter(Boolean);
+          if (!classList.length) {
+            return (
+              <span className="inline-flex items-center justify-center px-2.5 py-1 rounded-lg border text-xs font-extrabold bg-slate-100 text-slate-500 border-slate-200">
+                -
+              </span>
+            );
+          }
 
-                              cNames = cNames.filter(c => c !== currentClass);
-
-                              if (!cNames.includes(targetClass)) {
-                                cNames.push(targetClass);
-                              }
-
-                              return {
-                                ...s,
-                                className: cNames[0] || targetClass || '미배정',
-                                classNames: cNames
-                              };
-                            }));
-
-                            setViewingProfileId(null);
-                            showAlert('반 소속이 변경되었습니다.');
-                          }
-                        );
-                      }}
-                    >
-                      {classes.map(c => (
-                        <option key={c} value={c} className="text-black bg-white">
-                          {c}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="text-indigo-200 font-mono text-sm tracking-wider flex items-center gap-2">
-                    학번:
-                    <input
-                      className="bg-transparent border-b border-transparent hover:border-indigo-300/50 focus:border-indigo-300 outline-none w-28 px-1 transition-colors"
-                      value={studentProfileToView.id}
-                      readOnly
-                      title="학번(고유키)은 수정할 수 없습니다."
-                    />
-
-                    <span className="opacity-50">|</span>
-
-                    ID:
-                    <input
-                      className="bg-transparent border-b border-transparent hover:border-indigo-300/50 focus:border-indigo-300 outline-none w-32 px-1 transition-colors"
-                      value={studentProfileToView.userId || ''}
-                      onChange={e => handleProfileChange(studentProfileToView.id, 'userId', e.target.value)}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <button
-                onClick={() => setViewingProfileId(null)}
-                className="absolute top-6 right-6 p-2 hover:bg-white/10 rounded-full transition-colors z-20"
-              >
-                <X size={28} />
-              </button>
+          return (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {classList.map(cls => (
+                <span key={cls} className={`inline-flex items-center justify-center px-2.5 py-1 rounded-lg border text-xs font-extrabold ${getProfileClassBadgeClass(cls)}`}>
+                  {cls}
+                </span>
+              ))}
             </div>
+          );
+        };
 
-            <div className="p-6 md:p-8 overflow-y-auto bg-slate-50 flex-1">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-4">
-                <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
-                  <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
-                    <Phone size={18} className="text-emerald-500"/> 연락처 및 기본정보
-                  </h3>
+        const consultingEntries = Object.entries(studentProfileToView.consulting || {})
+          .filter(([, value]) => String(value || '').trim())
+          .sort((a, b) => String(b[0]).localeCompare(String(a[0]), 'ko'));
 
-                  <div className="space-y-3 text-sm">
-                    <ProfileRow label="학생 연락처" value={studentProfileToView.contact} onChange={e => handleProfileChange(studentProfileToView.id, 'contact', e.target.value)} bold />
-                    <ProfileRow label="부모님 연락처" value={studentProfileToView.parentContact} onChange={e => handleProfileChange(studentProfileToView.id, 'parentContact', e.target.value)} bold />
-                    <ProfileRow label="거주지역" value={studentProfileToView.address} onChange={e => handleProfileChange(studentProfileToView.id, 'address', e.target.value)} />
-                    <ProfileRow label="등록월(시작월) 변경" value={studentProfileToView.startMonth || '1월'} onChange={e => handleProfileChange(studentProfileToView.id, 'startMonth', e.target.value)} options={MONTHS} />
+        const consultingCount = consultingEntries.length;
+        const recentConsulting = consultingEntries[0] || null;
+
+        const creditNumber = Number(studentProfileToView.credits || 0);
+        const creditPercent = Math.max(0, Math.min(100, Math.round((creditNumber / 140) * 100)));
+
+        const ProfileBadgeSelect = ({ value, field, options, classNameGetter }) => (
+          <select
+            value={value || ''}
+            onChange={e => handleProfileChange(studentProfileToView.id, field, e.target.value)}
+            className={`h-8 px-3 rounded-lg border text-xs font-extrabold outline-none cursor-pointer ${classNameGetter(value)}`}
+          >
+            {options.map(option => (
+              <option key={option} value={option} className="text-slate-900 bg-white">
+                {option || '-'}
+              </option>
+            ))}
+          </select>
+        );
+
+        const MiniInput = ({ value, field, placeholder = '-', className = '', readOnly = false }) => (
+          <input
+            value={value || ''}
+            readOnly={readOnly}
+            onChange={readOnly ? undefined : e => handleProfileChange(studentProfileToView.id, field, e.target.value)}
+            placeholder={placeholder}
+            className={`w-full bg-transparent text-right outline-none border-b border-transparent hover:border-slate-200 focus:border-blue-400 font-bold text-slate-900 placeholder:text-slate-300 ${className}`}
+          />
+        );
+
+        const InfoLine = ({ label, children }) => (
+          <div className="grid grid-cols-[120px_1fr] items-center gap-3 border-b border-slate-100 py-3 last:border-b-0">
+            <span className="text-sm font-bold text-slate-500">{label}</span>
+            <div className="text-sm font-bold text-slate-900 text-right min-w-0">{children}</div>
+          </div>
+        );
+
+        return (
+          <div className="fixed inset-0 bg-slate-900/55 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
+            <div className="bg-white rounded-[28px] w-full max-w-[1560px] shadow-2xl overflow-hidden flex flex-col max-h-[95vh] border border-white/70">
+              <div className="relative px-7 pt-6 pb-5 bg-white border-b border-slate-100">
+                <button
+                  onClick={() => setViewingProfileId(null)}
+                  className="absolute top-7 right-7 w-10 h-10 rounded-full flex items-center justify-center text-slate-500 hover:bg-slate-100 hover:text-slate-900 transition-colors"
+                >
+                  <X size={24} />
+                </button>
+
+                <div className="flex flex-wrap items-start justify-between gap-6 pr-12">
+                  <div className="flex items-center gap-5">
+                    <div className="w-20 h-20 rounded-full bg-blue-600 text-white flex items-center justify-center text-4xl font-black shadow-lg shadow-blue-100">
+                      {studentProfileToView.name?.charAt(0) || '?'}
+                    </div>
+
+                    <div>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <input
+                          className="text-3xl font-black text-slate-950 bg-transparent border-b border-transparent hover:border-slate-200 focus:border-blue-500 outline-none w-44 transition-colors"
+                          value={studentProfileToView.name}
+                          onChange={e => handleProfileChange(studentProfileToView.id, 'name', e.target.value)}
+                        />
+
+                        <ProfileBadgeSelect
+                          value={studentProfileToView.gender || ''}
+                          field="gender"
+                          options={['여', '남']}
+                          classNameGetter={getProfileGenderBadgeClass}
+                        />
+
+                        <select
+                          className="h-8 px-3 rounded-lg border text-xs font-extrabold outline-none cursor-pointer bg-blue-50 text-blue-700 border-blue-100"
+                          value={className === '대구캠퍼스 전체' ? (studentProfileToView.className || '') : className}
+                          onChange={e => {
+                            const targetClass = e.target.value;
+                            const currentClass = className === '대구캠퍼스 전체' ? studentProfileToView.className : className;
+
+                            showConfirm(
+                              `해당 학생의 소속을 [${currentClass}] → [${targetClass}](으)로 변경하시겠습니까?\n(다른 반 수강 정보는 유지됩니다.)`,
+                              () => {
+                                setStudents(prev => prev.map(s => {
+                                  if (s.id !== studentProfileToView.id) return s;
+
+                                  let cNames = Array.isArray(s.classNames)
+                                    ? [...s.classNames]
+                                    : [s.className].filter(Boolean);
+
+                                  cNames = cNames.filter(c => c !== currentClass);
+
+                                  if (!cNames.includes(targetClass)) {
+                                    cNames.push(targetClass);
+                                  }
+
+                                  return {
+                                    ...s,
+                                    className: cNames[0] || targetClass || '미배정',
+                                    classNames: cNames
+                                  };
+                                }));
+
+                                setViewingProfileId(null);
+                                showAlert('반 소속이 변경되었습니다.');
+                              }
+                            );
+                          }}
+                        >
+                          {classes.map(c => (
+                            <option key={c} value={c} className="text-black bg-white">
+                              {c}
+                            </option>
+                          ))}
+                        </select>
+
+                        {getProfileClassList(studentProfileToView).length > 1 && renderProfileClassBadges(studentProfileToView)}
+                      </div>
+
+                      <div className="mt-3 flex flex-wrap items-center gap-3 text-sm font-mono text-slate-500">
+                        <span>학번:</span>
+                        <input
+                          className="bg-transparent border-b border-transparent hover:border-slate-200 focus:border-blue-400 outline-none w-28 px-1 text-slate-700 font-bold"
+                          value={studentProfileToView.id}
+                          readOnly
+                          title="학번(고유키)은 수정할 수 없습니다."
+                        />
+                        <span className="text-slate-300">|</span>
+                        <span>ID:</span>
+                        <input
+                          className="bg-transparent border-b border-transparent hover:border-slate-200 focus:border-blue-400 outline-none w-32 px-1 text-slate-700 font-bold"
+                          value={studentProfileToView.userId || ''}
+                          onChange={e => handleProfileChange(studentProfileToView.id, 'userId', e.target.value)}
+                        />
+                      </div>
+                    </div>
                   </div>
-                </div>
 
-                <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
-                  <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
-                    <Bookmark size={18} className="text-amber-500"/> 편입 목표
-                  </h3>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="h-12 min-w-[130px] rounded-xl border border-slate-200 bg-white flex items-center justify-center gap-3 px-4">
+                      <span className="text-xs font-extrabold text-slate-500">성별</span>
+                      <ProfileBadgeSelect
+                        value={studentProfileToView.gender || ''}
+                        field="gender"
+                        options={['여', '남']}
+                        classNameGetter={getProfileGenderBadgeClass}
+                      />
+                    </div>
 
-                  <div className="space-y-3 text-sm">
-                    <ProfileRow label="편입구분" value={studentProfileToView.transferType} onChange={e => handleProfileChange(studentProfileToView.id, 'transferType', e.target.value)} options={['일반', '학사', '기타']} />
-                    <ProfileRow label="희망계열" value={studentProfileToView.targetTrack} onChange={e => handleProfileChange(studentProfileToView.id, 'targetTrack', e.target.value)} options={['인문계', '자연계', '사범계', '예체능', '경찰대', '기타']} />
-                    <ProfileRow label="편입준비계기" value={studentProfileToView.motivation} onChange={e => handleProfileChange(studentProfileToView.id, 'motivation', e.target.value)} />
+                    <div className="h-12 min-w-[150px] rounded-xl border border-slate-200 bg-white flex items-center justify-center gap-3 px-4">
+                      <span className="text-xs font-extrabold text-slate-500">편입구분</span>
+                      <ProfileBadgeSelect
+                        value={studentProfileToView.transferType || ''}
+                        field="transferType"
+                        options={['일반', '학사', '기타']}
+                        classNameGetter={getProfileTransferBadgeClass}
+                      />
+                    </div>
+
+                    <div className="h-12 min-w-[150px] rounded-xl border border-slate-200 bg-white flex items-center justify-center gap-3 px-4">
+                      <span className="text-xs font-extrabold text-slate-500">계열</span>
+                      <ProfileBadgeSelect
+                        value={studentProfileToView.targetTrack || ''}
+                        field="targetTrack"
+                        options={['인문계', '자연계', '사범계', '의약계', '예체능', '경찰대', '기타']}
+                        classNameGetter={getProfileTrackBadgeClass}
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
 
-              <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm mb-4">
-                <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
-                  <Building size={18} className="text-blue-500"/> 출신 대학 및 스펙
-                </h3>
+              <div className="p-8 overflow-y-auto bg-slate-50/70 flex-1">
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-5 mb-6">
+                  <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                    <div className="w-12 h-12 rounded-full bg-blue-600 text-white flex items-center justify-center mb-4 shadow-lg shadow-blue-100">
+                      <Phone size={22} />
+                    </div>
+                    <h3 className="font-black text-slate-900 mb-5">연락처</h3>
+                    <div className="space-y-4">
+                      <div>
+                        <p className="text-xs font-bold text-slate-500 mb-1">학생 연락처</p>
+                        <input
+                          className="w-full bg-transparent outline-none font-black text-slate-900 border-b border-transparent hover:border-slate-200 focus:border-blue-400"
+                          value={studentProfileToView.contact || ''}
+                          onChange={e => handleProfileChange(studentProfileToView.id, 'contact', e.target.value)}
+                          placeholder="-"
+                        />
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-500 mb-1">부모님 연락처</p>
+                        <input
+                          className="w-full bg-transparent outline-none font-black text-slate-900 border-b border-transparent hover:border-slate-200 focus:border-blue-400"
+                          value={studentProfileToView.parentContact || ''}
+                          onChange={e => handleProfileChange(studentProfileToView.id, 'parentContact', e.target.value)}
+                          placeholder="-"
+                        />
+                      </div>
+                    </div>
+                  </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-sm">
-                  <ProfileRow label="출신대학" value={studentProfileToView.university} onChange={e => handleProfileChange(studentProfileToView.id, 'university', e.target.value)} bold />
-                  <ProfileRow label="출신학과" value={studentProfileToView.major} onChange={e => handleProfileChange(studentProfileToView.id, 'major', e.target.value)} bold />
-                  <ProfileRow label="졸업여부" value={studentProfileToView.gradStatus} onChange={e => handleProfileChange(studentProfileToView.id, 'gradStatus', e.target.value)} options={['재학', '휴학', '수료', '졸업', '자퇴', '기타']} />
-                  <ProfileRow label="이수학점" value={studentProfileToView.credits} onChange={e => handleProfileChange(studentProfileToView.id, 'credits', e.target.value)} type="number" suffix="학점" />
-                  <ProfileRow label="학점(백분위)" value={studentProfileToView.gpa} onChange={e => handleProfileChange(studentProfileToView.id, 'gpa', e.target.value)} bold />
-                  <ProfileRow label="공인영어 보유" value={studentProfileToView.englishScore} onChange={e => handleProfileChange(studentProfileToView.id, 'englishScore', e.target.value)} bold inputClassName="text-blue-600 bg-blue-50 px-2 rounded" />
+                  <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                    <div className="w-12 h-12 rounded-full bg-teal-500 text-white flex items-center justify-center mb-4 shadow-lg shadow-teal-100">
+                      <LayoutList size={22} />
+                    </div>
+                    <h3 className="font-black text-slate-900 mb-5">학사 정보</h3>
+                    <div>
+                      <p className="text-xs font-bold text-slate-500 mb-1">출신대학</p>
+                      <input
+                        className="w-full bg-transparent outline-none font-black text-slate-900 border-b border-transparent hover:border-slate-200 focus:border-teal-400"
+                        value={studentProfileToView.university || ''}
+                        onChange={e => handleProfileChange(studentProfileToView.id, 'university', e.target.value)}
+                        placeholder="-"
+                      />
+                    </div>
+                    <div className="mt-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-xs font-bold text-slate-500">이수학점</p>
+                        <span className="text-xs font-black text-teal-600">{creditPercent}%</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <input
+                          className="w-24 bg-transparent outline-none font-black text-slate-900 border-b border-transparent hover:border-slate-200 focus:border-teal-400"
+                          value={studentProfileToView.credits || ''}
+                          onChange={e => handleProfileChange(studentProfileToView.id, 'credits', e.target.value)}
+                          placeholder="-"
+                        />
+                        <span className="text-sm font-bold text-slate-500">학점</span>
+                      </div>
+                      <div className="mt-2 h-2 rounded-full bg-slate-100 overflow-hidden">
+                        <div className="h-full rounded-full bg-teal-500" style={{ width: `${creditPercent}%` }}></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                    <div className="w-12 h-12 rounded-full bg-violet-500 text-white flex items-center justify-center mb-4 shadow-lg shadow-violet-100">
+                      <Bookmark size={22} />
+                    </div>
+                    <h3 className="font-black text-slate-900 mb-5">편입 목표</h3>
+                    <div className="space-y-4">
+                      <div>
+                        <p className="text-xs font-bold text-slate-500 mb-1">희망계열</p>
+                        <ProfileBadgeSelect
+                          value={studentProfileToView.targetTrack || ''}
+                          field="targetTrack"
+                          options={['인문계', '자연계', '사범계', '의약계', '예체능', '경찰대', '기타']}
+                          classNameGetter={getProfileTrackBadgeClass}
+                        />
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-500 mb-1">최근 상담</p>
+                        <p className="text-sm font-black text-slate-900">{recentConsulting?.[0] || '-'}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                    <div className="w-12 h-12 rounded-full bg-pink-500 text-white flex items-center justify-center mb-4 shadow-lg shadow-pink-100">
+                      <CalendarCheck size={22} />
+                    </div>
+                    <h3 className="font-black text-slate-900 mb-5">상담 현황</h3>
+                    <div className="space-y-4">
+                      <div>
+                        <p className="text-xs font-bold text-slate-500 mb-1">상담 횟수</p>
+                        <p className="text-lg font-black text-slate-900">{consultingCount}회</p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-500 mb-1">특이사항</p>
+                        <p className="text-sm font-bold text-slate-600 truncate">{studentProfileToView.notes || '-'}</p>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-              </div>
 
-              <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-col h-64">
-                <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
-                  <MessageSquare size={18} className="text-purple-500"/> 상담 및 특이사항
-                </h3>
+                <div className="grid grid-cols-1 xl:grid-cols-[1fr_360px] gap-6">
+                  <div className="space-y-4">
+                    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                      <h3 className="font-black text-slate-900 mb-3 flex items-center gap-2">
+                        <Phone size={18} className="text-emerald-500" /> 연락처 및 기본정보
+                      </h3>
 
-                <textarea
-                  className="bg-slate-50 p-4 rounded-xl text-sm text-slate-700 whitespace-pre-wrap leading-relaxed border border-slate-200 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 w-full flex-1 resize-none transition-all"
-                  value={studentProfileToView.notes || ''}
-                  onChange={(e) => handleProfileChange(studentProfileToView.id, 'notes', e.target.value)}
-                  placeholder="기재된 특이사항이 없습니다. 이곳을 클릭하여 학생의 상담 내용 및 특이사항을 자유롭게 입력하세요."
-                />
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-10">
+                        <InfoLine label="학생 연락처">
+                          <MiniInput value={studentProfileToView.contact} field="contact" />
+                        </InfoLine>
+                        <InfoLine label="등록월(시작월)">
+                          <span className="font-black">{studentProfileToView.startMonth || '1월'}</span>
+                        </InfoLine>
+                        <InfoLine label="부모님 연락처">
+                          <MiniInput value={studentProfileToView.parentContact} field="parentContact" />
+                        </InfoLine>
+                        <InfoLine label="등록월 변경">
+                          <select
+                            value={studentProfileToView.startMonth || '1월'}
+                            onChange={e => handleProfileChange(studentProfileToView.id, 'startMonth', e.target.value)}
+                            className="bg-blue-50 text-blue-700 border border-blue-100 rounded-lg px-3 py-1 text-xs font-extrabold outline-none"
+                          >
+                            {MONTHS.map(m => <option key={m} value={m}>{m}</option>)}
+                          </select>
+                        </InfoLine>
+                        <InfoLine label="거주지역">
+                          <MiniInput value={studentProfileToView.address} field="address" />
+                        </InfoLine>
+                        <InfoLine label="이메일">
+                          <MiniInput value={studentProfileToView.email || ''} readOnly />
+                        </InfoLine>
+                      </div>
+                    </div>
+
+                    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                      <h3 className="font-black text-slate-900 mb-3 flex items-center gap-2">
+                        <Bookmark size={18} className="text-amber-500" /> 편입 목표
+                      </h3>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-10">
+                        <InfoLine label="편입구분">
+                          <ProfileBadgeSelect
+                            value={studentProfileToView.transferType || ''}
+                            field="transferType"
+                            options={['일반', '학사', '기타']}
+                            classNameGetter={getProfileTransferBadgeClass}
+                          />
+                        </InfoLine>
+                        <InfoLine label="편입준비계기">
+                          <MiniInput value={studentProfileToView.motivation} field="motivation" />
+                        </InfoLine>
+                        <InfoLine label="희망계열">
+                          <ProfileBadgeSelect
+                            value={studentProfileToView.targetTrack || ''}
+                            field="targetTrack"
+                            options={['인문계', '자연계', '사범계', '의약계', '예체능', '경찰대', '기타']}
+                            classNameGetter={getProfileTrackBadgeClass}
+                          />
+                        </InfoLine>
+                        <InfoLine label="기타 메모">
+                          <span className="font-bold text-slate-500">{studentProfileToView.notes ? '상담 및 특이사항 참고' : '-'}</span>
+                        </InfoLine>
+                      </div>
+                    </div>
+
+                    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                      <h3 className="font-black text-slate-900 mb-3 flex items-center gap-2">
+                        <Building size={18} className="text-blue-500" /> 출신 대학 및 스펙
+                      </h3>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-10">
+                        <InfoLine label="출신대학">
+                          <MiniInput value={studentProfileToView.university} field="university" />
+                        </InfoLine>
+                        <InfoLine label="이수학점">
+                          <div className="flex justify-end items-center gap-2">
+                            <MiniInput value={studentProfileToView.credits} field="credits" className="w-24" />
+                            <span className="text-sm font-bold text-slate-500">학점</span>
+                          </div>
+                        </InfoLine>
+                        <InfoLine label="출신학과">
+                          <MiniInput value={studentProfileToView.major} field="major" />
+                        </InfoLine>
+                        <InfoLine label="학점(백분위)">
+                          <MiniInput value={studentProfileToView.gpa} field="gpa" />
+                        </InfoLine>
+                        <InfoLine label="졸업여부">
+                          <select
+                            value={studentProfileToView.gradStatus || ''}
+                            onChange={e => handleProfileChange(studentProfileToView.id, 'gradStatus', e.target.value)}
+                            className="bg-blue-50 text-blue-700 border border-blue-100 rounded-lg px-3 py-1 text-xs font-extrabold outline-none"
+                          >
+                            {['재학', '휴학', '수료', '졸업', '자퇴', '기타'].map(item => <option key={item} value={item}>{item}</option>)}
+                          </select>
+                        </InfoLine>
+                        <InfoLine label="공인영어 보유">
+                          <MiniInput value={studentProfileToView.englishScore} field="englishScore" />
+                        </InfoLine>
+                      </div>
+                    </div>
+
+                    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
+                      <div className="flex items-center justify-between gap-3 mb-3">
+                        <h3 className="font-black text-slate-900 flex items-center gap-2">
+                          <MessageSquare size={18} className="text-purple-500" /> 상담 및 특이사항
+                        </h3>
+                        <button
+                          type="button"
+                          onClick={() => handleSaveConsultingMemo(studentProfileToView.id)}
+                          disabled={!String(profileMemoDraft || '').trim()}
+                          className={`h-8 px-3 rounded-lg text-xs font-extrabold transition-colors ${
+                            String(profileMemoDraft || '').trim()
+                              ? 'bg-purple-600 text-white hover:bg-purple-700'
+                              : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                          }`}
+                        >
+                          관리 메모로 저장
+                        </button>
+                      </div>
+
+                      <textarea
+                        className="w-full min-h-[92px] bg-slate-50/70 text-sm font-bold text-slate-800 outline-none resize-none border border-slate-200 focus:border-purple-300 rounded-2xl p-4 leading-relaxed"
+                        value={profileMemoDraft}
+                        onChange={(e) => setProfileMemoDraft(e.target.value)}
+                        placeholder="새 상담 메모를 작성한 뒤 [관리 메모로 저장]을 눌러주세요. 저장 후 입력칸은 초기화됩니다."
+                      />
+                    </div>
+                  </div>
+
+                  <div className="bg-rose-50/70 rounded-2xl border border-rose-100 shadow-sm p-4 min-h-[300px] max-h-[520px] overflow-hidden flex flex-col">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="font-black text-rose-600">관리 메모</h3>
+                      <div className="h-8 px-3 rounded-lg border border-rose-100 bg-white/70 text-rose-500 text-xs font-extrabold flex items-center gap-1">
+                        상담 {consultingCount}회
+                      </div>
+                    </div>
+
+                    <div className="space-y-4 overflow-y-auto pr-1 custom-scrollbar">
+                      {consultingEntries.length > 0 ? (
+                        consultingEntries.map(([key, value], index) => (
+                          <div key={key} className="rounded-xl bg-white/75 border border-rose-100 p-4">
+                            <div className="flex items-start justify-between gap-3 mb-2">
+                              <p className="text-sm font-black text-slate-900">{key} 상담</p>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteConsultingMemo(studentProfileToView.id, key)}
+                                className="shrink-0 h-7 px-2 rounded-lg bg-rose-50 text-rose-500 hover:bg-rose-500 hover:text-white text-xs font-extrabold transition-colors"
+                              >
+                                삭제
+                              </button>
+                            </div>
+                            <p className="text-sm font-semibold text-slate-700 leading-relaxed whitespace-pre-wrap">{value}</p>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="rounded-xl bg-white/75 border border-rose-100 p-4">
+                          <p className="text-sm font-black text-slate-900 mb-2">등록된 관리 메모가 없습니다.</p>
+                          <p className="text-sm font-semibold text-slate-500 leading-relaxed">
+                            상담 및 특이사항에 내용을 작성한 뒤 저장하면 이곳에 누적됩니다.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </div>                </div>
               </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* --- 모달 영역 6. 위클리 주차별 상세 조회 모달 --- */}
       {viewingWeeklySummary && (
@@ -10835,7 +12083,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                 <h2 className="text-2xl font-extrabold flex items-center gap-2">
                   <PenTool size={24} /> {viewingDailySummary.name} 학생 종합 분석 ({dailyMonth} DAILY)
                 </h2>
-                <p className="text-indigo-100 text-sm mt-1">[{viewingDailySummary.startMonth} 등록생] 설정된 등록월에 맞춘 누적 통계치 및 전체 참여율입니다.</p>
+                <p className="text-indigo-100 text-sm mt-1">[{viewingDailySummary.startMonth} 등록생] 설정된 등록월에 맞춘 누적 통계치 및 전체 응시율입니다.</p>
               </div>
               <button onClick={() => setViewingDailySummary(null)} className="p-2 hover:bg-white/10 rounded-full transition-colors"><X size={28} /></button>
             </div>
@@ -10857,7 +12105,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                       </div>
                       <div className="bg-white border border-slate-200 shadow-sm rounded-xl p-5 flex flex-col items-center justify-center relative overflow-hidden">
                          <div className="absolute -right-4 -top-4 opacity-5 text-emerald-500"><CalendarCheck size={100}/></div>
-                         <span className="text-xs font-bold text-slate-500 mb-1 z-10">연간 누적 참여율</span>
+                         <span className="text-xs font-bold text-slate-500 mb-1 z-10">연간 누적 응시율</span>
                          <span className="text-3xl font-extrabold text-emerald-600 z-10">{overallStats.rate}%</span>
                       </div>
                       <div className="bg-white border border-slate-200 shadow-sm rounded-xl p-5 flex flex-col items-center justify-center relative overflow-hidden">
@@ -10867,9 +12115,9 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                       </div>
                     </div>
 
-                    {/* 월별 참여율 추이 그래프 (1~12월) */}
+                    {/* 월별 응시율 추이 그래프 (1~12월) */}
                     <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm overflow-x-auto">
-                      <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><BarChart3 size={18} className="text-emerald-500"/> 월별 DAILY 참여율 추이 (1월 ~ 12월)</h3>
+                      <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><BarChart3 size={18} className="text-emerald-500"/> 월별 DAILY 응시율 추이 (1월 ~ 12월)</h3>
                       <div className="h-40 flex items-end gap-2 border-b border-slate-200 pb-0 relative px-4 min-w-[800px] mt-4 mb-4">
                          <div className="absolute left-0 top-0 h-full w-full flex flex-col justify-between pointer-events-none text-[10px] text-slate-400 font-mono border-l border-slate-100 pl-1">
                             <div className="leading-none -mt-1">100%</div><div className="leading-none">75%</div><div className="leading-none">50%</div><div className="leading-none">25%</div><div className="leading-none mb-1">0%</div>
