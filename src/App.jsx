@@ -298,6 +298,9 @@ export default function App() {
   // ✅ 저장 최적화: 반별 설정 변경 추적
   const [dirtyClassSettings, setDirtyClassSettings] = useState({});
 
+  // ✅ 저장 최적화: Firebase에서 삭제해야 하는 학생 문서 추적
+  const [deletedStudentIds, setDeletedStudentIds] = useState(new Set());
+
   // ✅ 저장 최적화: 마지막으로 Firebase에서 불러왔거나 저장 완료된 학생 데이터 스냅샷
   const savedStudentsSnapshotRef = useRef({});
 
@@ -390,6 +393,7 @@ export default function App() {
             setDirtyStudentIds(new Set());
             setDirtyFieldsByStudent({});
             setDirtyClassSettings({});
+            setDeletedStudentIds(new Set());
             setIsClassesDirty(false);
 
             useFallback = false;
@@ -646,8 +650,9 @@ export default function App() {
 
     const classSettingsCount = getDirtyClassSettingsNamesForScope(scope).length;
     const classesCount = isClassesDirty ? 1 : 0;
+    const deletedCount = deletedStudentIds.size;
 
-    return studentDirtyCount + classSettingsCount + classesCount;
+    return studentDirtyCount + classSettingsCount + classesCount + deletedCount;
   };
 
   const saveDirtyStudentsToFirebase = async (scope = 'all') => {
@@ -675,8 +680,9 @@ export default function App() {
 
     const targetClassSettingNames = getDirtyClassSettingsNamesForScope(scope);
     const shouldSaveClasses = isClassesDirty;
+    const targetDeletedStudentIds = Array.from(deletedStudentIds);
 
-    if (targetStudents.length === 0 && targetClassSettingNames.length === 0 && !shouldSaveClasses) {
+    if (targetStudents.length === 0 && targetClassSettingNames.length === 0 && targetDeletedStudentIds.length === 0 && !shouldSaveClasses) {
       setManualSaveStatus('saved');
       setManualSaveMessage('저장할 변경사항이 없습니다.');
       return;
@@ -721,6 +727,13 @@ export default function App() {
         batch.set(studentRef, payload, { merge: true });
 
         actuallySavedStudents.push(student);
+        writeCount += 1;
+      });
+
+      // ✅ 삭제된 학생 문서 삭제
+      targetDeletedStudentIds.forEach(studentId => {
+        const studentRef = doc(studentsColRef, studentId);
+        batch.delete(studentRef);
         writeCount += 1;
       });
 
@@ -781,6 +794,14 @@ export default function App() {
         savedStudentsSnapshotRef.current[student.id] = JSON.parse(JSON.stringify(student));
       });
 
+      if (targetDeletedStudentIds.length > 0) {
+        setDeletedStudentIds(prev => {
+          const next = new Set(prev);
+          targetDeletedStudentIds.forEach(studentId => next.delete(studentId));
+          return next;
+        });
+      }
+
       if (shouldSaveClasses) {
         setIsClassesDirty(false);
       }
@@ -818,7 +839,7 @@ export default function App() {
     const handleBeforeUnload = (event) => {
       const hasDirtyClassSettings = Object.keys(dirtyClassSettings || {}).length > 0;
 
-      if (dirtyStudentIds.size === 0 && !isClassesDirty && !hasDirtyClassSettings) return;
+      if (dirtyStudentIds.size === 0 && deletedStudentIds.size === 0 && !isClassesDirty && !hasDirtyClassSettings) return;
 
       event.preventDefault();
       event.returnValue = '';
@@ -826,7 +847,7 @@ export default function App() {
 
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [dirtyStudentIds, isClassesDirty, dirtyClassSettings]);
+  }, [dirtyStudentIds, deletedStudentIds, isClassesDirty, dirtyClassSettings]);
 
   /* * [7단계: Supabase/Firebase 연동 준비 가이드 (데이터 구조 분리 제안)]
    * 현재는 localStorage를 이용해 JSON 통짜 데이터를 저장하고 있지만,
@@ -3956,7 +3977,11 @@ function ClassDashboard({
           };
         }
       }));
-      showAlert(`출결 초기화가 완료되었습니다.`);
+      selectedStudents.forEach(studentId => {
+        markStudentDirty(studentId, 'attendance');
+      });
+
+      showAlert(`출결 초기화가 완료되었습니다. 우측 상단 변경사항 저장 버튼을 눌러 Firebase에 반영해주세요.`);
       setSelectedStudents([]);
     });
   };
@@ -3975,7 +4000,11 @@ function ClassDashboard({
           return { ...student, studyTime: { ...student.studyTime, [studyTimeMonth]: newDaily } };
         }
       }));
-      showAlert(`학습시간 초기화가 완료되었습니다.`);
+      selectedStudents.forEach(studentId => {
+        markStudentDirty(studentId, 'studyTime');
+      });
+
+      showAlert(`학습시간 초기화가 완료되었습니다. 우측 상단 변경사항 저장 버튼을 눌러 Firebase에 반영해주세요.`);
       setSelectedStudents([]);
     });
   };
@@ -5889,10 +5918,27 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
     e.stopPropagation();
 
     showConfirm(
-      `${name} 학생을 완전히 삭제하시겠습니까?\n\n화면 명단에서 삭제되며, 자동 저장 후 Firebase 세션에서도 삭제됩니다.\n삭제된 데이터는 복구할 수 없습니다.`,
+      `${name} 학생을 완전히 삭제하시겠습니까?\n\n화면 명단에서 삭제되며, 변경사항 저장 버튼을 누르면 Firebase에서도 삭제됩니다.\n삭제된 데이터는 복구할 수 없습니다.`,
       () => {
         setStudents(prev => prev.filter(s => s.id !== id));
-        showAlert(`${name} 학생이 삭제되었습니다. Firebase에도 자동 반영됩니다.`);
+        setDeletedStudentIds(prev => {
+          const next = new Set(prev);
+          next.add(id);
+          return next;
+        });
+        setDirtyStudentIds(prev => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+        setDirtyFieldsByStudent(prev => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        setManualSaveStatus('dirty');
+        setManualSaveMessage('변경사항 있음');
+        showAlert(`${name} 학생이 삭제되었습니다. 우측 상단 변경사항 저장 버튼을 눌러 Firebase에 반영해주세요.`);
       }
     );
   };
@@ -6293,13 +6339,24 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
     showConfirm(
       `[${targetClass}] 명단 업로드 미리보기\n\n업로드 방식: ${modeText}\n\n추가될 학생: ${addCount}명\n수정될 학생: ${updateCount}명\n해당 반 소속 추가: ${addClassCount}명\n명단에서 제외될 학생: ${excludeCount}명\n\n적용하시겠습니까?`,
       () => {
+        const studentImportDirtyIds = new Set();
+        const studentImportDeletedIds = new Set();
+
         setStudents(prev => {
           if (uploadMode === 'allOverwrite') {
-            return newStudents.map(s => ({
+            const nextStudents = newStudents.map(s => ({
               ...s,
               className: targetClass,
               classNames: [targetClass]
             }));
+
+            const nextIds = new Set(nextStudents.map(s => s.id));
+            prev.forEach(student => {
+              if (!nextIds.has(student.id)) studentImportDeletedIds.add(student.id);
+            });
+            nextStudents.forEach(student => studentImportDirtyIds.add(student.id));
+
+            return nextStudents;
           }
 
           let updated = [...prev];
@@ -6358,6 +6415,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
 
               updated[existingIdx] = mergedStudent;
               touchedIds.add(mergedStudent.id);
+              studentImportDirtyIds.add(mergedStudent.id);
             } else {
               updated.unshift({
                 ...newStu,
@@ -6365,6 +6423,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                 classNames: [targetClass]
               });
               touchedIds.add(newStu.id);
+              studentImportDirtyIds.add(newStu.id);
             }
           });
 
@@ -6379,6 +6438,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
 
               const nextClassNames = cNames.filter(c => c !== targetClass);
               const finalClassNames = nextClassNames.length > 0 ? nextClassNames : ['미배정'];
+
+              studentImportDirtyIds.add(s.id);
 
               return {
                 ...s,
@@ -6397,7 +6458,23 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
           return updated;
         });
 
-        showAlert(`완료! 총 ${newStudents.length}명의 정보가 처리되었습니다. 자동 저장까지 3~10초 정도 기다려주세요.`);
+        setTimeout(() => {
+          studentImportDirtyIds.forEach(studentId => {
+            markStudentDirty(studentId, 'studentInfo');
+          });
+
+          if (studentImportDeletedIds.size > 0) {
+            setDeletedStudentIds(prev => {
+              const next = new Set(prev);
+              studentImportDeletedIds.forEach(studentId => next.add(studentId));
+              return next;
+            });
+            setManualSaveStatus('dirty');
+            setManualSaveMessage('변경사항 있음');
+          }
+
+          showAlert(`완료! 총 ${newStudents.length}명의 정보가 처리되었습니다. 우측 상단 변경사항 저장 버튼을 눌러 Firebase에 반영해주세요.`);
+        }, 50);
       }
     );
   };
@@ -6408,23 +6485,57 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
     const getColIdxTemp = (headerRow, kws) => headerRow.findIndex(h => h && kws.some(k => String(h).replace(/\s/g, '').includes(k)));
     const idIdx = getColIdxTemp(headerRow, ['학번', '수험번호', '이름']);
     const dateColStart = headerRow.findIndex(h => h && (String(h).includes('2026') || !isNaN(Number(h))));
-    
+
     let matchCount = 0;
+    const dailyDirtyIds = new Set();
+
     setStudents(prev => {
       const updated = [...prev];
+
       for (let i = headerRowIdx + 1; i < rows.length; i++) {
         const row = rows[i]; if (!row || !Array.isArray(row) || !row[idIdx]) continue;
         const key = String(row[idIdx]).trim();
         const studentIdx = updated.findIndex(s => (s.id === key || s.name === key) && (className === '대구캠퍼스 전체' ? true : (s.classNames || [s.className]).includes(className)));
+
         if (studentIdx >= 0) {
-          const newDaily = [...updated[studentIdx].dailyRecords[dailyMonth]];
-          for(let d=0; d<31; d++) { let val = row[dateColStart + d]; if(val !== undefined && val !== null) newDaily[d].t1 = val; }
-          updated[studentIdx].dailyRecords[dailyMonth] = newDaily; matchCount++;
+          const baseDaily = updated[studentIdx].dailyRecords?.[dailyMonth] || generateEmptyMonthlyDaily()[dailyMonth];
+          const newDaily = baseDaily.map(day => ({ t1: '', t2: '', math: '', ...(day || {}) }));
+          let changed = false;
+
+          for(let d=0; d<31; d++) {
+            let val = row[dateColStart + d];
+
+            if(val !== undefined && val !== null && !isSameValueForDirtyCheck(newDaily[d]?.t1, val)) {
+              newDaily[d] = { ...newDaily[d], t1: val };
+              changed = true;
+            }
+          }
+
+          if (changed) {
+            updated[studentIdx] = {
+              ...updated[studentIdx],
+              dailyRecords: {
+                ...updated[studentIdx].dailyRecords,
+                [dailyMonth]: newDaily
+              }
+            };
+
+            dailyDirtyIds.add(updated[studentIdx].id);
+            matchCount++;
+          }
         }
       }
+
       return updated;
     });
-    showAlert(`완료! 총 ${matchCount}건의 Daily 성적이 연동되었습니다.`);
+
+    setTimeout(() => {
+      dailyDirtyIds.forEach(studentId => {
+        markStudentDirty(studentId, 'dailyRecords');
+      });
+
+      showAlert(`완료! 총 ${matchCount}건의 Daily 성적이 연동되었습니다. 우측 상단 변경사항 저장 버튼을 눌러 Firebase에 반영해주세요.`);
+    }, 50);
   };
 
   const processWeeklyRows = (rows) => {
@@ -6439,6 +6550,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
 
     const executeWeeklyParse = () => {
       let matchCount = 0;
+      const weeklyDirtyIds = new Set();
       const testId = buildWeeklyTestId(weeklySubject, weeklyMonth, selectedWeek, currentSettings);
       const testMonth = getWeeklyMonthKeyFromDate(testDate);
       const weekKey = `${weeklyMonth}_w${selectedWeek}`;
@@ -6546,6 +6658,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                    }
                };
 
+               weeklyDirtyIds.add(updated[studentIdx].id);
                matchCount++;
           }
         }
@@ -6553,7 +6666,13 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
         return updated;
       });
 
-      showAlert(`OMR 인식 완료! 총 ${matchCount}명의 점수와 유형별 정답률이 연동되었습니다.`);
+      setTimeout(() => {
+        weeklyDirtyIds.forEach(studentId => {
+          markStudentDirty(studentId, 'scores');
+        });
+
+        showAlert(`OMR 인식 완료! 총 ${matchCount}명의 점수와 유형별 정답률이 연동되었습니다. 우측 상단 변경사항 저장 버튼을 눌러 Firebase에 반영해주세요.`);
+      }, 50);
     };
 
     const hasAnyAnswer = currentSettings.answers.some(ans => String(ans).trim() !== '');
@@ -6586,7 +6705,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
     setStudents(prev => {
       let updated = [...prev];
       updated = updated.map(s => {
-        if(className === '대구캠퍼스 전체' || (s.classNames || [s.className]).includes(className)) { 
+        if(className === '대구캠퍼스 전체' || (s.classNames || [s.className]).includes(className)) {
+           affectedStudents.add(s.id);
            return { ...s, scores: { ...s.scores, monthly: { ...s.scores.monthly, [selectedMonth]: { english: { ...emptyMonthlyScore }, math: { ...emptyMonthlyScore }, total: { ...emptyMonthlyScore } } } } }; 
         }
         return s;
@@ -6628,7 +6748,14 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
       computeRank('english'); computeRank('math'); computeRank('total');
       return updated;
     });
-    showAlert(`완료! 총 ${affectedStudents.size}명의 성적이 연동되었습니다.`);
+
+    setTimeout(() => {
+      affectedStudents.forEach(studentId => {
+        markStudentDirty(studentId, 'scores');
+      });
+
+      showAlert(`완료! 총 ${affectedStudents.size}명의 성적이 연동되었습니다. 우측 상단 변경사항 저장 버튼을 눌러 Firebase에 반영해주세요.`);
+    }, 50);
   };
 
   const handleResetWeeklyOmrScores = () => {
@@ -6642,6 +6769,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
     showConfirm(
       `${weeklyMonth} ${selectedWeek}주차 ${subjectLabel} Weekly OMR 점수와 상세 분석 데이터를 초기화하시겠습니까?\n\n초기화 후 다시 OMR을 업로드할 수 있습니다.`,
       () => {
+        const weeklyResetDirtyIds = new Set();
+
         setStudents(prev => prev.map(student => {
           const studentClassNames = Array.isArray(student.classNames)
             ? student.classNames
@@ -6652,6 +6781,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
             studentClassNames.includes(className);
 
           if (!isTarget) return student;
+
+          weeklyResetDirtyIds.add(student.id);
 
           const currentScores = student.scores || {};
           const currentScoreObj = currentScores[scoreField] || {};
@@ -6673,7 +6804,13 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
           };
         }));
 
-        showAlert(`${weeklyMonth} ${selectedWeek}주차 ${subjectLabel} Weekly OMR 데이터가 초기화되었습니다.`);
+        setTimeout(() => {
+          weeklyResetDirtyIds.forEach(studentId => {
+            markStudentDirty(studentId, 'scores');
+          });
+
+          showAlert(`${weeklyMonth} ${selectedWeek}주차 ${subjectLabel} Weekly OMR 데이터가 초기화되었습니다. 우측 상단 변경사항 저장 버튼을 눌러 Firebase에 반영해주세요.`);
+        }, 50);
       }
     );
   };
@@ -6691,6 +6828,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
     showConfirm(
       `${selectedMonth} Monthly ${subjectLabel} 성적 데이터를 초기화하시겠습니까?\n\n초기화 후 다시 Monthly OMR/엑셀을 업로드할 수 있습니다.`,
       () => {
+        const monthlyResetDirtyIds = new Set();
+
         setStudents(prev => prev.map(student => {
           const studentClassNames = Array.isArray(student.classNames)
             ? student.classNames
@@ -6701,6 +6840,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
             studentClassNames.includes(className);
 
           if (!isTarget) return student;
+
+          monthlyResetDirtyIds.add(student.id);
 
           const currentScores = student.scores || {};
           const currentMonthly = currentScores.monthly || {};
@@ -6778,7 +6919,13 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
           };
         });
 
-        showAlert(`${selectedMonth} Monthly ${subjectLabel} 성적 데이터가 초기화되었습니다.`);
+        setTimeout(() => {
+          monthlyResetDirtyIds.forEach(studentId => {
+            markStudentDirty(studentId, 'scores');
+          });
+
+          showAlert(`${selectedMonth} Monthly ${subjectLabel} 성적 데이터가 초기화되었습니다. 우측 상단 변경사항 저장 버튼을 눌러 Firebase에 반영해주세요.`);
+        }, 50);
       }
     );
   };
