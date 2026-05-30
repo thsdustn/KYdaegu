@@ -670,6 +670,20 @@ export default function App() {
   useEffect(() => {
     if (!isDataLoaded) return;
 
+    const isLocalStorageQuotaError = (error) => {
+      const errorName = String(error?.name || '').toLowerCase();
+      const errorMessage = String(error?.message || '').toLowerCase();
+
+      return (
+        errorName.includes('quota') ||
+        errorMessage.includes('quota') ||
+        errorMessage.includes('exceeded') ||
+        errorMessage.includes('용량') ||
+        error?.code === 22 ||
+        error?.code === 1014
+      );
+    };
+
     const saveToLocalBackup = () => {
       setSaveStatus('saving');
 
@@ -682,20 +696,15 @@ export default function App() {
         setSaveStatus('saved');
         setTimeout(() => setSaveStatus('idle'), 1200);
       } catch (localErr) {
-        const isQuotaError =
-          localErr?.name === 'QuotaExceededError' ||
-          String(localErr?.message || '').includes('quota') ||
-          String(localErr?.message || '').includes('exceeded');
-
-        console.warn("로컬스토리지 백업 에러:", localErr);
-
-        if (isQuotaError) {
-          // ✅ 브라우저 임시 백업 용량 초과는 Firebase 저장 실패로 이어지면 안 됨
-          // ✅ localStorage 백업만 생략하고, 화면/수동 저장 흐름은 계속 유지
+        if (isLocalStorageQuotaError(localErr)) {
+          console.warn(
+            'localStorage 자동 백업 용량 초과: 브라우저 임시 백업만 생략하고 Firebase 수동 저장 흐름은 유지합니다.'
+          );
           setSaveStatus('idle');
           return;
         }
 
+        console.error("로컬스토리지 백업 에러:", localErr);
         setSaveStatus('error');
       }
     };
@@ -817,13 +826,7 @@ export default function App() {
 
     if (!savedStudent) return true;
 
-    const compareFieldNames = Object.keys(payload || {}).filter(fieldName => {
-      return fieldName !== 'updatedAt' && fieldName !== 'updatedBy';
-    });
-
-    if (compareFieldNames.length === 0) return false;
-
-    return compareFieldNames.some(fieldName => {
+    return Object.keys(payload || {}).some(fieldName => {
       return !isSameObjectForDirtyCheck(savedStudent[fieldName], payload[fieldName]);
     });
   };
@@ -1050,298 +1053,30 @@ export default function App() {
       return;
     }
 
-    const isPayloadLimitError = (error) => {
-      const message = String(error?.message || '').toLowerCase();
-
-      return (
-        error?.code === 'resource-exhausted' ||
-        message.includes('request payload size exceeds') ||
-        message.includes('payload size') ||
-        message.includes('exceeds the limit') ||
-        message.includes('11534336') ||
-        message.includes('quota exceeded')
-      );
-    };
-
-    const isTimeoutError = (error) => {
-      const message = String(error?.message || '').toLowerCase();
-
-      return (
-        message.includes('시간이 초과') ||
-        message.includes('timeout') ||
-        message.includes('timed out') ||
-        message.includes('deadline') ||
-        message.includes('응답 지연')
-      );
-    };
-
-    const getApproxBytes = (value) => {
-      try {
-        return new TextEncoder().encode(JSON.stringify(value ?? {})).length;
-      } catch (error) {
-        try {
-          return JSON.stringify(value ?? {}).length;
-        } catch {
-          return 0;
-        }
-      }
-    };
-
-    const FIRESTORE_SAFE_PAYLOAD_BYTES = 3 * 1024 * 1024;
-    const FIRESTORE_COMMIT_TIMEOUT_MS = 45000;
-    const MIN_CHUNK_WRITE_COUNT = 1;
-
-    const getOperationApproxBytes = (operation) => {
-      if (operation.type === 'delete') {
-        return getApproxBytes({ type: operation.type, id: operation.id || '' });
-      }
-
-      return getApproxBytes({
-        type: operation.type,
-        id: operation.id || '',
-        payload: operation.payload || {}
-      });
-    };
-
-    const createOperationChunks = (operations, maxCount = 50, maxBytes = FIRESTORE_SAFE_PAYLOAD_BYTES) => {
-      const chunks = [];
-      let currentChunk = [];
-      let currentBytes = 0;
-
-      operations.forEach(operation => {
-        const operationBytes = getOperationApproxBytes(operation);
-
-        if (
-          currentChunk.length > 0 &&
-          (currentChunk.length >= maxCount || currentBytes + operationBytes > maxBytes)
-        ) {
-          chunks.push(currentChunk);
-          currentChunk = [];
-          currentBytes = 0;
-        }
-
-        currentChunk.push(operation);
-        currentBytes += operationBytes;
-      });
-
-      if (currentChunk.length > 0) {
-        chunks.push(currentChunk);
-      }
-
-      return chunks;
-    };
-
-    const getNextChunkSize = (currentChunkSize) => {
-      if (currentChunkSize > 10) return 10;
-      if (currentChunkSize > 5) return 5;
-      if (currentChunkSize > 2) return 2;
-      return 1;
-    };
-
-    const clearSkippedUnchangedStudents = (skippedStudents) => {
-      if (!skippedStudents.length) return;
-
-      setDirtyStudentIds(prev => {
-        const next = new Set(prev);
-        skippedStudents.forEach(student => next.delete(student.id));
-        return next;
-      });
-
-      setDirtyFieldsByStudent(prev => {
-        const next = { ...prev };
-        skippedStudents.forEach(student => {
-          delete next[student.id];
-        });
-        return next;
-      });
-    };
-
-    const markSuccessfulOperationsClean = (operationChunk) => {
-      const successStudentIds = [];
-      const successStudents = [];
-      const successDeletedStudentIds = [];
-      const successClassSettingNames = [];
-      let classesSaved = false;
-
-      operationChunk.forEach(operation => {
-        if (operation.target === 'student' && operation.student?.id) {
-          successStudentIds.push(operation.student.id);
-          successStudents.push(operation.student);
-        }
-
-        if (operation.target === 'deletedStudent' && operation.id) {
-          successDeletedStudentIds.push(operation.id);
-        }
-
-        if (operation.target === 'classSettings' && operation.id) {
-          successClassSettingNames.push(operation.id);
-        }
-
-        if (operation.target === 'classes') {
-          classesSaved = true;
-        }
-      });
-
-      if (successStudentIds.length > 0) {
-        setDirtyStudentIds(prev => {
-          const next = new Set(prev);
-          successStudentIds.forEach(studentId => next.delete(studentId));
-          return next;
-        });
-
-        setDirtyFieldsByStudent(prev => {
-          const next = { ...prev };
-          successStudentIds.forEach(studentId => {
-            delete next[studentId];
-          });
-          return next;
-        });
-
-        successStudents.forEach(student => {
-          savedStudentsSnapshotRef.current[student.id] = JSON.parse(JSON.stringify(student));
-        });
-      }
-
-      if (successDeletedStudentIds.length > 0) {
-        setDeletedStudentIds(prev => {
-          const next = new Set(prev);
-          successDeletedStudentIds.forEach(studentId => next.delete(studentId));
-          return next;
-        });
-      }
-
-      if (successClassSettingNames.length > 0) {
-        setDirtyClassSettings(prev => {
-          const next = { ...prev };
-          successClassSettingNames.forEach(className => {
-            delete next[className];
-          });
-          return next;
-        });
-      }
-
-      if (classesSaved) {
-        setIsClassesDirty(false);
-      }
-    };
-
-    const commitOperationChunk = async (operationChunk) => {
-      const batch = writeBatch(db);
-
-      operationChunk.forEach(operation => {
-        if (operation.type === 'set') {
-          batch.set(operation.ref, operation.payload, operation.options || { merge: true });
-        }
-
-        if (operation.type === 'delete') {
-          batch.delete(operation.ref);
-        }
-      });
-
-      await Promise.race([
-        batch.commit(),
-        new Promise((_, reject) => {
-          setTimeout(() => {
-            reject(new Error('저장 요청 시간이 초과되었습니다. 응답 지연으로 더 작은 단위 재시도가 필요합니다.'));
-          }, FIRESTORE_COMMIT_TIMEOUT_MS);
-        })
-      ]);
-    };
-
-    const commitOperationsWithAutoChunk = async (operations, initialChunkSize = 50) => {
-      let completedChunkCount = 0;
-      let plannedChunkCount = createOperationChunks(
-        operations,
-        initialChunkSize,
-        FIRESTORE_SAFE_PAYLOAD_BYTES
-      ).length;
-
-      const commitChunkSafely = async (operationChunk, currentChunkSize) => {
-        if (!operationChunk.length) return;
-
-        try {
-          setManualSaveMessage(
-            operations.length > currentChunkSize || plannedChunkCount > 1
-              ? `대용량 데이터 저장 중... ${completedChunkCount + 1}/${plannedChunkCount}단계`
-              : '저장중...'
-          );
-
-          await commitOperationChunk(operationChunk);
-          markSuccessfulOperationsClean(operationChunk);
-          completedChunkCount += 1;
-        } catch (chunkError) {
-          const canRetryWithSmallerChunk =
-            (isPayloadLimitError(chunkError) || isTimeoutError(chunkError)) &&
-            operationChunk.length > 1 &&
-            currentChunkSize > MIN_CHUNK_WRITE_COUNT;
-
-          if (!canRetryWithSmallerChunk) {
-            throw chunkError;
-          }
-
-          const nextChunkSize = getNextChunkSize(currentChunkSize);
-
-          setManualSaveMessage(
-            isTimeoutError(chunkError)
-              ? `응답 지연으로 더 작은 단위로 재시도 중... (${nextChunkSize}개 단위)`
-              : `저장 데이터가 커서 더 작은 단위로 재시도 중... (${nextChunkSize}개 단위)`
-          );
-
-          const smallerChunks = createOperationChunks(
-            operationChunk,
-            nextChunkSize,
-            FIRESTORE_SAFE_PAYLOAD_BYTES
-          );
-
-          plannedChunkCount += Math.max(0, smallerChunks.length - 1);
-
-          for (const smallerChunk of smallerChunks) {
-            await commitChunkSafely(smallerChunk, nextChunkSize);
-          }
-        }
-      };
-
-      const initialChunks = createOperationChunks(
-        operations,
-        initialChunkSize,
-        FIRESTORE_SAFE_PAYLOAD_BYTES
-      );
-
-      for (const chunk of initialChunks) {
-        await commitChunkSafely(chunk, initialChunkSize);
-      }
-
-      return completedChunkCount;
-    };
-
     setManualSaveStatus('saving');
-    setManualSaveMessage('저장중... 저장 중에는 창을 닫지 마세요.');
+    setManualSaveMessage('저장중...');
 
     try {
       const docRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`);
       const studentsColRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`, 'students');
       const classSettingsColRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`, 'classSettings');
 
-      const saveOperations = [];
+      const batch = writeBatch(db);
+      let writeCount = 0;
       const actuallySavedStudents = [];
       const skippedUnchangedStudents = [];
 
       // ✅ classes가 실제로 변경된 경우에만 메인 문서 저장
       if (shouldSaveClasses) {
-        saveOperations.push({
-          type: 'set',
-          target: 'classes',
-          ref: docRef,
-          id: `year_${academicYear}`,
-          payload: {
-            classes,
-            lastManualSavedAt: Date.now(),
-            updatedBy: user.uid,
-            storageMode: 'subcollection',
-            manualSaveMode: 'dirty-students'
-          },
-          options: { merge: true }
-        });
+        batch.set(docRef, {
+          classes,
+          lastManualSavedAt: Date.now(),
+          updatedBy: user.uid,
+          storageMode: 'subcollection',
+          manualSaveMode: 'dirty-students'
+        }, { merge: true });
+
+        writeCount += 1;
       }
 
       // ✅ 학생 데이터는 dirty라도 실제 저장 스냅샷과 값이 다를 때만 저장
@@ -1354,32 +1089,17 @@ export default function App() {
         }
 
         const studentRef = doc(studentsColRef, student.id);
-
-        saveOperations.push({
-          type: 'set',
-          target: 'student',
-          ref: studentRef,
-          id: student.id,
-          payload,
-          options: { merge: true },
-          student
-        });
+        batch.set(studentRef, payload, { merge: true });
 
         actuallySavedStudents.push(student);
+        writeCount += 1;
       });
-
-      clearSkippedUnchangedStudents(skippedUnchangedStudents);
 
       // ✅ 삭제된 학생 문서 삭제
       targetDeletedStudentIds.forEach(studentId => {
         const studentRef = doc(studentsColRef, studentId);
-
-        saveOperations.push({
-          type: 'delete',
-          target: 'deletedStudent',
-          ref: studentRef,
-          id: studentId
-        });
+        batch.delete(studentRef);
+        writeCount += 1;
       });
 
       // ✅ 반별 설정 저장
@@ -1387,44 +1107,79 @@ export default function App() {
         const classSettingRef = doc(classSettingsColRef, targetClassName);
         const classSettingsPayload = getClassSettingsPayloadFromLocalStorage(targetClassName);
 
-        saveOperations.push({
-          type: 'set',
-          target: 'classSettings',
-          ref: classSettingRef,
-          id: targetClassName,
-          payload: classSettingsPayload,
-          options: { merge: true }
-        });
+        batch.set(classSettingRef, classSettingsPayload, { merge: true });
+        writeCount += 1;
       });
 
-      if (saveOperations.length === 0) {
+      if (writeCount === 0) {
+        // dirty는 있었지만 실제 값 변경이 없는 경우 정리
+        setDirtyStudentIds(prev => {
+          const next = new Set(prev);
+          targetStudents.forEach(student => next.delete(student.id));
+          return next;
+        });
+
+        setDirtyFieldsByStudent(prev => {
+          const next = { ...prev };
+          targetStudents.forEach(student => {
+            delete next[student.id];
+          });
+          return next;
+        });
+
         setManualSaveStatus('saved');
         setManualSaveMessage('실제 변경된 저장 항목이 없습니다.');
         return;
       }
 
-      const restoreLikeDirtyFieldNames = [
-        'studentInfo',
-        'attendance',
-        'studyTime',
-        'dailyRecords',
-        'scores',
-        'consulting',
-        'notes'
-      ];
+      await Promise.race([
+        batch.commit(),
+        new Promise((_, reject) => {
+          setTimeout(() => {
+            reject(new Error('저장 요청 시간이 초과되었습니다. 네트워크 또는 Firebase 응답을 확인해주세요.'));
+          }, 15000);
+        })
+      ]);
 
-      const restoreLikeStudentCount = targetStudents.filter(student => {
-        const fields = dirtyFieldsByStudent[student.id] || [];
-        return restoreLikeDirtyFieldNames.every(fieldName => fields.includes(fieldName));
-      }).length;
+      setDirtyStudentIds(prev => {
+        const next = new Set(prev);
+        [...actuallySavedStudents, ...skippedUnchangedStudents].forEach(student => next.delete(student.id));
+        return next;
+      });
 
-      const isLikelyJsonRestoreSave =
-        targetStudents.length >= 50 &&
-        restoreLikeStudentCount >= Math.max(1, Math.floor(targetStudents.length * 0.5));
+      setDirtyFieldsByStudent(prev => {
+        const next = { ...prev };
+        [...actuallySavedStudents, ...skippedUnchangedStudents].forEach(student => {
+          delete next[student.id];
+        });
+        return next;
+      });
 
-      const initialChunkSize = isLikelyJsonRestoreSave ? 10 : 50;
+      actuallySavedStudents.forEach(student => {
+        savedStudentsSnapshotRef.current[student.id] = JSON.parse(JSON.stringify(student));
+      });
 
-      await commitOperationsWithAutoChunk(saveOperations, initialChunkSize);
+      if (targetDeletedStudentIds.length > 0) {
+        setDeletedStudentIds(prev => {
+          const next = new Set(prev);
+          targetDeletedStudentIds.forEach(studentId => next.delete(studentId));
+          return next;
+        });
+      }
+
+      if (shouldSaveClasses) {
+        setIsClassesDirty(false);
+      }
+
+      if (targetClassSettingNames.length > 0) {
+        setDirtyClassSettings(prev => {
+          const next = { ...prev };
+          targetClassSettingNames.forEach(className => {
+            delete next[className];
+          });
+          return next;
+        });
+      }
 
       const savedAt = new Date();
       setLastManualSavedAt(savedAt);
@@ -1435,14 +1190,12 @@ export default function App() {
 
       setManualSaveStatus('error');
 
-      if (isPayloadLimitError(error)) {
-        setManualSaveMessage('일부 저장 실패: 저장 데이터 용량 초과. 미저장 항목은 다시 저장 버튼을 눌러 재시도해주세요.');
-      } else if (isTimeoutError(error)) {
-        setManualSaveMessage('일부 저장 실패: 응답 지연. 미저장 항목은 다시 저장 버튼을 눌러 재시도해주세요.');
-      } else if (error?.code === 'resource-exhausted' || String(error?.message || '').includes('Quota exceeded')) {
+      if (error?.code === 'resource-exhausted' || String(error?.message || '').includes('Quota exceeded')) {
         setManualSaveMessage('저장실패: Firebase 사용량 초과');
+      } else if (String(error?.message || '').includes('초과')) {
+        setManualSaveMessage('저장실패: 응답 지연, 다시 시도');
       } else {
-        setManualSaveMessage('일부 저장 실패: 미저장 항목은 다시 저장 버튼을 눌러 재시도해주세요.');
+        setManualSaveMessage('저장실패, 다시 시도');
       }
     }
   };
@@ -3833,7 +3586,6 @@ function ClassDashboard({
   const [needListPage, setNeedListPage] = useState(1);
   const [needListPageSize, setNeedListPageSize] = useState(10);
   const [learningDataTagFilter, setLearningDataTagFilter] = useState('all');
-  const [learningDataSort, setLearningDataSort] = useState({ key: 'name', order: 'asc' });
   const [learningNeedPopover, setLearningNeedPopover] = useState(null);
   const [showTrendAnalysis, setShowTrendAnalysis] = useState(false);
   const [hoveredTrendIndex, setHoveredTrendIndex] = useState(null);
@@ -6802,176 +6554,58 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
   };
 
   const filteredStudents = useMemo(() => {
-    const normalizeSortString = (value) => String(value ?? '').trim();
-    const getSortNumber = (value) => {
-      if (value === null || value === undefined) return null;
-
-      const rawValue = String(value).trim();
-      if (!rawValue || rawValue === '-' || rawValue.toLowerCase() === 'nan') return null;
-
-      const numberValue = Number(rawValue.replace(/,/g, ''));
-      return Number.isFinite(numberValue) ? numberValue : null;
-    };
-    const compareNumberWithEmptyLast = (aValue, bValue) => {
-      const aNum = getSortNumber(aValue);
-      const bNum = getSortNumber(bValue);
-      const aEmpty = aNum === null;
-      const bEmpty = bNum === null;
-
-      if (aEmpty && bEmpty) return 0;
-      if (aEmpty) return 1;
-      if (bEmpty) return -1;
-
-      return sortOrder === 'asc' ? aNum - bNum : bNum - aNum;
-    };
-    const compareStringWithEmptyLast = (aValue, bValue) => {
-      const aText = normalizeSortString(aValue);
-      const bText = normalizeSortString(bValue);
-      const aEmpty = !aText || aText === '-';
-      const bEmpty = !bText || bText === '-';
-
-      if (aEmpty && bEmpty) return 0;
-      if (aEmpty) return 1;
-      if (bEmpty) return -1;
-
-      return sortOrder === 'asc'
-        ? aText.localeCompare(bText, 'ko')
-        : bText.localeCompare(aText, 'ko');
-    };
-    const getClassSortLabel = (student) => {
-      const classList = Array.isArray(student.classNames)
-        ? student.classNames.filter(Boolean)
-        : [student.className].filter(Boolean);
-
-      return classList.join(', ');
-    };
-    const hasAttendanceSortData = (student, month) => {
-      const excluded = attendanceSettings?.[month]?.excludedDays || [];
-      const attendanceData = getUnifiedAttendanceArray(student.attendance?.[month] || {});
-      const dayLimit = getMetricDayLimit(academicYear, month);
-
-      return attendanceData
-        .slice(0, dayLimit)
-        .some((value, dayIndex) => !excluded.includes(dayIndex) && String(value ?? '').trim() !== '');
-    };
-    const getAttendanceSortValue = (student, month) => {
-      return hasAttendanceSortData(student, month) ? getAttendanceRateNum(student, month) : null;
-    };
-    const getDailySortValue = (student, metric) => {
-      const stats = getDailyStats(student.dailyRecords?.[dailyMonth], dailyMonth, dailySubject);
-
-      if (!stats || Number(stats.count || 0) <= 0) return null;
-      if (metric === 'rate') return stats.rate;
-      if (metric === 'count') return stats.count;
-      if (metric === 'avg') return stats.avg;
-
-      return null;
-    };
-    const getWeeklySortValue = (student, month, subject) => {
-      const weeklyStats = getMonthlyWeeklyStats(student, month, subject);
-      return weeklyStats?.avgScore === '-' ? null : weeklyStats?.avgScore;
-    };
-    const getMonthlyMetricValue = (student, sortKeyValue) => {
-      const [, subject, metric = 'score'] = String(sortKeyValue || '').split('_');
-      const value = student.scores?.monthly?.[selectedMonth]?.[subject]?.[metric];
-      return getSortNumber(value) === null ? null : value;
-    };
-
     let result = classStudents.filter(s =>
       (s.name || '').includes(searchTerm) ||
       (s.id || '').includes(searchTerm) ||
       (s.userId || '').includes(searchTerm) ||
       (s.contact || '').includes(searchTerm)
     );
-
-    result = [...result].sort((a, b) => {
+    
+    result.sort((a, b) => {
       let valA, valB;
-
       if (sortKey === 'name') {
-        return compareStringWithEmptyLast(a.name, b.name);
-      }
+        return sortOrder === 'asc' ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name);
+      } else if (sortKey === 'studyTime') {
+        valA = getStudyTimeStats(a).totalMins; valB = getStudyTimeStats(b).totalMins;
+        return sortOrder === 'asc' ? valA - valB : valB - valA;
+      } else if (sortKey === 'attendanceRate') {
+        valA = getAttendanceRateNum(a, attendanceMonth); valB = getAttendanceRateNum(b, attendanceMonth);
+        return sortOrder === 'asc' ? valA - valB : valB - valA;
+      } else if (sortKey === 'dailyRate') {
+        valA = getDailyStats(a.dailyRecords[dailyMonth], dailyMonth).rate; valB = getDailyStats(b.dailyRecords[dailyMonth], dailyMonth).rate;
+        return sortOrder === 'asc' ? valA - valB : valB - valA;
+      } else if (sortKey === 'dailyAvg') {
+        valA = Number(getDailyStats(a.dailyRecords[dailyMonth], dailyMonth).avg); valB = Number(getDailyStats(b.dailyRecords[dailyMonth], dailyMonth).avg);
+        return sortOrder === 'asc' ? valA - valB : valB - valA;
+      } else if (sortKey === 'weeklyAvg') {
+        valA = getMonthlyWeeklyStats(a, weeklyMonth, weeklySubject).avgScore === '-' ? 0 : Number(getMonthlyWeeklyStats(a, weeklyMonth, weeklySubject).avgScore);
+        valB = getMonthlyWeeklyStats(b, weeklyMonth, weeklySubject).avgScore === '-' ? 0 : Number(getMonthlyWeeklyStats(b, weeklyMonth, weeklySubject).avgScore);
+        return sortOrder === 'asc' ? valA - valB : valB - valA;
+      } else if (sortKey === 'weeklyOverallAvg' || sortKey === 'weeklyEnglishOverallAvg') {
+        const aAvg = getMonthlyWeeklyStats(a, selectedMonth, 'english').avgScore;
+        const bAvg = getMonthlyWeeklyStats(b, selectedMonth, 'english').avgScore;
 
-      if (sortKey === 'className') {
-        return compareStringWithEmptyLast(getClassSortLabel(a), getClassSortLabel(b));
-      }
+        valA = aAvg === '-' ? -1 : Number(aAvg);
+        valB = bAvg === '-' ? -1 : Number(bAvg);
 
-      if (sortKey === 'gender') {
-        return compareStringWithEmptyLast(a.gender, b.gender);
-      }
+        return sortOrder === 'asc' ? valA - valB : valB - valA;
+      } else if (sortKey === 'weeklyMathOverallAvg') {
+        const aAvg = getMonthlyWeeklyStats(a, selectedMonth, 'math').avgScore;
+        const bAvg = getMonthlyWeeklyStats(b, selectedMonth, 'math').avgScore;
 
-      if (sortKey === 'transferType') {
-        return compareStringWithEmptyLast(a.transferType, b.transferType);
-      }
+        valA = aAvg === '-' ? -1 : Number(aAvg);
+        valB = bAvg === '-' ? -1 : Number(bAvg);
 
-      if (sortKey === 'targetTrack') {
-        return compareStringWithEmptyLast(a.targetTrack, b.targetTrack);
+        return sortOrder === 'asc' ? valA - valB : valB - valA;
+      } else if (sortKey.startsWith('monthly_')) {
+        const subject = sortKey.split('_')[1];
+        valA = Number(a.scores?.monthly?.[selectedMonth]?.[subject]?.score || 0); valB = Number(b.scores?.monthly?.[selectedMonth]?.[subject]?.score || 0);
+        return sortOrder === 'asc' ? valA - valB : valB - valA;
       }
-
-      if (sortKey === 'studyTime') {
-        valA = getStudyTimeStats(a).totalMins > 0 ? getStudyTimeStats(a).totalMins : null;
-        valB = getStudyTimeStats(b).totalMins > 0 ? getStudyTimeStats(b).totalMins : null;
-        return compareNumberWithEmptyLast(valA, valB);
-      }
-
-      if (sortKey === 'attendanceRate') {
-        valA = getAttendanceSortValue(a, attendanceMonth);
-        valB = getAttendanceSortValue(b, attendanceMonth);
-        return compareNumberWithEmptyLast(valA, valB);
-      }
-
-      if (sortKey === 'attendancePenalty') {
-        valA = getAttendancePenalty(a, attendanceMonth);
-        valB = getAttendancePenalty(b, attendanceMonth);
-        return compareNumberWithEmptyLast(valA, valB);
-      }
-
-      if (sortKey === 'dailyRate') {
-        valA = getDailySortValue(a, 'rate');
-        valB = getDailySortValue(b, 'rate');
-        return compareNumberWithEmptyLast(valA, valB);
-      }
-
-      if (sortKey === 'dailyCount') {
-        valA = getDailySortValue(a, 'count');
-        valB = getDailySortValue(b, 'count');
-        return compareNumberWithEmptyLast(valA, valB);
-      }
-
-      if (sortKey === 'dailyAvg') {
-        valA = getDailySortValue(a, 'avg');
-        valB = getDailySortValue(b, 'avg');
-        return compareNumberWithEmptyLast(valA, valB);
-      }
-
-      if (sortKey === 'weeklyAvg') {
-        valA = getWeeklySortValue(a, weeklyMonth, weeklySubject);
-        valB = getWeeklySortValue(b, weeklyMonth, weeklySubject);
-        return compareNumberWithEmptyLast(valA, valB);
-      }
-
-      if (sortKey === 'weeklyOverallAvg' || sortKey === 'weeklyEnglishOverallAvg') {
-        valA = getWeeklySortValue(a, selectedMonth, 'english');
-        valB = getWeeklySortValue(b, selectedMonth, 'english');
-        return compareNumberWithEmptyLast(valA, valB);
-      }
-
-      if (sortKey === 'weeklyMathOverallAvg') {
-        valA = getWeeklySortValue(a, selectedMonth, 'math');
-        valB = getWeeklySortValue(b, selectedMonth, 'math');
-        return compareNumberWithEmptyLast(valA, valB);
-      }
-
-      if (sortKey.startsWith('monthly_')) {
-        valA = getMonthlyMetricValue(a, sortKey);
-        valB = getMonthlyMetricValue(b, sortKey);
-        return compareNumberWithEmptyLast(valA, valB);
-      }
-
       return 0;
     });
-
     return result;
-  }, [classStudents, searchTerm, sortKey, sortOrder, selectedMonth, studyTimeMonth, dailyMonth, weeklyMonth, dailySettings, weeklySubject, dailySubject, attendanceMonth, penaltyRules, attendanceSettings, academicYear]);
+  }, [classStudents, searchTerm, sortKey, sortOrder, selectedMonth, studyTimeMonth, dailyMonth, weeklyMonth, dailySettings, weeklySubject]);
 
   const reportStudentsForList = useMemo(() => {
     return [...filteredStudents].sort((a, b) => {
@@ -7038,16 +6672,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
   }, [filteredStudents, weeklySearchTerm, weeklyScoreSort, weeklySubject, weeklyMonth, weeklyScoresClassFilter]);
 
   const handleSort = (key) => {
-    if (sortKey === key) {
-      setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
-    } else {
-      setSortKey(key);
-      setSortOrder(
-        ['name', 'className', 'gender', 'transferType', 'targetTrack'].includes(key)
-          ? 'asc'
-          : 'desc'
-      );
-    }
+    if (sortKey === key) setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
+    else { setSortKey(key); setSortOrder(key === 'name' ? 'asc' : 'desc'); }
   };
 
   const handleDeleteStudent = (e, id, name) => {
@@ -11539,19 +11165,11 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                               <div className="flex items-center justify-center gap-1">학생명 {sortKey === 'name' ? (sortOrder === 'asc' ? <ArrowDownAZ size={14}/> : <ArrowUpZA size={14}/>) : <ArrowDownAZ size={14} className="opacity-30"/>}</div>
                            </th>
                            <th className="px-4 py-3">아이디 / 수험번호</th>
-                           <th className="px-4 py-3 cursor-pointer hover:bg-slate-100 transition-colors" onClick={() => handleSort('className')}>
-                              <div className="flex items-center justify-center gap-1">수강반 {sortKey === 'className' ? (sortOrder === 'asc' ? <ArrowDownAZ size={14}/> : <ArrowUpZA size={14}/>) : <ArrowDownAZ size={14} className="opacity-30"/>}</div>
-                           </th>
+                           <th className="px-4 py-3">수강반</th>
                            <th className="px-4 py-3">연락처</th>
-                           <th className="px-4 py-3 cursor-pointer hover:bg-slate-100 transition-colors" onClick={() => handleSort('gender')}>
-                              <div className="flex items-center justify-center gap-1">성별 {sortKey === 'gender' ? (sortOrder === 'asc' ? <ArrowDownAZ size={14}/> : <ArrowUpZA size={14}/>) : <ArrowDownAZ size={14} className="opacity-30"/>}</div>
-                           </th>
-                           <th className="px-4 py-3 cursor-pointer hover:bg-slate-100 transition-colors" onClick={() => handleSort('transferType')}>
-                              <div className="flex items-center justify-center gap-1">편입구분 {sortKey === 'transferType' ? (sortOrder === 'asc' ? <ArrowDownAZ size={14}/> : <ArrowUpZA size={14}/>) : <ArrowDownAZ size={14} className="opacity-30"/>}</div>
-                           </th>
-                           <th className="px-4 py-3 cursor-pointer hover:bg-slate-100 transition-colors" onClick={() => handleSort('targetTrack')}>
-                              <div className="flex items-center justify-center gap-1">계열 {sortKey === 'targetTrack' ? (sortOrder === 'asc' ? <ArrowDownAZ size={14}/> : <ArrowUpZA size={14}/>) : <ArrowDownAZ size={14} className="opacity-30"/>}</div>
-                           </th>
+                           <th className="px-4 py-3">성별</th>
+                           <th className="px-4 py-3">편입구분</th>
+                           <th className="px-4 py-3">계열</th>
                            <th className="px-4 py-3 text-rose-500">관리</th>
                          </tr>
                        </thead>
@@ -12179,14 +11797,14 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                           />
                         </th>
                         <th rowSpan={2} className="w-[46px] min-w-[46px] px-2 py-2 border-r border-slate-100 sticky left-[38px] z-30 bg-white shadow-[2px_0_8px_rgba(15,23,42,0.04)] text-center">No.</th>
-                        <th rowSpan={2} className="w-[170px] min-w-[170px] px-3 py-2 border-r border-slate-100 sticky left-[84px] z-30 bg-white shadow-[2px_0_8px_rgba(15,23,42,0.04)] text-left cursor-pointer hover:bg-slate-50" onClick={() => handleSort('name')}>
-                          이름 {sortKey === 'name' ? (sortOrder === 'asc' ? '▲' : '▼') : '↕'}
+                        <th rowSpan={2} className="w-[170px] min-w-[170px] px-3 py-2 border-r border-slate-100 sticky left-[84px] z-30 bg-white shadow-[2px_0_8px_rgba(15,23,42,0.04)] text-left cursor-pointer" onClick={() => { setSortKey('name'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
+                          이름 ↕
                         </th>
-                        <th rowSpan={2} className="w-[66px] min-w-[66px] px-2 py-2 border-r border-slate-100 sticky left-[254px] z-30 bg-rose-50 text-rose-600 shadow-[2px_0_8px_rgba(15,23,42,0.04)] cursor-pointer hover:bg-rose-100" onClick={() => handleSort('attendancePenalty')}>
-                          벌점 {sortKey === 'attendancePenalty' ? (sortOrder === 'asc' ? '▲' : '▼') : '↕'}
+                        <th rowSpan={2} className="w-[66px] min-w-[66px] px-2 py-2 border-r border-slate-100 sticky left-[254px] z-30 bg-rose-50 text-rose-600 shadow-[2px_0_8px_rgba(15,23,42,0.04)]">
+                          벌점
                         </th>
-                        <th rowSpan={2} className="w-[82px] min-w-[82px] px-2 py-2 border-r border-slate-100 sticky left-[320px] z-30 bg-white shadow-[2px_0_8px_rgba(15,23,42,0.04)] cursor-pointer hover:bg-slate-50" onClick={() => handleSort('attendanceRate')}>
-                          출석률 {sortKey === 'attendanceRate' ? (sortOrder === 'asc' ? '▲' : '▼') : '↕'}
+                        <th rowSpan={2} className="w-[82px] min-w-[82px] px-2 py-2 border-r border-slate-100 sticky left-[320px] z-30 bg-white shadow-[2px_0_8px_rgba(15,23,42,0.04)] cursor-pointer" onClick={() => { setSortKey('attendanceRate'); setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }}>
+                          출석률 ↕
                         </th>
                         {visibleAttendanceDayIndexes.map((i) => (
                           <th key={`day-head-${i}`} className={`min-w-[62px] w-[62px] px-1.5 py-2 border-r border-slate-100 ${getDayHeaderClass(i)}`}>
@@ -12398,45 +12016,17 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
             };
 
             const formatSignedHourMinute = (mins) => {
-              if (!Number.isFinite(Number(mins))) return '-';
+              const value = Number(mins);
 
-              const sign = Number(mins) > 0 ? '+' : Number(mins) < 0 ? '-' : '';
-              const abs = Math.abs(Number(mins));
+              if (!Number.isFinite(value)) return '0시간 0분';
+
+              const sign = value > 0 ? '+' : value < 0 ? '-' : '';
+              const abs = Math.abs(value);
 
               return `${sign}${Math.floor(abs / 60)}시간 ${abs % 60}분`;
             };
 
-            const formatStudyDeltaSub = (currentValue, prevValue) => {
-              const currentNum = Number(currentValue);
-              const prevNum = Number(prevValue);
-
-              if (!Number.isFinite(currentNum) || !Number.isFinite(prevNum) || prevNum <= 0) {
-                return {
-                  text: '전월 비교 데이터 없음',
-                  className: 'text-slate-400'
-                };
-              }
-
-              const diff = currentNum - prevNum;
-
-              if (diff === 0) {
-                return {
-                  text: '전월 대비 변동 없음',
-                  className: 'text-slate-500'
-                };
-              }
-
-              return {
-                text: `전월 대비 ${formatSignedHourMinute(diff)} ${diff > 0 ? '↗' : '↘'}`,
-                className: diff > 0 ? 'text-emerald-600' : 'text-rose-500'
-              };
-            };
-
-            const getStudyPrevMonth = (month) => {
-              const monthIndex = MONTHS.indexOf(month);
-              if (monthIndex <= 0) return null;
-              return MONTHS[monthIndex - 1];
-            };
+            const formatDeltaTime = formatSignedHourMinute;
 
             const getMonthlyStudyMins = (student, month = studyTimeMonth) => {
               return (student.studyTime?.[month] || []).reduce((sum, day) => {
@@ -12448,74 +12038,21 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
               return (student.studyTime?.[month] || []).filter(day => parseTimeDiffToMins(day?.in, day?.out) > 0).length;
             };
 
-            const getCheckInAverageMins = (month = studyTimeMonth) => {
+            const getCheckInAverageText = () => {
               const checkInMins = [];
-
               classStudents.forEach(student => {
-                (student.studyTime?.[month] || []).forEach(day => {
+                (student.studyTime?.[studyTimeMonth] || []).forEach(day => {
                   if (!day?.in) return;
-
                   const [hour, minute] = String(day.in).split(':').map(Number);
-
                   if (Number.isFinite(hour) && Number.isFinite(minute)) {
                     checkInMins.push(hour * 60 + minute);
                   }
                 });
               });
 
-              if (!checkInMins.length) return null;
-              return Math.round(checkInMins.reduce((sum, value) => sum + value, 0) / checkInMins.length);
-            };
-
-            const getCheckInAverageText = () => {
-              const avg = getCheckInAverageMins(studyTimeMonth);
-
-              if (avg === null) return '-';
+              if (!checkInMins.length) return '-';
+              const avg = Math.round(checkInMins.reduce((sum, value) => sum + value, 0) / checkInMins.length);
               return `${String(Math.floor(avg / 60)).padStart(2, '0')}:${String(avg % 60).padStart(2, '0')}`;
-            };
-
-            const getStudyMonthSummary = (month) => {
-              if (!month) {
-                return {
-                  totalMins: null,
-                  averageMins: null,
-                  top5AverageMins: null,
-                  checkInAverageMins: null
-                };
-              }
-
-              const monthRows = classStudents
-                .map(student => {
-                  const mins = getMonthlyStudyMins(student, month);
-                  const days = getMonthlyStudyDays(student, month);
-
-                  return { mins, days };
-                })
-                .filter(item => item.mins > 0 || item.days > 0)
-                .sort((a, b) => b.mins - a.mins);
-
-              if (!monthRows.length) {
-                return {
-                  totalMins: null,
-                  averageMins: null,
-                  top5AverageMins: null,
-                  checkInAverageMins: getCheckInAverageMins(month)
-                };
-              }
-
-              const totalMins = monthRows.reduce((sum, item) => sum + item.mins, 0);
-              const averageMins = Math.floor(totalMins / monthRows.length);
-              const top5Rows = monthRows.slice(0, 5);
-              const top5AverageMins = top5Rows.length
-                ? Math.floor(top5Rows.reduce((sum, item) => sum + item.mins, 0) / top5Rows.length)
-                : null;
-
-              return {
-                totalMins,
-                averageMins,
-                top5AverageMins,
-                checkInAverageMins: getCheckInAverageMins(month)
-              };
             };
 
             const baseStudyStudents = [...filteredStudents];
@@ -12588,63 +12125,6 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
             const monthlyTopMins = validMonthlyRankingData[0]?.mins || 1;
             const totalTopMins = validTotalRankingData[0]?.mins || 1;
 
-            const prevStudyMonth = getStudyPrevMonth(studyTimeMonth);
-            const prevStudySummary = getStudyMonthSummary(prevStudyMonth);
-            const studyAverageDelta = formatStudyDeltaSub(monthlyAverageMins, prevStudySummary.averageMins);
-            const studyTotalDelta = formatStudyDeltaSub(totalMonthlyMins, prevStudySummary.totalMins);
-            const studyCheckInDelta = formatStudyDeltaSub(getCheckInAverageMins(studyTimeMonth), prevStudySummary.checkInAverageMins);
-            const studyTop5Delta = formatStudyDeltaSub(top5AverageMins, prevStudySummary.top5AverageMins);
-
-            const parseStudyTimeSortMinutes = (timeValue) => {
-              const value = String(timeValue || '').trim();
-              if (!value || value === '-') return null;
-
-              const [hourText, minuteText = '0'] = value.split(':');
-              const hour = Number(hourText);
-              const minute = Number(minuteText);
-
-              if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
-              return hour * 60 + minute;
-            };
-
-            const getStudyTimeSortNumber = (value) => {
-              if (value === null || value === undefined) return null;
-
-              const rawValue = String(value).trim();
-              if (!rawValue || rawValue === '-' || rawValue.toLowerCase() === 'nan') return null;
-
-              const numberValue = Number(rawValue);
-              return Number.isFinite(numberValue) ? numberValue : null;
-            };
-
-            const compareStudyTimeNumbers = (aValue, bValue) => {
-              const aNum = getStudyTimeSortNumber(aValue);
-              const bNum = getStudyTimeSortNumber(bValue);
-              const aEmpty = aNum === null;
-              const bEmpty = bNum === null;
-
-              if (aEmpty && bEmpty) return 0;
-              if (aEmpty) return 1;
-              if (bEmpty) return -1;
-
-              return studyTimeSortOrder === 'asc' ? aNum - bNum : bNum - aNum;
-            };
-
-            const getStudyTimeDaySortValue = (student, sortKeyValue) => {
-              const [, type, dayText] = String(sortKeyValue || '').split('_');
-              const dayIndex = Number(dayText);
-              const dayData = student.studyTime?.[studyTimeMonth]?.[dayIndex] || {};
-
-              if (type === 'in') return parseStudyTimeSortMinutes(dayData.in);
-              if (type === 'out') return parseStudyTimeSortMinutes(dayData.out);
-              if (type === 'duration') {
-                const mins = parseTimeDiffToMins(dayData.in, dayData.out);
-                return mins > 0 ? mins : null;
-              }
-
-              return null;
-            };
-
             const sortedStudyStudents = [...baseStudyStudents].sort((a, b) => {
               if (studyTimeSortKey === 'name') {
                 return studyTimeSortOrder === 'asc'
@@ -12655,13 +12135,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
               if (studyTimeSortKey === 'studyTime') {
                 const aMins = getMonthlyStudyMins(a, studyTimeMonth);
                 const bMins = getMonthlyStudyMins(b, studyTimeMonth);
-                return compareStudyTimeNumbers(aMins > 0 ? aMins : null, bMins > 0 ? bMins : null);
-              }
-
-              if (String(studyTimeSortKey || '').startsWith('day_')) {
-                const aValue = getStudyTimeDaySortValue(a, studyTimeSortKey);
-                const bValue = getStudyTimeDaySortValue(b, studyTimeSortKey);
-                return compareStudyTimeNumbers(aValue, bValue);
+                return studyTimeSortOrder === 'asc' ? aMins - bMins : bMins - aMins;
               }
 
               const aRank = monthlyRankMap[a.id] || 999999;
@@ -13686,32 +13160,32 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                         icon={Clock}
                         title="이번달 평균 학습시간"
                         value={classAvgStudyTime}
-                        sub={studyAverageDelta.text}
-                        subClassName={studyAverageDelta.className}
+                        sub="전월 대비 +18분 ↗"
+                        subClassName="text-emerald-600"
                       />
                       <StudyStatCard
                         compact
                         icon={BarChart3}
                         title="누적 학습시간"
                         value={formatHourMinute(totalMonthlyMins)}
-                        sub={studyTotalDelta.text}
-                        subClassName={studyTotalDelta.className}
+                        sub="전월 대비 +96시간 12분 ↗"
+                        subClassName="text-emerald-600"
                       />
                       <StudyStatCard
                         compact
                         icon={Clock}
                         title="평균 등원시간"
                         value={getCheckInAverageText()}
-                        sub={studyCheckInDelta.text}
-                        subClassName={studyCheckInDelta.className}
+                        sub="전월 대비 -0:06 ↓"
+                        subClassName="text-emerald-600"
                       />
                       <StudyStatCard
                         compact
                         icon={Users}
                         title="상위 5명 평균"
                         value={formatHourMinute(top5AverageMins)}
-                        sub={studyTop5Delta.text}
-                        subClassName={studyTop5Delta.className}
+                        sub="전월 대비 +14분 ↗"
+                        subClassName="text-emerald-600"
                       />
                     </div>
 
@@ -13950,25 +13424,13 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                                 })}
                               </tr>
                               <tr className="bg-white text-[11px] text-slate-700">
-                                {visibleStudyDays.map(dayIdx => {
-                                  const inSortKey = `day_in_${dayIdx}`;
-                                  const outSortKey = `day_out_${dayIdx}`;
-                                  const durationSortKey = `day_duration_${dayIdx}`;
-
-                                  return (
-                                    <React.Fragment key={dayIdx}>
-                                      <th onClick={() => handleStudyTimeSort(inSortKey)} className="px-2 py-2 border-r border-slate-100 font-black cursor-pointer hover:bg-blue-50">
-                                        등원 {studyTimeSortKey === inSortKey ? (studyTimeSortOrder === 'asc' ? '▲' : '▼') : '↕'}
-                                      </th>
-                                      <th onClick={() => handleStudyTimeSort(outSortKey)} className="px-2 py-2 border-r border-slate-100 font-black cursor-pointer hover:bg-blue-50">
-                                        하원 {studyTimeSortKey === outSortKey ? (studyTimeSortOrder === 'asc' ? '▲' : '▼') : '↕'}
-                                      </th>
-                                      <th onClick={() => handleStudyTimeSort(durationSortKey)} className="px-2 py-2 border-r border-slate-100 font-black cursor-pointer hover:bg-blue-50">
-                                        학습시간 {studyTimeSortKey === durationSortKey ? (studyTimeSortOrder === 'asc' ? '▲' : '▼') : '↕'}
-                                      </th>
-                                    </React.Fragment>
-                                  );
-                                })}
+                                {visibleStudyDays.map(dayIdx => (
+                                  <React.Fragment key={dayIdx}>
+                                    <th className="px-2 py-2 border-r border-slate-100 font-black">등원</th>
+                                    <th className="px-2 py-2 border-r border-slate-100 font-black">하원</th>
+                                    <th className="px-2 py-2 border-r border-slate-100 font-black">학습시간</th>
+                                  </React.Fragment>
+                                ))}
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100">
@@ -14055,55 +13517,20 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                             >
                               <ChevronLeft size={16} />
                             </button>
-                            {(() => {
-                              const pageWindow = new Set([
-                                1,
-                                totalStudyPages,
-                                safeStudyPage - 2,
-                                safeStudyPage - 1,
-                                safeStudyPage,
-                                safeStudyPage + 1,
-                                safeStudyPage + 2
-                              ]);
-
-                              const pages = Array.from(pageWindow)
-                                .filter(page => page >= 1 && page <= totalStudyPages)
-                                .sort((a, b) => a - b);
-
-                              const items = [];
-
-                              pages.forEach((page, index) => {
-                                const prevPage = pages[index - 1];
-
-                                if (index > 0 && page - prevPage > 1) {
-                                  items.push(
-                                    <span key={`ellipsis-${prevPage}-${page}`} className="px-1 text-slate-400 font-black">
-                                      ...
-                                    </span>
-                                  );
-                                }
-
-                                items.push(
-                                  <button
-                                    key={page}
-                                    type="button"
-                                    onClick={() => setStudyTimeCurrentPage(page)}
-                                    className={`w-9 h-9 rounded-xl font-black ${
-                                      page === safeStudyPage
-                                        ? 'bg-blue-600 text-white shadow-sm'
-                                        : 'border border-slate-200 text-slate-500 hover:bg-slate-50'
-                                    }`}
-                                  >
-                                    {page}
-                                  </button>
-                                );
-                              });
-
-                              return items;
-                            })()}
-                            <span className="px-2 text-xs font-black text-slate-500 whitespace-nowrap">
-                              {safeStudyPage} / {totalStudyPages}
-                            </span>
+                            {Array.from({ length: totalStudyPages }, (_, i) => i + 1).slice(0, 7).map(page => (
+                              <button
+                                key={page}
+                                type="button"
+                                onClick={() => setStudyTimeCurrentPage(page)}
+                                className={`w-9 h-9 rounded-xl font-black ${
+                                  page === safeStudyPage
+                                    ? 'bg-blue-600 text-white shadow-sm'
+                                    : 'border border-slate-200 text-slate-500 hover:bg-slate-50'
+                                }`}
+                              >
+                                {page}
+                              </button>
+                            ))}
                             <button
                               type="button"
                               disabled={safeStudyPage >= totalStudyPages}
@@ -14806,18 +14233,10 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                                 />
                               </th>
                               <th rowSpan={2} className="w-11 min-w-[44px] px-2 py-2 border-r border-slate-200 sticky left-[36px] z-30 bg-slate-50">No.</th>
-                              <th rowSpan={2} onClick={() => handleSort('name')} className="w-24 min-w-[94px] px-2 py-2 border-r border-slate-200 sticky left-[80px] z-30 bg-slate-50 cursor-pointer hover:bg-slate-100">
-                                학생명 {sortKey === 'name' ? (sortOrder === 'asc' ? '▲' : '▼') : '↕'}
-                              </th>
-                              <th rowSpan={2} onClick={() => handleSort('dailyRate')} className="w-24 min-w-[96px] px-2 py-2 border-r border-slate-200 sticky left-[174px] z-30 bg-slate-50 cursor-pointer hover:bg-slate-100">
-                                참여율 {sortKey === 'dailyRate' ? (sortOrder === 'asc' ? '▲' : '▼') : '↕'}
-                              </th>
-                              <th rowSpan={2} onClick={() => handleSort('dailyCount')} className="w-24 min-w-[96px] px-2 py-2 border-r border-slate-200 sticky left-[270px] z-30 bg-slate-50 cursor-pointer hover:bg-slate-100">
-                                누적 응시 {sortKey === 'dailyCount' ? (sortOrder === 'asc' ? '▲' : '▼') : '↕'}
-                              </th>
-                              <th rowSpan={2} onClick={() => handleSort('dailyAvg')} className="w-24 min-w-[96px] px-2 py-2 border-r border-slate-200 sticky left-[366px] z-30 bg-slate-50 cursor-pointer hover:bg-slate-100">
-                                평균 점수 {sortKey === 'dailyAvg' ? (sortOrder === 'asc' ? '▲' : '▼') : '↕'}
-                              </th>
+                              <th rowSpan={2} className="w-24 min-w-[94px] px-2 py-2 border-r border-slate-200 sticky left-[80px] z-30 bg-slate-50">학생명</th>
+                              <th rowSpan={2} className="w-24 min-w-[96px] px-2 py-2 border-r border-slate-200 sticky left-[174px] z-30 bg-slate-50">참여율</th>
+                              <th rowSpan={2} className="w-24 min-w-[96px] px-2 py-2 border-r border-slate-200 sticky left-[270px] z-30 bg-slate-50">누적 응시</th>
+                              <th rowSpan={2} className="w-24 min-w-[96px] px-2 py-2 border-r border-slate-200 sticky left-[366px] z-30 bg-slate-50">평균 점수</th>
                               {visibleDailyDayIndexes.map((index) => {
                                 const day = index + 1;
                                 const isExcluded = excludedDays.includes(index);
@@ -15031,9 +14450,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                           <th className="py-4 px-4 text-slate-600 font-bold cursor-pointer hover:bg-slate-50" onClick={() => handleSort('dailyRate')}>
                             응시율 {sortKey === 'dailyRate' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}
                           </th>
-                          <th className="py-4 px-4 text-slate-600 font-bold cursor-pointer hover:bg-slate-50" onClick={() => handleSort('dailyCount')}>
-                            누적 응시 {sortKey === 'dailyCount' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}
-                          </th>
+                          <th className="py-4 px-4 text-slate-600 font-bold">누적 점수</th>
                           <th className="py-4 px-4 text-indigo-600 font-bold cursor-pointer hover:bg-indigo-50" onClick={() => handleSort('dailyAvg')}>
                             평균 점수 {sortKey === 'dailyAvg' ? (sortOrder === 'asc' ? '↓' : '↑') : ''}
                           </th>
@@ -15879,81 +15296,6 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                       return className === '대구캠퍼스 전체' || studentClassNames.includes(className);
                     });
 
-                    const getWeeklyPrevMonth = (month) => {
-                      const monthIndex = MONTHS.indexOf(month);
-                      if (monthIndex <= 0) return null;
-                      return MONTHS[monthIndex - 1];
-                    };
-
-                    const formatWeeklyDeltaText = (currentValue, prevValue, suffix = '점') => {
-                      const currentNum = Number(currentValue);
-                      const prevNum = Number(prevValue);
-
-                      if (!Number.isFinite(currentNum) || !Number.isFinite(prevNum) || prevNum <= 0) {
-                        return {
-                          text: '전월 비교 데이터 없음',
-                          className: 'text-slate-400'
-                        };
-                      }
-
-                      const diff = Math.round((currentNum - prevNum) * 10) / 10;
-
-                      if (diff === 0) {
-                        return {
-                          text: '전월 대비 변동 없음',
-                          className: 'text-slate-500'
-                        };
-                      }
-
-                      return {
-                        text: `전월 대비 ${diff > 0 ? '▲' : '▼'} ${Math.abs(diff)}${suffix}`,
-                        className: diff > 0 ? 'text-emerald-600' : 'text-rose-500'
-                      };
-                    };
-
-                    const getWeeklySummaryForMonthWeek = (month, week) => {
-                      if (!month || !week) {
-                        return {
-                          averageScore: null,
-                          correctRate: null
-                        };
-                      }
-
-                      const targetWeekKey = `${month}_w${week}`;
-                      const rows = targetStudents
-                        .map(student => {
-                          const rawScore = student.scores?.[scoreField]?.[targetWeekKey] ?? student.scores?.[scoreField]?.[`w${week}`];
-                          const rawScoreText = String(rawScore ?? '').trim();
-                          const score = rawScoreText === '' ? NaN : Number(rawScoreText);
-
-                          return {
-                            score: Number.isFinite(score) ? score : null,
-                            details: student.scores?.[detailField]?.[targetWeekKey] || student.scores?.[detailField]?.[`w${week}`] || []
-                          };
-                        })
-                        .filter(item => item.score !== null);
-
-                      const averageScoreValue = rows.length
-                        ? Math.round((rows.reduce((sum, item) => sum + item.score, 0) / rows.length) * 10) / 10
-                        : null;
-
-                      let totalQuestions = 0;
-                      let correctQuestions = 0;
-
-                      rows.forEach(item => {
-                        const details = Array.isArray(item.details) ? item.details : [];
-                        details.forEach(detail => {
-                          totalQuestions += 1;
-                          if (detail?.isCorrect) correctQuestions += 1;
-                        });
-                      });
-
-                      return {
-                        averageScore: averageScoreValue,
-                        correctRate: totalQuestions ? Math.round((correctQuestions / totalQuestions) * 1000) / 10 : null
-                      };
-                    };
-
                     const scoredStudents = targetStudents
                       .map(student => {
                         const rawScore = student.scores?.[scoreField]?.[weekKey] ?? student.scores?.[scoreField]?.[`w${selectedWeek}`];
@@ -15989,11 +15331,6 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
 
                       return totalQuestions ? Math.round((correctQuestions / totalQuestions) * 1000) / 10 : 0;
                     })();
-
-                    const prevWeeklyMonth = getWeeklyPrevMonth(weeklyMonth);
-                    const prevWeeklySummary = getWeeklySummaryForMonthWeek(prevWeeklyMonth, selectedWeek);
-                    const weeklyAverageScoreDelta = formatWeeklyDeltaText(averageScore, prevWeeklySummary.averageScore, '점');
-                    const weeklyCorrectRateDelta = formatWeeklyDeltaText(correctRate, prevWeeklySummary.correctRate, '%p');
 
                     const weeklyAveragePoints = weeklyWeekNumbers.map(week => {
                       const key = `${weeklyMonth}_w${week}`;
@@ -16348,14 +15685,14 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                                   <TrendingUp size={25} className="text-emerald-500 mb-3" />
                                   <p className="text-xs font-black text-slate-500">평균 점수</p>
                                   <p className="text-xl font-black text-slate-900 mt-0.5">{averageScore}점</p>
-                                  <p className={`text-[11px] font-bold mt-1 ${weeklyAverageScoreDelta.className}`}>{weeklyAverageScoreDelta.text}</p>
+                                  <p className="text-[11px] font-bold text-emerald-600 mt-1">전월 대비 ▲ 8.4점</p>
                                 </div>
 
                                 <div className="rounded-xl border border-slate-200 bg-white p-3">
                                   <BarChart3 size={25} className="text-blue-600 mb-3" />
                                   <p className="text-xs font-black text-slate-500">평균 정답률</p>
                                   <p className="text-xl font-black text-slate-900 mt-0.5">{correctRate}%</p>
-                                  <p className={`text-[11px] font-bold mt-1 ${weeklyCorrectRateDelta.className}`}>{weeklyCorrectRateDelta.text}</p>
+                                  <p className="text-[11px] font-bold text-emerald-600 mt-1">전월 대비 ▲ 9.3%</p>
                                 </div>
 
                                 <div className="rounded-xl border border-slate-200 bg-white p-3">
@@ -16623,38 +15960,24 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                       return 'bg-rose-50 text-rose-600 border-rose-100';
                     };
 
-                    const weeklyImplementedWeeks = weeklyWeekNumbers
-                      .filter(week => getWeekSubmittedScores(week).length > 0)
-                      .sort((a, b) => {
-                        const timeA = getWeeklySettingTime(a);
-                        const timeB = getWeeklySettingTime(b);
-
-                        if (timeA !== timeB) return timeA - timeB;
-                        return a - b;
-                      });
-
-                    const baseScoreRowsWithoutPercentile = weeklyFilteredStudents.map((student, index) => {
+                    const baseScoreRows = weeklyFilteredStudents.map((student, index) => {
                       const weekScores = weeklyWeekNumbers.map(week => getWeeklyScoreValue(student, week));
                       const validTrendItems = getValidStudentWeeklyTrendItems(student);
                       const validScores = validTrendItems.map(item => item.score);
                       const latestValidWeek = getLatestValidWeekForStudent(student);
                       const latestScore = latestValidWeek ? getWeeklyScoreValue(student, latestValidWeek) : null;
-
-                      const cumulativeScores = weeklyImplementedWeeks.map(week => {
-                        const score = getWeeklyScoreValue(student, week);
-                        return Number.isFinite(Number(score)) ? Number(score) : 0;
-                      });
-
-                      const avgScore = cumulativeScores.length
-                        ? Math.round((cumulativeScores.reduce((sum, score) => sum + score, 0) / cumulativeScores.length) * 10) / 10
+                      const avgScore = validScores.length
+                        ? Math.round((validScores.reduce((sum, score) => sum + score, 0) / validScores.length) * 10) / 10
                         : null;
-
                       const previousScore = validScores.length >= 2 ? validScores[validScores.length - 2] : null;
                       const scoreDiff = latestScore !== null && previousScore !== null
                         ? Math.round((latestScore - previousScore) * 10) / 10
                         : null;
                       const correctRate = latestValidWeek
                         ? getWeeklyCorrectRateForWeek(student, latestValidWeek)
+                        : null;
+                      const percentile = latestValidWeek
+                        ? getWeeklyPercentileForStudent(student, latestValidWeek)
                         : null;
 
                       return {
@@ -16666,29 +15989,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                         avgScore,
                         correctRate,
                         scoreDiff,
-                        percentile: null
-                      };
-                    });
-
-                    const cumulativeAverageScores = baseScoreRowsWithoutPercentile
-                      .map(row => row.avgScore)
-                      .filter(score => Number.isFinite(Number(score)));
-
-                    const baseScoreRows = baseScoreRowsWithoutPercentile.map(row => {
-                      const avgScore = Number(row.avgScore);
-
-                      if (!Number.isFinite(avgScore) || !cumulativeAverageScores.length) {
-                        return {
-                          ...row,
-                          percentile: null
-                        };
-                      }
-
-                      const lowerOrEqualCount = cumulativeAverageScores.filter(score => score <= avgScore).length;
-
-                      return {
-                        ...row,
-                        percentile: Math.round((lowerOrEqualCount / cumulativeAverageScores.length) * 100)
+                        percentile
                       };
                     });
 
@@ -16820,91 +16121,6 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                       ? Math.round((validCorrectRows.reduce((sum, row) => sum + Number(row.correctRate || 0), 0) / validCorrectRows.length) * 10) / 10
                       : 0;
                     const improvedCount = scoreRows.filter(row => Number(row.scoreDiff) > 0).length;
-
-                    const formatWeeklyScoreCompareText = (label, currentValue, compareValue) => {
-                      const currentNum = Number(currentValue);
-                      const compareNum = Number(compareValue);
-
-                      if (!Number.isFinite(currentNum) || !Number.isFinite(compareNum) || compareNum <= 0) {
-                        return {
-                          text: `${label} 비교 데이터 없음`,
-                          className: 'text-slate-400'
-                        };
-                      }
-
-                      const diff = Math.round((currentNum - compareNum) * 10) / 10;
-
-                      if (diff === 0) {
-                        return {
-                          text: `${label} 변동 없음`,
-                          className: 'text-slate-500'
-                        };
-                      }
-
-                      return {
-                        text: `${label} ${diff > 0 ? '▲' : '▼'} ${Math.abs(diff)}점`,
-                        className: diff > 0 ? 'text-emerald-600' : 'text-rose-500'
-                      };
-                    };
-
-                    const getWeeklyPrevMonthForScores = (month) => {
-                      const monthIndex = MONTHS.indexOf(month);
-                      if (monthIndex <= 0) return null;
-                      return MONTHS[monthIndex - 1];
-                    };
-
-                    const getWeeklyImplementedWeeksForMonth = (month, targetList = filteredStudents) => {
-                      if (!month) return [];
-
-                      return weeklyWeekNumbers
-                        .filter(week => {
-                          const key = `${month}_w${week}`;
-                          const values = targetList
-                            .map(student => {
-                              const rawScore = student.scores?.[scoreField]?.[key] ?? student.scores?.[scoreField]?.[`w${week}`];
-                              const rawScoreText = String(rawScore ?? '').trim();
-                              const score = rawScoreText === '' ? NaN : Number(rawScoreText);
-                              return Number.isFinite(score) ? score : null;
-                            })
-                            .filter(value => value !== null);
-
-                          return values.length > 0;
-                        })
-                        .sort((a, b) => a - b);
-                    };
-
-                    const getWeeklyCumulativeAverageForStudents = (studentList, month) => {
-                      if (!month || !studentList.length) return null;
-
-                      const implementedWeeks = getWeeklyImplementedWeeksForMonth(month, studentList);
-                      if (!implementedWeeks.length) return null;
-
-                      const averages = studentList
-                        .map(student => {
-                          const scores = implementedWeeks.map(week => {
-                            const key = `${month}_w${week}`;
-                            const rawScore = student.scores?.[scoreField]?.[key] ?? student.scores?.[scoreField]?.[`w${week}`];
-                            const rawScoreText = String(rawScore ?? '').trim();
-                            const score = rawScoreText === '' ? NaN : Number(rawScoreText);
-
-                            return Number.isFinite(score) ? score : 0;
-                          });
-
-                          return scores.length
-                            ? Math.round((scores.reduce((sum, score) => sum + score, 0) / scores.length) * 10) / 10
-                            : null;
-                        })
-                        .filter(value => Number.isFinite(Number(value)));
-
-                      return averages.length
-                        ? Math.round((averages.reduce((sum, value) => sum + value, 0) / averages.length) * 10) / 10
-                        : null;
-                    };
-
-                    const allWeeklyAverageScore = getWeeklyCumulativeAverageForStudents(filteredStudents, weeklyMonth);
-                    const prevWeeklyAverageScore = getWeeklyCumulativeAverageForStudents(filteredStudents, getWeeklyPrevMonthForScores(weeklyMonth));
-                    const weeklyOverallAverageDelta = formatWeeklyScoreCompareText('전체 평균 대비', averageScore, allWeeklyAverageScore);
-                    const weeklyPrevMonthAverageDelta = formatWeeklyScoreCompareText('전월 대비', averageScore, prevWeeklyAverageScore);
 
                     const weeklyScoreRowsPerPageOptions = [10, 20, 50];
                     const weeklyScoresTotalPages = Math.max(1, Math.ceil(scoreRows.length / weeklyScoresRowsPerPage));
@@ -17282,7 +16498,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                             <div>
                               <p className="text-[11px] font-black text-slate-500 leading-tight">반 평균 점수</p>
                               <p className="text-lg font-black text-slate-900 leading-tight">{averageScore}점</p>
-                              <p className={`text-[11px] font-bold ${weeklyOverallAverageDelta.className}`}>{weeklyOverallAverageDelta.text}</p>
+                              <p className="text-[11px] font-bold text-emerald-600">전체 평균 대비 ▲ 8.4점</p>
                             </div>
                           </div>
 
@@ -17378,7 +16594,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                                       className="py-1 px-1 text-slate-500 font-black cursor-pointer hover:bg-blue-50"
                                       onClick={() => toggleWeeklyScoreSort({ week: null, metric: 'avgScore' })}
                                     >
-                                      누적평균(점){getWeeklySortMark({ metric: 'avgScore' })}
+                                      평균(점){getWeeklySortMark({ metric: 'avgScore' })}
                                     </th>
                                     <th
                                       className="py-1 px-1 text-slate-500 font-black cursor-pointer hover:bg-blue-50"
@@ -17695,7 +16911,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                                 <span className="text-xs font-black text-slate-700">{weeklyMonth} 평균 </span>
                                 <span className="text-base font-black text-blue-700">{currentMonthTrendValue || 0}점</span>
                                 <span className="mx-2 text-slate-300">|</span>
-                                <span className={`text-xs font-black ${weeklyPrevMonthAverageDelta.className}`}>{weeklyPrevMonthAverageDelta.text}</span>
+                                <span className="text-xs font-black text-emerald-600">전월 대비 ▲ 8.4점</span>
                               </div>
                             </div>
                           </div>
@@ -21436,118 +20652,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                   return tag.label === learningDataTagFilter;
                 };
 
-                const toggleLearningDataSort = (key) => {
-                  setStudentCurrentPage(1);
-                  setLearningDataSort(prev => (
-                    prev.key === key
-                      ? { ...prev, order: prev.order === 'asc' ? 'desc' : 'asc' }
-                      : {
-                          key,
-                          order: ['name', 'tag'].includes(key) ? 'asc' : 'desc'
-                        }
-                  ));
-                };
-
-                const getLearningDataSortMark = (key) => {
-                  if (learningDataSort.key !== key) return ' ↕';
-                  return learningDataSort.order === 'asc' ? ' ▲' : ' ▼';
-                };
-
-                const getLearningSortNumber = (value) => {
-                  if (value === null || value === undefined) return null;
-
-                  const rawValue = String(value).trim();
-                  if (!rawValue || rawValue === '-' || rawValue.toLowerCase() === 'nan') return null;
-
-                  const numberValue = Number(rawValue.replace(/,/g, ''));
-                  return Number.isFinite(numberValue) ? numberValue : null;
-                };
-
-                const compareLearningNumber = (aValue, bValue) => {
-                  const aNum = getLearningSortNumber(aValue);
-                  const bNum = getLearningSortNumber(bValue);
-                  const aEmpty = aNum === null;
-                  const bEmpty = bNum === null;
-
-                  if (aEmpty && bEmpty) return 0;
-                  if (aEmpty) return 1;
-                  if (bEmpty) return -1;
-
-                  return learningDataSort.order === 'asc' ? aNum - bNum : bNum - aNum;
-                };
-
-                const compareLearningString = (aValue, bValue) => {
-                  const aText = String(aValue ?? '').trim();
-                  const bText = String(bValue ?? '').trim();
-                  const aEmpty = !aText || aText === '-';
-                  const bEmpty = !bText || bText === '-';
-
-                  if (aEmpty && bEmpty) return 0;
-                  if (aEmpty) return 1;
-                  if (bEmpty) return -1;
-
-                  return learningDataSort.order === 'asc'
-                    ? aText.localeCompare(bText, 'ko')
-                    : bText.localeCompare(aText, 'ko');
-                };
-
-                const hasLearningAttendanceSortData = (student) => {
-                  const excluded = attendanceSettings?.[selectedMonth]?.excludedDays || [];
-                  const attendanceData = getUnifiedAttendanceArray(student.attendance?.[selectedMonth] || {});
-                  const dayLimit = getMetricDayLimit(academicYear, selectedMonth);
-
-                  return attendanceData
-                    .slice(0, dayLimit)
-                    .some((value, dayIndex) => !excluded.includes(dayIndex) && String(value ?? '').trim() !== '');
-                };
-
-                const getLearningDailySortValue = (student, metric = 'rate') => {
-                  const stats = getDailyStats(student.dailyRecords?.[selectedMonth], selectedMonth);
-
-                  if (!stats || Number(stats.count || 0) <= 0) return null;
-                  if (metric === 'rate') return stats.rate;
-                  if (metric === 'avg') return stats.avg;
-                  if (metric === 'count') return stats.count;
-
-                  return null;
-                };
-
-                const getLearningWeeklySortValue = (student, subject) => {
-                  const weeklyStats = getMonthlyWeeklyStats(student, selectedMonth, subject);
-                  return weeklyStats?.avgScore === '-' ? null : weeklyStats?.avgScore;
-                };
-
-                const getLearningSortValue = (student, key) => {
-                  if (key === 'name') return student.name;
-                  if (key === 'attendanceRate') return hasLearningAttendanceSortData(student) ? getAttendanceRateNum(student, selectedMonth) : null;
-                  if (key === 'dailyRate') return getLearningDailySortValue(student, 'rate');
-                  if (key === 'weeklyEnglishAvg') return getLearningWeeklySortValue(student, 'english');
-                  if (key === 'weeklyMathAvg') return getLearningWeeklySortValue(student, 'math');
-                  if (key === 'tag') return getLearningManagementTag(student).label;
-
-                  if (key.startsWith('monthly_')) {
-                    const [, subject, metric] = key.split('_');
-                    const value = getMonthlySubjectData(student, selectedMonth, subject)?.[metric];
-                    return getLearningSortNumber(value) === null ? null : value;
-                  }
-
-                  return null;
-                };
-
-                const learningRows = filteredStudents
-                  .filter(student => getLearningDataTag(student))
-                  .sort((a, b) => {
-                    const key = learningDataSort.key;
-                    const valueA = getLearningSortValue(a, key);
-                    const valueB = getLearningSortValue(b, key);
-
-                    if (key === 'name' || key === 'tag') {
-                      return compareLearningString(valueA, valueB);
-                    }
-
-                    return compareLearningNumber(valueA, valueB);
-                  });
-
+                const learningRows = filteredStudents.filter(student => getLearningDataTag(student));
                 const pageSize = Number(studentsPerPage) || 10;
                 const totalPages = Math.max(1, Math.ceil(learningRows.length / pageSize));
                 const currentPage = Math.min(studentCurrentPage, totalPages);
@@ -22227,39 +21332,12 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                   );
                 }
 
-                const getLearningStudentCountForMonth = (month) => {
-                  const monthIndex = MONTHS.indexOf(month);
-
-                  if (monthIndex < 0) return classStudents.length;
-
-                  return classStudents.filter(student => {
-                    const startMonthIndex = MONTHS.indexOf(student.startMonth || '1월');
-                    return startMonthIndex < 0 || startMonthIndex <= monthIndex;
-                  }).length;
-                };
-
-                const formatLearningStudentCountDelta = () => {
-                  const currentMonthIndex = MONTHS.indexOf(selectedMonth);
-
-                  if (currentMonthIndex <= 0) return '전월 비교 데이터 없음';
-
-                  const prevMonth = MONTHS[currentMonthIndex - 1];
-                  const currentCount = getLearningStudentCountForMonth(selectedMonth);
-                  const prevCount = getLearningStudentCountForMonth(prevMonth);
-                  const diff = currentCount - prevCount;
-
-                  if (diff === 0) return '전월 대비 변동 없음';
-                  return `전월 대비 ${diff > 0 ? `+${diff}` : diff}명 ${diff > 0 ? '↑' : '↓'}`;
-                };
-
-                const learningStudentCount = getLearningStudentCountForMonth(selectedMonth);
-
                 const StatGrid = () => (
                   <div className="grid grid-cols-5 gap-2">
                     <StatCard
                       title="전체 학생"
-                      value={`${learningStudentCount}명`}
-                      subText={formatLearningStudentCountDelta()}
+                      value={`${classStudents.length}명`}
+                      subText="전월 대비 +6명 ↑"
                       icon={Users}
                       iconClassName="bg-blue-50 text-blue-600"
                       valueClassName="text-blue-600"
@@ -22411,26 +21489,26 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                               <th rowSpan={2} className="w-9 px-2 py-2.5 text-center border-r border-slate-200">
                                 <input type="checkbox" className="w-3.5 h-3.5 rounded border-slate-300" />
                               </th>
-                              <th rowSpan={2} onClick={() => toggleLearningDataSort('name')} className="w-[200px] px-3 py-2.5 text-center border-r border-slate-200 font-black cursor-pointer hover:bg-slate-100">학생 정보{getLearningDataSortMark('name')}</th>
-                              <th rowSpan={2} onClick={() => toggleLearningDataSort('attendanceRate')} className="w-20 px-2 py-2.5 text-center border-r border-slate-200 font-black cursor-pointer hover:bg-slate-100">출석률{getLearningDataSortMark('attendanceRate')}</th>
-                              <th rowSpan={2} onClick={() => toggleLearningDataSort('dailyRate')} className="w-20 px-2 py-2.5 text-center border-r border-slate-200 font-black cursor-pointer hover:bg-slate-100">Daily<br />참여율{getLearningDataSortMark('dailyRate')}</th>
-                              <th rowSpan={2} onClick={() => toggleLearningDataSort('weeklyEnglishAvg')} className="w-24 px-2 py-2.5 text-center border-r border-slate-200 font-black text-blue-700 cursor-pointer hover:bg-blue-50">영어 /<br />Weekly 평균{getLearningDataSortMark('weeklyEnglishAvg')}</th>
-                              <th rowSpan={2} onClick={() => toggleLearningDataSort('weeklyMathAvg')} className="w-24 px-2 py-2.5 text-center border-r border-slate-200 font-black text-emerald-700 cursor-pointer hover:bg-emerald-50">수학 /<br />Weekly 평균{getLearningDataSortMark('weeklyMathAvg')}</th>
+                              <th rowSpan={2} className="w-[200px] px-3 py-2.5 text-center border-r border-slate-200 font-black">학생 정보</th>
+                              <th rowSpan={2} className="w-20 px-2 py-2.5 text-center border-r border-slate-200 font-black">출석률</th>
+                              <th rowSpan={2} className="w-20 px-2 py-2.5 text-center border-r border-slate-200 font-black">Daily<br />참여율</th>
+                              <th rowSpan={2} className="w-24 px-2 py-2.5 text-center border-r border-slate-200 font-black text-blue-700">영어 /<br />Weekly 평균</th>
+                              <th rowSpan={2} className="w-24 px-2 py-2.5 text-center border-r border-slate-200 font-black text-emerald-700">수학 /<br />Weekly 평균</th>
                               <th colSpan={3} className="px-2 py-1.5 text-center border-r-2 border-b-2 border-blue-200 font-black text-blue-700 bg-blue-50/50">영어</th>
                               <th colSpan={3} className="px-2 py-1.5 text-center border-r-2 border-b-2 border-emerald-200 font-black text-emerald-700 bg-emerald-50/50">수학</th>
                               <th colSpan={3} className="px-2 py-1.5 text-center border-r-2 border-b-2 border-violet-200 font-black text-violet-700 bg-violet-50/50">영수합</th>
-                              <th rowSpan={2} onClick={() => toggleLearningDataSort('tag')} className="w-20 px-2 py-2.5 text-center font-black cursor-pointer hover:bg-slate-100">관리 태그{getLearningDataSortMark('tag')}</th>
+                              <th rowSpan={2} className="w-20 px-2 py-2.5 text-center font-black">관리 태그</th>
                             </tr>
                             <tr className="text-[11px] font-black text-slate-600">
-                              <th onClick={() => toggleLearningDataSort('monthly_english_score')} className="px-2 py-1.5 border-r border-blue-100 cursor-pointer hover:bg-blue-50">원점수{getLearningDataSortMark('monthly_english_score')}</th>
-                              <th onClick={() => toggleLearningDataSort('monthly_english_percent')} className="px-2 py-1.5 border-r border-blue-100 cursor-pointer hover:bg-blue-50">백분위{getLearningDataSortMark('monthly_english_percent')}</th>
-                              <th onClick={() => toggleLearningDataSort('monthly_english_totalRank')} className="px-2 py-1.5 border-r-2 border-blue-200 cursor-pointer hover:bg-blue-50">전체 석차{getLearningDataSortMark('monthly_english_totalRank')}</th>
-                              <th onClick={() => toggleLearningDataSort('monthly_math_score')} className="px-2 py-1.5 border-r border-emerald-100 cursor-pointer hover:bg-emerald-50">원점수{getLearningDataSortMark('monthly_math_score')}</th>
-                              <th onClick={() => toggleLearningDataSort('monthly_math_percent')} className="px-2 py-1.5 border-r border-emerald-100 cursor-pointer hover:bg-emerald-50">백분위{getLearningDataSortMark('monthly_math_percent')}</th>
-                              <th onClick={() => toggleLearningDataSort('monthly_math_totalRank')} className="px-2 py-1.5 border-r-2 border-emerald-200 cursor-pointer hover:bg-emerald-50">전체 석차{getLearningDataSortMark('monthly_math_totalRank')}</th>
-                              <th onClick={() => toggleLearningDataSort('monthly_total_score')} className="px-2 py-1.5 border-r border-violet-100 cursor-pointer hover:bg-violet-50">원점수{getLearningDataSortMark('monthly_total_score')}</th>
-                              <th onClick={() => toggleLearningDataSort('monthly_total_percent')} className="px-2 py-1.5 border-r border-violet-100 cursor-pointer hover:bg-violet-50">백분위{getLearningDataSortMark('monthly_total_percent')}</th>
-                              <th onClick={() => toggleLearningDataSort('monthly_total_totalRank')} className="px-2 py-1.5 border-r-2 border-violet-200 cursor-pointer hover:bg-violet-50">전체 석차{getLearningDataSortMark('monthly_total_totalRank')}</th>
+                              <th className="px-2 py-1.5 border-r border-blue-100">원점수</th>
+                              <th className="px-2 py-1.5 border-r border-blue-100">백분위</th>
+                              <th className="px-2 py-1.5 border-r-2 border-blue-200">전체 석차</th>
+                              <th className="px-2 py-1.5 border-r border-emerald-100">원점수</th>
+                              <th className="px-2 py-1.5 border-r border-emerald-100">백분위</th>
+                              <th className="px-2 py-1.5 border-r-2 border-emerald-200">전체 석차</th>
+                              <th className="px-2 py-1.5 border-r border-violet-100">원점수</th>
+                              <th className="px-2 py-1.5 border-r border-violet-100">백분위</th>
+                              <th className="px-2 py-1.5 border-r-2 border-violet-200">전체 석차</th>
                             </tr>
                           </thead>
 
