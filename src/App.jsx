@@ -228,6 +228,21 @@ const formatMinsToTime = (mins) => {
     return `${Math.floor(mins / 60)}시간 ${mins % 60}분`;
 };
 
+const formatDeltaTime = (mins) => {
+  const value = Number(mins) || 0;
+
+  if (value === 0) return '0분';
+
+  const sign = value > 0 ? '+' : '-';
+  const absValue = Math.abs(value);
+  const hours = Math.floor(absValue / 60);
+  const minutes = absValue % 60;
+
+  if (hours > 0 && minutes > 0) return `${sign}${hours}시간 ${minutes}분`;
+  if (hours > 0) return `${sign}${hours}시간`;
+  return `${sign}${minutes}분`;
+};
+
 const calculateTotalStudyTime = (dailyArray) => {
   let totalMins = 0;
   dailyArray.forEach(d => { totalMins += parseTimeDiffToMins(d.in, d.out); });
