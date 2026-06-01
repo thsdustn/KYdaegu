@@ -17999,8 +17999,18 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                     const getWeeklyScoreValueForMonthlyView = (student, month, subject, week) => {
                       const scoreField = subject === 'math' ? 'weeklyMath' : 'weeklyEnglish';
                       const monthKey = `${month}_w${week}`;
-                      const fallbackKey = `w${week}`;
-                      const rawScore = student.scores?.[scoreField]?.[monthKey] ?? student.scores?.[scoreField]?.[fallbackKey];
+                      const scoreMap = student.scores?.[scoreField] || {};
+
+                      if (!Object.prototype.hasOwnProperty.call(scoreMap, monthKey)) {
+                        return null;
+                      }
+
+                      const rawScore = scoreMap[monthKey];
+
+                      if (String(rawScore ?? '').trim() === '') {
+                        return null;
+                      }
+
                       const score = Number(rawScore);
 
                       return Number.isFinite(score) ? score : null;
@@ -18008,13 +18018,18 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
 
                     const getWeeklyCorrectRateForMonthlyView = (student, month, subject) => {
                       const detailField = subject === 'math' ? 'weeklyDetailsMath' : 'weeklyDetails';
+                      const detailMap = student.scores?.[detailField] || {};
                       let correctCount = 0;
                       let totalCount = 0;
 
                       weeklyWeekNumbers.forEach(week => {
                         const monthKey = `${month}_w${week}`;
-                        const fallbackKey = `w${week}`;
-                        const details = student.scores?.[detailField]?.[monthKey] ?? student.scores?.[detailField]?.[fallbackKey] ?? [];
+
+                        if (!Object.prototype.hasOwnProperty.call(detailMap, monthKey)) {
+                          return;
+                        }
+
+                        const details = detailMap[monthKey] || [];
 
                         if (!Array.isArray(details) || !details.length) return;
 
@@ -21833,12 +21848,21 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
 
                 const getWeeklyValue = (student, subjectKey, week) => {
                   const weeklyKey = `${selectedMonth}_w${week}`;
-                  const fallbackKey = `w${week}`;
                   const source = subjectKey === 'english'
                     ? student?.scores?.weeklyEnglish
                     : student?.scores?.weeklyMath;
 
-                  return toNumberOrNull(source?.[weeklyKey] ?? source?.[fallbackKey]);
+                  if (!source || !Object.prototype.hasOwnProperty.call(source, weeklyKey)) {
+                    return null;
+                  }
+
+                  const rawValue = source[weeklyKey];
+
+                  if (String(rawValue ?? '').trim() === '') {
+                    return null;
+                  }
+
+                  return toNumberOrNull(rawValue);
                 };
 
                 const getWeeklyAverage = (student, subjectKey) => {
