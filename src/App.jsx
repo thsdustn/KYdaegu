@@ -7991,31 +7991,26 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
     if (headerRowIdx >= 1 && rows[headerRowIdx - 1]) {
       const summaryRow = rows[headerRowIdx - 1];
 
-      const parseAvg = (val) => {
+      const parseOverallBenchmarkValue = (val) => {
         if (val === null || val === undefined || val === '') return '';
 
-        const rawText = String(val).split('/')[0].replace(/,/g, '').trim();
+        const rawText = String(val)
+          .split('/')
+          .pop()
+          .replace(/,/g, '')
+          .trim();
+
         const matched = rawText.match(/-?\d+(\.\d+)?/);
         if (!matched) return '';
 
         const parsed = Number(matched[0]);
         if (!Number.isFinite(parsed)) return '';
 
-        return Number.isInteger(parsed) ? String(parsed) : parsed.toFixed(1);
+        return Number.isInteger(parsed) ? String(parsed) : String(parsed);
       };
 
-      const parseTotalApplicants = (val) => {
-        if (val === null || val === undefined || val === '') return '';
-
-        const rawText = String(val).split('/').pop().replace(/,/g, '').trim();
-        const matched = rawText.match(/\d+/);
-        if (!matched) return '';
-
-        const parsed = Number(matched[0]);
-        if (!Number.isFinite(parsed)) return '';
-
-        return String(parsed);
-      };
+      const parseAvg = parseOverallBenchmarkValue;
+      const parseTotalApplicants = parseOverallBenchmarkValue;
 
       const findSubjectLabelIndex = (label) => {
         return summaryRow.findIndex(cell => String(cell ?? '').trim() === label);
@@ -8074,14 +8069,42 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
       updated = updated.map(s => {
         if(className === '대구캠퍼스 전체' || (s.classNames || [s.className]).includes(className)) {
            affectedStudents.add(s.id);
-           return { ...s, scores: { ...s.scores, monthly: { ...s.scores.monthly, [selectedMonth]: { english: { ...emptyMonthlyScore }, math: { ...emptyMonthlyScore }, total: { ...emptyMonthlyScore } } } } }; 
+           return {
+             ...s,
+             scores: {
+               ...s.scores,
+               monthly: {
+                 ...s.scores.monthly,
+                 [selectedMonth]: {
+                   english: {
+                     ...emptyMonthlyScore,
+                     trackAvg: engAvg,
+                     top30Avg: engTop,
+                     totalApplicants: engTotalApplicants
+                   },
+                   math: {
+                     ...emptyMonthlyScore,
+                     trackAvg: mathAvg,
+                     top30Avg: mathTop,
+                     totalApplicants: mathTotalApplicants
+                   },
+                   total: {
+                     ...emptyMonthlyScore,
+                     trackAvg: totAvg,
+                     top30Avg: totTop,
+                     totalApplicants: totTotalApplicants
+                   }
+                 }
+               }
+             }
+           }; 
         }
         return s;
       });
 
       for (let i = headerRowIdx + 1; i < rows.length; i++) {
         const row = rows[i]; if (!row || !Array.isArray(row)) continue;
-        const processBlock = (baseIdx, subject, sAvg, sTop30) => {
+        const processBlock = (baseIdx, subject, sAvg, sTop30, sTotalApplicants) => {
           const idVal = row[baseIdx + 1]; 
           if (!idVal) return;
           const key = String(idVal).trim().toLowerCase();
@@ -8090,18 +8113,19 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
             const score = row[baseIdx + 8]; if (score === undefined || score === '') return;
             const percent = row[baseIdx + 9] !== undefined ? row[baseIdx + 9] : ''; 
             const totalRank = row[baseIdx + 10] !== undefined ? row[baseIdx + 10] : ''; 
-            const trackAvg = (row[baseIdx + 16] !== undefined && row[baseIdx + 16] !== '') ? row[baseIdx + 16] : sAvg;
-            const top30Avg = (row[baseIdx + 18] !== undefined && row[baseIdx + 18] !== '') ? row[baseIdx + 18] : sTop30;
+            const trackAvg = sAvg;
+            const top30Avg = sTop30;
+            const totalApplicants = sTotalApplicants;
             const trackAvgDiff = (score !== '' && trackAvg !== '') ? (Number(score) - Number(trackAvg)).toFixed(1) : '';
             const top30Diff = (score !== '' && top30Avg !== '') ? (Number(score) - Number(top30Avg)).toFixed(1) : '';
 
             let updatedMonthly = { ...(updated[studentIdx].scores.monthly[selectedMonth] || generateEmptyMonthlyData()[selectedMonth]) };
-            updatedMonthly[subject] = { score, percent, classRank: '', totalRank, trackAvg, top30Avg, trackAvgDiff, top30Diff };
+            updatedMonthly[subject] = { score, percent, classRank: '', totalRank, trackAvg, top30Avg, totalApplicants, trackAvgDiff, top30Diff };
             updated[studentIdx].scores.monthly[selectedMonth] = updatedMonthly;
             affectedStudents.add(updated[studentIdx].id);
           }
         };
-        processBlock(0, 'english', engAvg, engTop); processBlock(20, 'math', mathAvg, mathTop); processBlock(40, 'total', totAvg, totTop);
+        processBlock(0, 'english', engAvg, engTop, engTotalApplicants); processBlock(20, 'math', mathAvg, mathTop, mathTotalApplicants); processBlock(40, 'total', totAvg, totTop, totTotalApplicants);
       }
 
       const computeRank = (subject) => {
@@ -19138,7 +19162,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                         : getUploadedSummaryValueFromStudents('english', 'top30Avg'),
                       engTotalApplicants: hasValue(savedSummary.engTotalApplicants)
                         ? savedSummary.engTotalApplicants
-                        : '',
+                        : getUploadedSummaryValueFromStudents('english', 'totalApplicants'),
                       mathAvg: hasValue(savedSummary.mathAvg)
                         ? savedSummary.mathAvg
                         : getUploadedSummaryValueFromStudents('math', 'trackAvg'),
@@ -19147,7 +19171,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                         : getUploadedSummaryValueFromStudents('math', 'top30Avg'),
                       mathTotalApplicants: hasValue(savedSummary.mathTotalApplicants)
                         ? savedSummary.mathTotalApplicants
-                        : '',
+                        : getUploadedSummaryValueFromStudents('math', 'totalApplicants'),
                       totAvg: hasValue(savedSummary.totAvg)
                         ? savedSummary.totAvg
                         : getUploadedSummaryValueFromStudents('total', 'trackAvg'),
@@ -19156,7 +19180,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                         : getUploadedSummaryValueFromStudents('total', 'top30Avg'),
                       totTotalApplicants: hasValue(savedSummary.totTotalApplicants)
                         ? savedSummary.totTotalApplicants
-                        : ''
+                        : getUploadedSummaryValueFromStudents('total', 'totalApplicants')
                     };
 
                     const getMonthlyStudentClassList = (student) => {
@@ -20371,9 +20395,9 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                         trackAvgDiff: toNumber(data.trackAvgDiff),
                         top30Diff: toNumber(data.top30Diff),
                         totalRank: toNumber(data.totalRank),
-                        avg: toNumber(monthlySummaries?.[selectedMonth]?.[config.avgKey]),
-                        top30: toNumber(monthlySummaries?.[selectedMonth]?.[config.top30Key]),
-                        totalApplicants: toNumber(monthlySummaries?.[selectedMonth]?.[config.applicantsKey])
+                        avg: toNumber(monthlySummaries?.[selectedMonth]?.[config.avgKey]) ?? toNumber(data.trackAvg),
+                        top30: toNumber(monthlySummaries?.[selectedMonth]?.[config.top30Key]) ?? toNumber(data.top30Avg),
+                        totalApplicants: toNumber(monthlySummaries?.[selectedMonth]?.[config.applicantsKey]) ?? toNumber(data.totalApplicants)
                       };
                     };
 
@@ -21700,16 +21724,6 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                   }
                 };
 
-                const getFallbackBenchmark = (subject, field) => {
-                  const fallback = {
-                    english: { score: 69.3, percent: 72.1, top30Avg: 88.7 },
-                    math: { score: 71.5, percent: 68.6, top30Avg: 87.6 },
-                    total: { score: 140.8, percent: 70.3, top30Avg: 175.4 }
-                  };
-
-                  return fallback?.[subject]?.[field] ?? null;
-                };
-
                 const getBenchmarkMetric = (student, subject, metric) => {
                   const data = getMonthlySubjectData(student, selectedMonth, subject);
                   const summary = monthlySummaries?.[selectedMonth] || {};
@@ -21733,23 +21747,21 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
 
                   if (metric === 'score') {
                     return toNumberOrNull(summary?.[summaryKeyMap[subject]?.score]) ??
-                      toNumberOrNull(data?.trackAvg) ??
-                      getSubjectAverage(subject, 'score', selectedMonth) ??
-                      getFallbackBenchmark(subject, 'score');
+                      toNumberOrNull(data?.trackAvg);
                   }
 
                   if (metric === 'percent') {
-                    return getSubjectAverage(subject, 'percent', selectedMonth) ?? getFallbackBenchmark(subject, 'percent');
+                    return getSubjectAverage(subject, 'percent', selectedMonth);
                   }
 
                   if (metric === 'top30Avg') {
                     return toNumberOrNull(summary?.[summaryKeyMap[subject]?.top30Avg]) ??
-                      toNumberOrNull(data?.top30Avg) ??
-                      getFallbackBenchmark(subject, 'top30Avg');
+                      toNumberOrNull(data?.top30Avg);
                   }
 
                   if (metric === 'applicants') {
-                    return toNumberOrNull(summary?.[summaryKeyMap[subject]?.applicants]);
+                    return toNumberOrNull(summary?.[summaryKeyMap[subject]?.applicants]) ??
+                      toNumberOrNull(data?.totalApplicants);
                   }
 
                   return null;
@@ -22078,8 +22090,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
 
                   const benchmarkSubjects = ['english', 'math', 'total'];
                   const studentSubjects = ['english', 'math', 'total'];
-                  const englishWeeklyValues = [1, 2, 3, 4, 5].map(week => getWeeklyValue(detailStudent, 'english', week) ?? [42.5, 28.1, 35.4, 48.7, 74.1][week - 1]);
-                  const mathWeeklyValues = [1, 2, 3, 4, 5].map(week => getWeeklyValue(detailStudent, 'math', week) ?? [38.7, 30.2, 31.1, 44.8, 68.5][week - 1]);
+                  const englishWeeklyValues = [1, 2, 3, 4, 5].map(week => getWeeklyValue(detailStudent, 'english', week));
+                  const mathWeeklyValues = [1, 2, 3, 4, 5].map(week => getWeeklyValue(detailStudent, 'math', week));
 
                   return (
                     <div className="max-w-none mx-auto h-full flex flex-col gap-1.5">
