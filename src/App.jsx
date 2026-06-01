@@ -4142,6 +4142,7 @@ function ClassDashboard({
 
     const headerMap = {
       '반': 'className',
+      '반명': 'className',
       'class': 'className',
       'classname': 'className',
       '수강반': 'className',
@@ -4164,10 +4165,12 @@ function ClassDashboard({
 
       '날짜': 'date',
       '일자': 'date',
+      '출석일시': 'date',
       'day': 'date',
       'date': 'date',
 
       '출석유형': 'attendanceStatus',
+      '출결상태': 'attendanceStatus',
       '출석': 'attendanceStatus',
       '출결': 'attendanceStatus',
       'attendance': 'attendanceStatus',
@@ -4227,6 +4230,13 @@ function ClassDashboard({
     }
 
     return String(value).trim();
+  };
+
+  const isSameExcelIdValue = (leftValue, rightValue) => {
+    const left = normalizeExcelIdValue(leftValue).toLowerCase();
+    const right = normalizeExcelIdValue(rightValue).toLowerCase();
+
+    return left !== '' && right !== '' && left === right;
   };
 
   const parseExcelSerialDate = (value) => {
@@ -4289,7 +4299,7 @@ function ClassDashboard({
       return { month: fallbackMonth, dayIndex: safeFallbackDayIndex };
     }
 
-    const isoMatch = raw.match(/^(\d{4})[-./](\d{1,2})[-./](\d{1,2})$/);
+    const isoMatch = raw.match(/(\d{4})[-./](\d{1,2})[-./](\d{1,2})/);
     if (isoMatch) {
       const monthNumber = Number(isoMatch[2]);
       const day = Number(isoMatch[3]);
@@ -4327,26 +4337,60 @@ function ClassDashboard({
     return null;
   };
 
+  const parseAttendanceExcelFileNameDate = (fileName = '') => {
+    const rawFileName = String(fileName || '');
+    const match = rawFileName.match(/(\d{4})[-_.](\d{1,2})[-_.](\d{1,2})/);
+
+    if (!match) return null;
+
+    const monthNumber = Number(match[2]);
+    const day = Number(match[3]);
+
+    if (monthNumber < 1 || monthNumber > 12 || day < 1 || day > 31) {
+      return null;
+    }
+
+    return {
+      month: `${monthNumber}월`,
+      dayIndex: day - 1
+    };
+  };
+
+  const isAttendanceManagementExcelRows = (rows = []) => {
+    if (!Array.isArray(rows) || rows.length === 0) return false;
+
+    const normalizedHeaderSet = new Set(
+      Object.keys(rows[0] || {}).map(key => normalizeExcelHeader(key))
+    );
+
+    return (
+      normalizedHeaderSet.has('name') &&
+      normalizedHeaderSet.has('userId') &&
+      normalizedHeaderSet.has('date') &&
+      normalizedHeaderSet.has('attendanceStatus')
+    );
+  };
+
   const findStudentByAttendanceDailyExcelRow = (row, studentList = students) => {
     const rowClassName = String(getRowValueByNormalizedKey(row, 'className') || '').trim();
     const rowName = String(getRowValueByNormalizedKey(row, 'name') || '').trim();
     const rowStudentId = normalizeExcelIdValue(getRowValueByNormalizedKey(row, 'studentId'));
     const rowUserId = normalizeExcelIdValue(getRowValueByNormalizedKey(row, 'userId'));
 
-    if (rowStudentId) {
-      const matchedByStudentId = studentList.find(student => {
-        return String(student.id || '').trim() === rowStudentId;
-      });
-
-      if (matchedByStudentId) return { student: matchedByStudentId, error: null };
-    }
-
     if (rowUserId) {
       const matchedByUserId = studentList.find(student => {
-        return String(student.userId || '').trim() === rowUserId;
+        return isSameExcelIdValue(student.userId, rowUserId);
       });
 
       if (matchedByUserId) return { student: matchedByUserId, error: null };
+    }
+
+    if (rowStudentId) {
+      const matchedByStudentId = studentList.find(student => {
+        return isSameExcelIdValue(student.id, rowStudentId);
+      });
+
+      if (matchedByStudentId) return { student: matchedByStudentId, error: null };
     }
 
     if (!rowName) {
@@ -4385,6 +4429,10 @@ function ClassDashboard({
       return String(student.name || '').trim() === rowName;
     });
 
+    if (allNameMatches.length === 1) {
+      return { student: allNameMatches[0], error: null };
+    }
+
     if (allNameMatches.length > 1) {
       return { student: null, error: '중복 이름 확인 필요' };
     }
@@ -4392,7 +4440,7 @@ function ClassDashboard({
     return { student: null, error: '학생 매칭 실패' };
   };
 
-  const downloadAttendanceDailyTemplate = async (source = 'attendance') => {
+    const downloadAttendanceDailyTemplate = async (source = 'attendance') => {
     const loadExcelJS = () => {
       return new Promise((resolve, reject) => {
         if (window.ExcelJS) {
@@ -4560,10 +4608,18 @@ function ClassDashboard({
           return;
         }
 
-        const baseMonth = source === 'daily' ? dailyMonth : attendanceMonth;
+        const fileDateParsed = parseAttendanceExcelFileNameDate(file.name);
+        const isAttendanceManagementFile = source === 'attendance' && isAttendanceManagementExcelRows(rows);
+
+        const baseMonth = source === 'daily'
+          ? dailyMonth
+          : (fileDateParsed?.month || attendanceMonth);
+
         const fallbackDayIndex = source === 'daily'
           ? Number(batchDailyDate || 0)
-          : Number(batchAttendanceDate || 0);
+          : Number(fileDateParsed?.dayIndex ?? batchAttendanceDate ?? 0);
+
+        const allowedAttendanceManagementStatuses = ['출석', '지각', '결석'];
 
         const result = {
           total: rows.length,
@@ -4629,9 +4685,17 @@ function ClassDashboard({
           const rawAttendanceStatus = getRowValueByNormalizedKey(row, 'attendanceStatus');
           const attendanceStatus = normalizeAttendanceStatus(rawAttendanceStatus);
 
-          const dailyT1 = String(getRowValueByNormalizedKey(row, 'dailyT1') ?? '').trim();
-          const dailyT2 = String(getRowValueByNormalizedKey(row, 'dailyT2') ?? '').trim();
-          const dailyMath = String(getRowValueByNormalizedKey(row, 'dailyMath') ?? '').trim();
+          const dailyT1 = isAttendanceManagementFile
+            ? ''
+            : String(getRowValueByNormalizedKey(row, 'dailyT1') ?? '').trim();
+
+          const dailyT2 = isAttendanceManagementFile
+            ? ''
+            : String(getRowValueByNormalizedKey(row, 'dailyT2') ?? '').trim();
+
+          const dailyMath = isAttendanceManagementFile
+            ? ''
+            : String(getRowValueByNormalizedKey(row, 'dailyMath') ?? '').trim();
 
           let changedAttendance = false;
           let changedDaily = false;
@@ -4641,6 +4705,13 @@ function ClassDashboard({
           if (attendanceStatus === null) {
             result.statusErrorCount += 1;
             result.errors.push(`${excelRowNumber}행: 출석유형 값 오류 - "${rawAttendanceStatus}"`);
+          } else if (
+            isAttendanceManagementFile &&
+            attendanceStatus !== '' &&
+            !allowedAttendanceManagementStatuses.includes(attendanceStatus)
+          ) {
+            result.statusErrorCount += 1;
+            result.errors.push(`${excelRowNumber}행: 출결상태 값 오류 - "${rawAttendanceStatus}"`);
           } else if (attendanceStatus !== '') {
             const currentMonth = currentStudent.attendance?.[targetMonth] || generateEmptyMonthlyAttendance()[targetMonth];
             const currentAttendanceValue = currentMonth.am?.[dayIndex] || currentMonth.pm?.[dayIndex] || '';
@@ -4669,7 +4740,7 @@ function ClassDashboard({
             }
           }
 
-          if (dailyT1 !== '' || dailyT2 !== '' || dailyMath !== '') {
+          if (!isAttendanceManagementFile && (dailyT1 !== '' || dailyT2 !== '' || dailyMath !== '')) {
             const studentAfterAttendance = nextStudents[targetIndex];
             const baseDaily = studentAfterAttendance.dailyRecords?.[targetMonth] || generateEmptyMonthlyDaily()[targetMonth];
             const currentDaily = { t1: '', t2: '', math: '', ...(baseDaily[dayIndex] || {}) };
@@ -4723,9 +4794,15 @@ function ClassDashboard({
           console.warn('출석/Daily 엑셀 업로드 오류 목록:', result.errors);
         }
 
-        showAlert(
-          `엑셀 업로드 완료\n총 ${result.total}행 중 ${result.matchedStudents.size}명 반영\n출석 ${result.attendanceCount}건, Daily ${result.dailyCount}건 반영\n매칭 실패 ${result.matchFailCount}건, 출석유형 오류 ${result.statusErrorCount}건, 날짜 오류 ${result.dateErrorCount}건, 중복 이름 ${result.duplicateNameCount}건\n변경 없음 ${result.noChangeCount}건`
-        );
+        if (isAttendanceManagementFile) {
+          showAlert(
+            `출석 엑셀 업로드 완료\n\n총 ${result.total}행\n반영: ${result.attendanceCount}건 / ${result.matchedStudents.size}명\n스킵: ${result.matchFailCount + result.statusErrorCount + result.dateErrorCount + result.duplicateNameCount + result.noChangeCount}건\n\n매칭 실패 ${result.matchFailCount}건, 출결상태 오류 ${result.statusErrorCount}건, 날짜 오류 ${result.dateErrorCount}건, 중복 이름 ${result.duplicateNameCount}건, 변경 없음 ${result.noChangeCount}건`
+          );
+        } else {
+          showAlert(
+            `엑셀 업로드 완료\n총 ${result.total}행 중 ${result.matchedStudents.size}명 반영\n출석 ${result.attendanceCount}건, Daily ${result.dailyCount}건 반영\n매칭 실패 ${result.matchFailCount}건, 출석유형 오류 ${result.statusErrorCount}건, 날짜 오류 ${result.dateErrorCount}건, 중복 이름 ${result.duplicateNameCount}건\n변경 없음 ${result.noChangeCount}건`
+          );
+        }
       } catch (error) {
         console.error('출석/Daily 엑셀 업로드 오류:', error);
         showAlert(`엑셀 업로드 중 오류가 발생했습니다.\n${error?.message || error}`);
