@@ -30,10 +30,10 @@ const APP_ID = 'kydaegu-academy-remodel-test';
 const ATTENDANCE_OPTIONS = ['출석', 'Live', '결석', '조퇴', '지각', '사전통보', '병결', '알바', '가족사정', '개인사정', '컨디션 난조', '학교', '시험', '과제', '실습', '타학원', '독서실', '기타'];
 const ATTENDANCE_SESSION_KEY = 'am';
 const ATTENDANCE_SESSION_LABEL = '출석확인';
-const ATTENDANCE_PRESENT_STATUSES = ['출석', 'Live'];
+const ATTENDANCE_PRESENT_STATUSES = ['출석', 'Live', '지각', '조퇴'];
 const ATTENDANCE_ABSENT_STATUSES = ['결석'];
 const ATTENDANCE_NEUTRAL_STATUSES = [
-  '조퇴', '지각', '사전통보', '병결', '알바', '가족사정', '개인사정',
+  '사전통보', '병결', '알바', '가족사정', '개인사정',
   '컨디션 난조', '학교', '시험', '과제', '실습', '타학원', '독서실', '기타'
 ];
 const getAttendanceValueType = (value) => {
@@ -456,6 +456,56 @@ const initialMockData = [
   createStudent("K00987586", "m020305", "강가윤", "1월", "사범계", {}, {}, {}, {}, {}),
   createStudent("K01027609", "mathking", "이수학", "3월", "자연계", {}, {}, {}, {}, {})
 ];
+
+const ProfileEditorContext = React.createContext({
+  studentId: '',
+  handleProfileChange: () => {}
+});
+
+const ProfileBadgeSelect = ({ value, field, options, classNameGetter }) => {
+  const { studentId, handleProfileChange } = React.useContext(ProfileEditorContext);
+
+  return (
+    <select
+      value={value || ''}
+      onChange={e => {
+        if (!studentId || !field) return;
+        handleProfileChange(studentId, field, e.target.value);
+      }}
+      className={`h-7 px-2.5 rounded-md border text-[11px] font-extrabold outline-none cursor-pointer ${typeof classNameGetter === 'function' ? classNameGetter(value) : ''}`}
+    >
+      {(options || []).map(option => (
+        <option key={option} value={option} className="text-slate-900 bg-white">
+          {option || '-'}
+        </option>
+      ))}
+    </select>
+  );
+};
+
+const MiniInput = ({ value, field, placeholder = '-', className = '', readOnly = false }) => {
+  const { studentId, handleProfileChange } = React.useContext(ProfileEditorContext);
+
+  return (
+    <input
+      value={value || ''}
+      readOnly={readOnly}
+      onChange={readOnly ? undefined : e => {
+        if (!studentId || !field) return;
+        handleProfileChange(studentId, field, e.target.value);
+      }}
+      placeholder={placeholder}
+      className={`w-full bg-transparent text-right outline-none border-b border-transparent hover:border-slate-200 focus:border-blue-400 font-bold text-xs text-slate-900 placeholder:text-slate-300 ${className}`}
+    />
+  );
+};
+
+const InfoLine = ({ label, children }) => (
+  <div className="grid grid-cols-[82px_1fr] items-center gap-1.5 border-b border-slate-100 py-1.5 last:border-b-0">
+    <span className="text-[11px] font-bold text-slate-500">{label}</span>
+    <div className="text-xs font-bold text-slate-900 text-right min-w-0">{children}</div>
+  </div>
+);
 
 export default function App() {
   const [academicYear, setAcademicYear] = useState('2026');
@@ -5819,9 +5869,9 @@ function ClassDashboard({
       return { maxPenalty: 20, rules };
   };
 
-  const getClassSettingsStorageKey = () => `academyClassSettings_${academicYear}_${className}`;
+  const getClassSettingsStorageKey = (targetClassName = className) => `academyClassSettings_${academicYear}_${targetClassName}`;
 
-  const loadClassSettings = () => {
+  const loadClassSettingsByName = (targetClassName = className) => {
       const defaults = {
           dailySettings: createDefaultDailySettings(),
           attendanceSettings: createDefaultAttendanceSettings(),
@@ -5829,7 +5879,7 @@ function ClassDashboard({
       };
 
       try {
-          const saved = localStorage.getItem(getClassSettingsStorageKey());
+          const saved = localStorage.getItem(getClassSettingsStorageKey(targetClassName));
           if (!saved) return defaults;
 
           const parsed = JSON.parse(saved);
@@ -5856,6 +5906,86 @@ function ClassDashboard({
           console.error('반별 설정 불러오기 오류:', e);
           return defaults;
       }
+  };
+
+  const loadClassSettings = () => loadClassSettingsByName(className);
+
+  const getClassSettingsTargetNames = () => {
+      if (className !== '대구캠퍼스 전체') {
+          return [className].filter(Boolean);
+      }
+
+      return Array.from(new Set(classes || []))
+          .map(name => String(name || '').trim())
+          .filter(name => name && name !== '대구캠퍼스 전체' && name !== '미배정');
+  };
+
+  const updateExcludedDayInClassSettingsStorage = (
+      targetClassName,
+      settingType,
+      month,
+      dayIndex,
+      shouldExclude,
+      overrideSettingMap = null
+  ) => {
+      if (!targetClassName || targetClassName === '대구캠퍼스 전체') return;
+
+      const currentSettings = loadClassSettingsByName(targetClassName);
+      const baseSettingMap = overrideSettingMap || currentSettings[settingType] || {};
+      const currentMonthSetting = baseSettingMap[month] || { excludedDays: [] };
+      const currentArr = Array.isArray(currentMonthSetting.excludedDays)
+          ? currentMonthSetting.excludedDays
+          : [];
+
+      const nextArr = shouldExclude
+          ? Array.from(new Set([...currentArr, dayIndex])).sort((a, b) => a - b)
+          : currentArr.filter(i => i !== dayIndex);
+
+      const nextSettings = {
+          ...currentSettings,
+          [settingType]: {
+              ...baseSettingMap,
+              [month]: {
+                  ...currentMonthSetting,
+                  excludedDays: nextArr
+              }
+          }
+      };
+
+      try {
+          localStorage.setItem(
+              getClassSettingsStorageKey(targetClassName),
+              JSON.stringify(nextSettings)
+          );
+      } catch (e) {
+          console.error('반별 제외일 설정 즉시 저장 오류:', e);
+      }
+
+      markClassSettingsDirty(targetClassName, settingType, dayIndex);
+  };
+
+  const applyExcludedDayToClassSettingsTargets = (
+      settingType,
+      month,
+      dayIndex,
+      shouldExclude,
+      currentScreenSettingMap = null
+  ) => {
+      const targetClassNames = getClassSettingsTargetNames();
+
+      targetClassNames.forEach(targetClassName => {
+          const shouldUseCurrentScreenSettings =
+              className !== '대구캠퍼스 전체' && targetClassName === className;
+
+          updateExcludedDayInClassSettingsStorage(
+              targetClassName,
+              settingType,
+              month,
+              dayIndex,
+              shouldExclude,
+              shouldUseCurrentScreenSettings ? currentScreenSettingMap : null
+          );
+      });
   };
 
   const [dailySettings, setDailySettings] = useState(() => loadClassSettings().dailySettings);
@@ -7271,64 +7401,52 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
     setDailySettings(prev => {
         const currentArr = prev[month]?.excludedDays || [];
         const isExcluded = currentArr.includes(dayIndex);
-        const newArr = isExcluded ? currentArr.filter(i => i !== dayIndex) : [...currentArr, dayIndex];
+        const shouldExclude = !isExcluded;
+        const newArr = shouldExclude ? [...currentArr, dayIndex] : currentArr.filter(i => i !== dayIndex);
         const nextDailySettings = {
           ...prev,
           [month]: {
             ...prev[month],
-            excludedDays: newArr
+            excludedDays: Array.from(new Set(newArr)).sort((a, b) => a - b)
           }
         };
 
-        try {
-          localStorage.setItem(
-            getClassSettingsStorageKey(),
-            JSON.stringify({
-              dailySettings: nextDailySettings,
-              attendanceSettings,
-              penaltyRules
-            })
-          );
-        } catch (e) {
-          console.error('Daily 비테스트 설정 즉시 저장 오류:', e);
-        }
+        applyExcludedDayToClassSettingsTargets(
+          'dailySettings',
+          month,
+          dayIndex,
+          shouldExclude,
+          nextDailySettings
+        );
 
         return nextDailySettings;
     });
-
-    markClassSettingsDirty(className, 'dailySettings', dayIndex);
   };
 
   const toggleAttendanceExcluded = (month, dayIndex) => {
     setAttendanceSettings(prev => {
         const currentArr = prev[month]?.excludedDays || [];
         const isExcluded = currentArr.includes(dayIndex);
-        const newArr = isExcluded ? currentArr.filter(i => i !== dayIndex) : [...currentArr, dayIndex];
+        const shouldExclude = !isExcluded;
+        const newArr = shouldExclude ? [...currentArr, dayIndex] : currentArr.filter(i => i !== dayIndex);
         const nextAttendanceSettings = {
           ...prev,
           [month]: {
             ...prev[month],
-            excludedDays: newArr
+            excludedDays: Array.from(new Set(newArr)).sort((a, b) => a - b)
           }
         };
 
-        try {
-          localStorage.setItem(
-            getClassSettingsStorageKey(),
-            JSON.stringify({
-              dailySettings,
-              attendanceSettings: nextAttendanceSettings,
-              penaltyRules
-            })
-          );
-        } catch (e) {
-          console.error('출석 제외일 설정 즉시 저장 오류:', e);
-        }
+        applyExcludedDayToClassSettingsTargets(
+          'attendanceSettings',
+          month,
+          dayIndex,
+          shouldExclude,
+          nextAttendanceSettings
+        );
 
         return nextAttendanceSettings;
     });
-
-    markClassSettingsDirty(className, 'attendanceSettings', dayIndex);
   };
 
   const handleGenericFileUpload = (e) => {
@@ -23657,39 +23775,14 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
         const creditNumber = Number(studentProfileToView.credits || 0);
         const creditPercent = Math.max(0, Math.min(100, Math.round((creditNumber / 140) * 100)));
 
-        const ProfileBadgeSelect = ({ value, field, options, classNameGetter }) => (
-          <select
-            value={value || ''}
-            onChange={e => handleProfileChange(studentProfileToView.id, field, e.target.value)}
-            className={`h-7 px-2.5 rounded-md border text-[11px] font-extrabold outline-none cursor-pointer ${classNameGetter(value)}`}
-          >
-            {options.map(option => (
-              <option key={option} value={option} className="text-slate-900 bg-white">
-                {option || '-'}
-              </option>
-            ))}
-          </select>
-        );
-
-        const MiniInput = ({ value, field, placeholder = '-', className = '', readOnly = false }) => (
-          <input
-            value={value || ''}
-            readOnly={readOnly}
-            onChange={readOnly ? undefined : e => handleProfileChange(studentProfileToView.id, field, e.target.value)}
-            placeholder={placeholder}
-            className={`w-full bg-transparent text-right outline-none border-b border-transparent hover:border-slate-200 focus:border-blue-400 font-bold text-xs text-slate-900 placeholder:text-slate-300 ${className}`}
-          />
-        );
-
-        const InfoLine = ({ label, children }) => (
-          <div className="grid grid-cols-[82px_1fr] items-center gap-1.5 border-b border-slate-100 py-1.5 last:border-b-0">
-            <span className="text-[11px] font-bold text-slate-500">{label}</span>
-            <div className="text-xs font-bold text-slate-900 text-right min-w-0">{children}</div>
-          </div>
-        );
+        const profileEditorContextValue = {
+          studentId: studentProfileToView.id,
+          handleProfileChange
+        };
 
         return (
-          <div className="fixed inset-0 bg-slate-900/45 backdrop-blur-sm flex items-center justify-center p-2 z-50 animate-in fade-in duration-200">
+          <ProfileEditorContext.Provider value={profileEditorContextValue}>
+            <div className="fixed inset-0 bg-slate-900/45 backdrop-blur-sm flex items-center justify-center p-2 z-50 animate-in fade-in duration-200">
             <div className="bg-white rounded-[20px] w-[98vw] max-w-[1700px] shadow-2xl overflow-hidden flex flex-col h-[94vh] max-h-[94vh] border border-white/70">
               <div className="relative px-4 pt-3 pb-3 bg-white border-b border-slate-100">
                 <button
@@ -24090,6 +24183,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
               </div>
             </div>
           </div>
+          </ProfileEditorContext.Provider>
         );
       })()}
 
