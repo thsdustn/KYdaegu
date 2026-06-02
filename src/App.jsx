@@ -1827,6 +1827,34 @@ export default function App() {
     });
   };
 
+  const getHomeAttendanceRateMetricForStudent = (student, month = homeSelectedMonth) => {
+    const monthData = student.attendance?.[month] || {};
+    const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
+    const excluded = getHomeAttendanceExcludedDaysForStudent(student, month);
+    const dayLimit = getHomeMonthDayLimit(month);
+    let hasRecordedAttendance = false;
+
+    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      if (excluded.includes(dayIndex)) continue;
+
+      if (String(attendanceArray?.[dayIndex] ?? '').trim() !== '') {
+        hasRecordedAttendance = true;
+        break;
+      }
+    }
+
+    const parts = calculateAttendanceRatePartsFromArray({
+      attendanceArray,
+      excludedDays: excluded,
+      year: academicYear,
+      month
+    });
+
+    if (!hasRecordedAttendance || parts.denominator === 0) return null;
+
+    return parts.rate;
+  };
+
   const getHomeDailyRateForStudent = (student, month = homeSelectedMonth) => {
     const dailyArray = student.dailyRecords?.[month] || [];
     const excluded = getHomeDailyExcludedDaysForStudent(student, month);
@@ -1837,6 +1865,54 @@ export default function App() {
       year: academicYear,
       month
     });
+  };
+
+  const getHomeDailyRateMetricForStudent = (student, month = homeSelectedMonth) => {
+    const dailyArray = student.dailyRecords?.[month] || [];
+    const excluded = getHomeDailyExcludedDaysForStudent(student, month);
+    const dayLimit = getHomeMonthDayLimit(month);
+    let hasDailyRecord = false;
+
+    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+      if (excluded.includes(dayIndex)) continue;
+
+      const day = dailyArray?.[dayIndex] || {};
+      const t1 = String(day?.t1 ?? '').trim();
+      const t2 = String(day?.t2 ?? '').trim();
+      const math = String(day?.math ?? '').trim();
+
+      if (t1 !== '' || t2 !== '' || math !== '') {
+        hasDailyRecord = true;
+        break;
+      }
+    }
+
+    const parts = calculateDailyDayParticipationRatePartsFromArray({
+      dailyArray,
+      excludedDays: excluded,
+      year: academicYear,
+      month
+    });
+
+    if (!hasDailyRecord || parts.denominator === 0) return null;
+
+    return parts.rate;
+  };
+
+  const hasHomeDailyMissingToday = (student, month = homeSelectedMonth) => {
+    const todayIndex = homeTodayIndex;
+    const dayLimit = getHomeMonthDayLimit(month);
+    const excluded = getHomeDailyExcludedDaysForStudent(student, month);
+
+    if (dayLimit <= 0 || todayIndex < 0 || todayIndex >= dayLimit) return false;
+    if (excluded.includes(todayIndex)) return false;
+
+    const day = student.dailyRecords?.[month]?.[todayIndex] || {};
+    const t1 = String(day?.t1 ?? '').trim();
+    const t2 = String(day?.t2 ?? '').trim();
+    const math = String(day?.math ?? '').trim();
+
+    return t1 === '' && t2 === '' && math === '';
   };
 
   const hasHomeDailyMissingUntilToday = (student, month = homeSelectedMonth) => {
@@ -1866,7 +1942,7 @@ export default function App() {
     const monthPrefix = `${month}_w`;
 
     const values = [...englishEntries, ...mathEntries]
-      .filter(([key]) => String(key).startsWith(monthPrefix) || String(key) === `w${homeCurrentWeek}`)
+      .filter(([key]) => String(key).startsWith(monthPrefix))
       .map(([, value]) => Number(value))
       .filter(value => Number.isFinite(value));
 
@@ -1882,8 +1958,8 @@ export default function App() {
 
   const getHomeWeeklyMissingForStudent = (student, month = homeSelectedMonth) => {
     const weeklyKey = `${month}_w${homeCurrentWeek}`;
-    const eng = student.scores?.weeklyEnglish?.[weeklyKey] ?? student.scores?.weeklyEnglish?.[`w${homeCurrentWeek}`];
-    const math = student.scores?.weeklyMath?.[weeklyKey] ?? student.scores?.weeklyMath?.[`w${homeCurrentWeek}`];
+    const eng = student.scores?.weeklyEnglish?.[weeklyKey];
+    const math = student.scores?.weeklyMath?.[weeklyKey];
 
     return String(eng ?? '').trim() === '' && String(math ?? '').trim() === '';
   };
@@ -1893,8 +1969,8 @@ export default function App() {
 
     const weeklyKey = `${month}_w${week}`;
     const participated = students.filter(student => {
-      const eng = student.scores?.weeklyEnglish?.[weeklyKey] ?? student.scores?.weeklyEnglish?.[`w${week}`];
-      const math = student.scores?.weeklyMath?.[weeklyKey] ?? student.scores?.weeklyMath?.[`w${week}`];
+      const eng = student.scores?.weeklyEnglish?.[weeklyKey];
+      const math = student.scores?.weeklyMath?.[weeklyKey];
       return String(eng ?? '').trim() !== '' || String(math ?? '').trim() !== '';
     }).length;
 
@@ -1902,24 +1978,32 @@ export default function App() {
   };
 
   const getHomeMonthlyScoreForStudent = (student, month = homeSelectedMonth) => {
+    const parseHomeMonthlyScore = (value) => {
+      const raw = String(value ?? '').trim();
+      if (raw === '') return null;
+
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+
     const monthly = student.scores?.monthly?.[month] || {};
-    const english = Number(monthly.english?.score);
-    const math = Number(monthly.math?.score);
-    const total = Number(monthly.total?.score);
+    const english = parseHomeMonthlyScore(monthly.english?.score);
+    const math = parseHomeMonthlyScore(monthly.math?.score);
+    const total = parseHomeMonthlyScore(monthly.total?.score);
     const track = String(student.targetTrack || '');
 
-    if (Number.isFinite(total)) return total;
+    if (total !== null) return total;
 
     if (track.includes('자연')) {
-      if (Number.isFinite(english) && Number.isFinite(math)) return Math.round(((english + math) / 2) * 10) / 10;
-      if (Number.isFinite(math)) return math;
-      if (Number.isFinite(english)) return english;
+      if (english !== null && math !== null) return Math.round(((english + math) / 2) * 10) / 10;
+      if (math !== null) return math;
+      if (english !== null) return english;
       return null;
     }
 
-    if (Number.isFinite(english)) return english;
-    if (Number.isFinite(total)) return total;
-    if (Number.isFinite(math)) return math;
+    if (english !== null) return english;
+    if (total !== null) return total;
+    if (math !== null) return math;
 
     return null;
   };
@@ -2097,14 +2181,61 @@ export default function App() {
     return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
   };
 
+  const getHomeClassAttendanceRateMetric = (clsName) => {
+    const targetStudents = getHomeClassStudents(clsName);
+    if (!targetStudents.length) return null;
+
+    let denominator = 0;
+    let presentTotal = 0;
+    let hasRecordedAttendance = false;
+
+    targetStudents.forEach(student => {
+      const excluded = clsName === '대구캠퍼스 전체'
+        ? getHomeAttendanceExcludedDaysForStudent(student, homeSelectedMonth)
+        : getHomeAttendanceExcludedDays(clsName, homeSelectedMonth);
+
+      const monthData = student.attendance?.[homeSelectedMonth] || {};
+      const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
+      const dayLimit = getHomeMonthDayLimit(homeSelectedMonth);
+
+      for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+        if (excluded.includes(dayIndex)) continue;
+
+        if (String(attendanceArray?.[dayIndex] ?? '').trim() !== '') {
+          hasRecordedAttendance = true;
+          break;
+        }
+      }
+
+      const parts = calculateAttendanceRatePartsFromArray({
+        attendanceArray,
+        excludedDays: excluded,
+        year: academicYear,
+        month: homeSelectedMonth
+      });
+
+      denominator += parts.denominator;
+      presentTotal += parts.presentCount;
+    });
+
+    if (!hasRecordedAttendance || denominator === 0) return null;
+
+    return Math.round((presentTotal / denominator) * 100);
+  };
+
   const getHomeClassNeedCount = (clsName) => {
     const targetStudents = getHomeClassStudents(clsName);
 
     return targetStudents.filter(student => {
-      const attendanceRate = getHomeAttendanceRateForStudent(student, homeSelectedMonth);
-      const dailyRate = getHomeDailyRateForStudent(student, homeSelectedMonth);
+      const attendanceRate = getHomeAttendanceRateMetricForStudent(student, homeSelectedMonth);
+      const dailyRate = getHomeDailyRateMetricForStudent(student, homeSelectedMonth);
       const weeklyAverage = getHomeWeeklyAverageForStudent(student, homeSelectedMonth);
-      return attendanceRate <= 70 || dailyRate <= 70 || (weeklyAverage !== null && weeklyAverage <= 50);
+
+      return (
+        (attendanceRate !== null && attendanceRate <= 70) ||
+        (dailyRate !== null && dailyRate <= 70) ||
+        (weeklyAverage !== null && weeklyAverage <= 50)
+      );
     }).length;
   };
 
@@ -2158,14 +2289,19 @@ export default function App() {
     });
   };
 
-  const homeDailyMissingStudents = students.filter(s => hasHomeDailyMissingUntilToday(s, homeSelectedMonth));
+  const homeDailyMissingTodayStudents = students.filter(s => hasHomeDailyMissingToday(s, homeSelectedMonth));
+
+  const homeLongTermDailyMissingStudents = students.filter(s => hasHomeDailyMissingUntilToday(s, homeSelectedMonth));
+
+  const homeDailyMissingStudents = homeDailyMissingTodayStudents;
 
   const homeWeeklyMissingStudents = students.filter(s => getHomeWeeklyMissingForStudent(s, homeSelectedMonth));
 
   const homeMonthlyMissingStudents = getHomeMonthlyMissingStudents(homeSelectedMonth);
 
   const homeLowAttendanceStudents = students.filter(s => {
-    return getHomeAttendanceRateForStudent(s, homeSelectedMonth) < 80;
+    const attendanceRate = getHomeAttendanceRateMetricForStudent(s, homeSelectedMonth);
+    return attendanceRate !== null && attendanceRate < 80;
   });
 
   const homeLowStudyTimeStudents = students.filter(s => {
@@ -2174,19 +2310,27 @@ export default function App() {
   });
 
   const homeCounselingNeededStudents = students.filter(student => {
-    const attendanceRate = getHomeAttendanceRateForStudent(student, homeSelectedMonth);
-    const dailyRate = getHomeDailyRateForStudent(student, homeSelectedMonth);
+    const attendanceRate = getHomeAttendanceRateMetricForStudent(student, homeSelectedMonth);
+    const dailyRate = getHomeDailyRateMetricForStudent(student, homeSelectedMonth);
     const weeklyAverage = getHomeWeeklyAverageForStudent(student, homeSelectedMonth);
 
-    return attendanceRate <= 50 || dailyRate <= 50 || (weeklyAverage !== null && weeklyAverage <= 30);
+    return (
+      (attendanceRate !== null && attendanceRate <= 50) ||
+      (dailyRate !== null && dailyRate <= 50) ||
+      (weeklyAverage !== null && weeklyAverage <= 30)
+    );
   });
 
   const homeNeedStudents = students.filter(student => {
-    const attendanceRate = getHomeAttendanceRateForStudent(student, homeSelectedMonth);
-    const dailyRate = getHomeDailyRateForStudent(student, homeSelectedMonth);
+    const attendanceRate = getHomeAttendanceRateMetricForStudent(student, homeSelectedMonth);
+    const dailyRate = getHomeDailyRateMetricForStudent(student, homeSelectedMonth);
     const weeklyAverage = getHomeWeeklyAverageForStudent(student, homeSelectedMonth);
 
-    return attendanceRate <= 70 || dailyRate <= 70 || (weeklyAverage !== null && weeklyAverage <= 50);
+    return (
+      (attendanceRate !== null && attendanceRate <= 70) ||
+      (dailyRate !== null && dailyRate <= 70) ||
+      (weeklyAverage !== null && weeklyAverage <= 50)
+    );
   });
 
   const homeRecentNewStudents = students.filter(student => {
@@ -2361,10 +2505,11 @@ export default function App() {
     return classes
       .map(clsName => ({
         clsName,
-        rate: getHomeClassAttendanceRate(clsName),
+        rate: getHomeClassAttendanceRateMetric(clsName),
         need: getHomeClassNeedCount(clsName)
       }))
-      .sort((a, b) => a.rate - b.rate)[0];
+      .filter(item => item.rate !== null)
+      .sort((a, b) => a.rate - b.rate)[0] || null;
   };
 
   const worstClass = getWorstAttendanceClass();
@@ -2797,7 +2942,7 @@ export default function App() {
   const homeManagementAlerts = [
     {
       title: 'Daily 미응시',
-      desc: `${homeSelectedMonth} 1일~${homeTodayIndex + 1}일 Daily 누적 미응시 학생`,
+      desc: `${homeSelectedMonth} ${homeTodayIndex + 1}일 Daily 미응시 학생`,
       count: homeDailyMissingStudents.length,
       color: 'red',
       icon: AlertTriangle,
@@ -3165,7 +3310,7 @@ export default function App() {
                       <div className="space-y-3">
                         {[
                           { label: '상담 필요 학생', count: homeCounselingNeededStudents.length, color: 'text-red-500', bg: 'bg-red-50', list: homeCounselingNeededStudents },
-                          { label: '장기 미응시 학생', count: homeDailyMissingStudents.length, color: 'text-orange-500', bg: 'bg-orange-50', list: homeDailyMissingStudents },
+                          { label: '장기 미응시 학생', count: homeLongTermDailyMissingStudents.length, color: 'text-orange-500', bg: 'bg-orange-50', list: homeLongTermDailyMissingStudents },
                           { label: '관리 필요 학생', count: homeNeedStudents.length, color: 'text-orange-500', bg: 'bg-orange-50', list: homeNeedStudents },
                           { label: '최근 신규 등록', count: homeRecentNewStudents.length, color: 'text-violet-600', bg: 'bg-violet-50', list: homeRecentNewStudents }
                         ].map(item => (
