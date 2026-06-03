@@ -31,17 +31,15 @@ const ATTENDANCE_OPTIONS = ['출석', 'Live', '결석', '조퇴', '지각', '사
 const ATTENDANCE_SESSION_KEY = 'am';
 const ATTENDANCE_SESSION_LABEL = '출석확인';
 const ATTENDANCE_PRESENT_STATUSES = ['출석', 'Live', '지각', '조퇴'];
-const ATTENDANCE_ABSENT_STATUSES = ['결석'];
-const ATTENDANCE_NEUTRAL_STATUSES = [
-  '사전통보', '병결', '알바', '가족사정', '개인사정',
+const ATTENDANCE_ABSENT_STATUSES = [
+  '결석', '사전통보', '병결', '알바', '가족사정', '개인사정',
   '컨디션 난조', '학교', '시험', '과제', '실습', '타학원', '독서실', '기타'
 ];
+const ATTENDANCE_NEUTRAL_STATUSES = [];
 const getAttendanceValueType = (value) => {
   const status = String(value ?? '').trim();
   if (ATTENDANCE_PRESENT_STATUSES.includes(status)) return 'present';
-  if (ATTENDANCE_ABSENT_STATUSES.includes(status)) return 'absent';
-  if (ATTENDANCE_NEUTRAL_STATUSES.includes(status)) return 'neutral';
-  return 'empty';
+  return 'absent';
 };
 
 const getMonthNumber = (month) => {
@@ -54,13 +52,29 @@ const getRealMonthLastDay = (year, month) => {
   return new Date(targetYear, targetMonth, 0).getDate();
 };
 
-const getMetricDayLimit = (year, month, { useTodayLimit = true, dayLimitOverride = null } = {}) => {
+const METRIC_DATE_MODE_STORAGE_KEY = '__academyMetricDateMode';
+
+const getActiveMetricDateMode = () => {
+  if (typeof window === 'undefined') return 'previous';
+
+  const savedMode = window[METRIC_DATE_MODE_STORAGE_KEY];
+  return savedMode === 'today' ? 'today' : 'previous';
+};
+
+const setActiveMetricDateMode = (mode) => {
+  if (typeof window === 'undefined') return;
+
+  window[METRIC_DATE_MODE_STORAGE_KEY] = mode === 'today' ? 'today' : 'previous';
+};
+
+const getMetricDayLimit = (year, month, { useTodayLimit = true, dayLimitOverride = null, dateMode = null } = {}) => {
   const now = new Date();
   const currentYear = now.getFullYear();
   const currentMonthNumber = now.getMonth() + 1;
   const targetYear = Number(year) || currentYear;
   const targetMonth = getMonthNumber(month);
   const lastDay = getRealMonthLastDay(targetYear, targetMonth);
+  const safeDateMode = dateMode || getActiveMetricDateMode();
 
   if (Number.isFinite(dayLimitOverride)) {
     return Math.max(0, Math.min(lastDay, Number(dayLimitOverride)));
@@ -73,10 +87,18 @@ const getMetricDayLimit = (year, month, { useTodayLimit = true, dayLimitOverride
   }
 
   if (targetYear === currentYear && targetMonth === currentMonthNumber) {
-    return Math.max(1, Math.min(lastDay, now.getDate()));
+    const todayLimit = Math.max(1, Math.min(lastDay, now.getDate()));
+    return safeDateMode === 'today' ? todayLimit : Math.max(0, todayLimit - 1);
   }
 
   return lastDay;
+};
+
+const getMetricBaseDateLabel = (year, month, options = {}) => {
+  const dayLimit = getMetricDayLimit(year, month, options);
+  if (dayLimit <= 0) return `${month} 기준`;
+
+  return `${getMonthNumber(month)}월 ${dayLimit}일 기준`;
 };
 
 const calculateAttendanceRatePartsFromArray = ({
@@ -94,15 +116,10 @@ const calculateAttendanceRatePartsFromArray = ({
   for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
     if (excludedDays.includes(dayIndex)) continue;
 
-    const type = getAttendanceValueType(attendanceArray?.[dayIndex]);
+    denominator += 1;
 
-    if (type === 'neutral') continue;
-
-    if (type === 'present') {
-      denominator += 1;
+    if (getAttendanceValueType(attendanceArray?.[dayIndex]) === 'present') {
       presentCount += 1;
-    } else if (type === 'absent' || type === 'empty') {
-      denominator += 1;
     }
   }
 
@@ -117,38 +134,186 @@ const calculateAttendanceRateFromArray = (options) => {
   return calculateAttendanceRatePartsFromArray(options).rate;
 };
 
-const calculateDailyDayParticipationRatePartsFromArray = ({
-  dailyArray = [],
-  excludedDays = [],
+const calculateAverageDailyAttendanceRateForStudents = ({
+  students = [],
+  getAttendanceArrayForStudent = () => [],
+  getExcludedDaysForStudent = () => [],
   year,
   month,
   dayLimitOverride = null,
   useTodayLimit = true
 }) => {
   const dayLimit = getMetricDayLimit(year, month, { useTodayLimit, dayLimitOverride });
+  const dailyRates = [];
+
+  for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+    let denominator = 0;
+    let presentCount = 0;
+
+    students.forEach(student => {
+      const excludedDays = getExcludedDaysForStudent(student) || [];
+      if (excludedDays.includes(dayIndex)) return;
+
+      const attendanceArray = getAttendanceArrayForStudent(student) || [];
+      denominator += 1;
+
+      if (getAttendanceValueType(attendanceArray?.[dayIndex]) === 'present') {
+        presentCount += 1;
+      }
+    });
+
+    if (denominator > 0) {
+      dailyRates.push((presentCount / denominator) * 100);
+    }
+  }
+
+  const averageRate = dailyRates.length
+    ? Math.round(dailyRates.reduce((sum, rate) => sum + rate, 0) / dailyRates.length)
+    : 0;
+
+  return {
+    dayCount: dailyRates.length,
+    rate: averageRate,
+    averageRate
+  };
+};
+
+const getDailySubjectType = (subject = 'english') => {
+  return subject === 'math' ? 'math' : 'english';
+};
+
+const getDailySubjectExcludedKey = (subject = 'english') => {
+  return getDailySubjectType(subject) === 'math' ? 'mathExcludedDays' : 'englishExcludedDays';
+};
+
+const getDailyExcludedDaysBySubject = (monthSetting = {}, subject = 'english') => {
+  const subjectType = getDailySubjectType(subject);
+  const legacyExcludedDays = Array.isArray(monthSetting?.excludedDays)
+    ? monthSetting.excludedDays
+    : [];
+
+  if (subjectType === 'math') {
+    return Array.isArray(monthSetting?.mathExcludedDays)
+      ? monthSetting.mathExcludedDays
+      : [];
+  }
+
+  return Array.isArray(monthSetting?.englishExcludedDays)
+    ? monthSetting.englishExcludedDays
+    : legacyExcludedDays;
+};
+
+const getDailyTestKeysBySubject = (subject = 'english') => {
+  return getDailySubjectType(subject) === 'math' ? ['math'] : ['t1', 't2'];
+};
+
+const calculateDailySubjectParticipationRatePartsFromArray = ({
+  dailyArray = [],
+  excludedDays = [],
+  subject = 'english',
+  year,
+  month,
+  dayLimitOverride = null,
+  useTodayLimit = true
+}) => {
+  const dayLimit = getMetricDayLimit(year, month, { useTodayLimit, dayLimitOverride });
+  const testKeys = getDailyTestKeysBySubject(subject);
+  const dailyRates = [];
   let denominator = 0;
   let participatedCount = 0;
 
   for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
     if (excludedDays.includes(dayIndex)) continue;
 
-    denominator += 1;
-
     const day = dailyArray?.[dayIndex] || {};
-    const t1 = String(day?.t1 ?? '').trim();
-    const t2 = String(day?.t2 ?? '').trim();
-    const math = String(day?.math ?? '').trim();
+    let dayParticipatedCount = 0;
 
-    if (t1 !== '' || t2 !== '' || math !== '') {
-      participatedCount += 1;
+    testKeys.forEach(key => {
+      denominator += 1;
+
+      if (String(day?.[key] ?? '').trim() !== '') {
+        participatedCount += 1;
+        dayParticipatedCount += 1;
+      }
+    });
+
+    if (testKeys.length > 0) {
+      dailyRates.push((dayParticipatedCount / testKeys.length) * 100);
     }
   }
 
   return {
     denominator,
     participatedCount,
-    rate: denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100)
+    dayCount: dailyRates.length,
+    rate: dailyRates.length
+      ? Math.round(dailyRates.reduce((sum, rate) => sum + rate, 0) / dailyRates.length)
+      : 0
   };
+};
+
+const calculateDailySubjectParticipationRateFromArray = (options) => {
+  return calculateDailySubjectParticipationRatePartsFromArray(options).rate;
+};
+
+const calculateAverageDailySubjectParticipationRateForStudents = ({
+  students = [],
+  getDailyArrayForStudent = () => [],
+  getExcludedDaysForStudent = () => [],
+  subject = 'english',
+  year,
+  month,
+  dayLimitOverride = null,
+  useTodayLimit = true
+}) => {
+  const dayLimit = getMetricDayLimit(year, month, { useTodayLimit, dayLimitOverride });
+  const testKeys = getDailyTestKeysBySubject(subject);
+  const dailyRates = [];
+  let denominator = 0;
+  let participatedCount = 0;
+
+  for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
+    let dayDenominator = 0;
+    let dayParticipatedCount = 0;
+
+    students.forEach(student => {
+      const excludedDays = getExcludedDaysForStudent(student) || [];
+      if (excludedDays.includes(dayIndex)) return;
+
+      const dailyArray = getDailyArrayForStudent(student) || [];
+      const day = dailyArray?.[dayIndex] || {};
+
+      testKeys.forEach(key => {
+        denominator += 1;
+        dayDenominator += 1;
+
+        if (String(day?.[key] ?? '').trim() !== '') {
+          participatedCount += 1;
+          dayParticipatedCount += 1;
+        }
+      });
+    });
+
+    if (dayDenominator > 0) {
+      dailyRates.push((dayParticipatedCount / dayDenominator) * 100);
+    }
+  }
+
+  return {
+    denominator,
+    participatedCount,
+    dayCount: dailyRates.length,
+    rate: dailyRates.length
+      ? Math.round(dailyRates.reduce((sum, rate) => sum + rate, 0) / dailyRates.length)
+      : 0
+  };
+};
+
+const calculateDailyDayParticipationRatePartsFromArray = (options) => {
+  return calculateDailySubjectParticipationRatePartsFromArray({
+    ...options,
+    subject: options?.subject || 'english'
+  });
 };
 
 const calculateDailyDayParticipationRateFromArray = (options) => {
@@ -952,7 +1117,13 @@ export default function App() {
   const getClassSettingsPayloadFromLocalStorage = (targetClassName) => {
     const createFallbackDailySettings = () => {
       const settings = {};
-      MONTHS.forEach(m => settings[m] = { excludedDays: [] });
+      MONTHS.forEach(m => {
+        settings[m] = {
+          excludedDays: [],
+          englishExcludedDays: [],
+          mathExcludedDays: []
+        };
+      });
       return settings;
     };
 
@@ -1732,6 +1903,51 @@ export default function App() {
     title: '',
     items: []
   });
+  const [homeHelpKey, setHomeHelpKey] = useState(null);
+  const [metricDateMode, setMetricDateMode] = useState(getActiveMetricDateMode());
+
+  const handleMetricDateModeChange = (nextMode) => {
+    const safeMode = nextMode === 'today' ? 'today' : 'previous';
+    setActiveMetricDateMode(safeMode);
+    setMetricDateMode(safeMode);
+  };
+
+  const getTodayKoreanDateText = () => {
+    const now = new Date();
+    const weekdays = ['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일'];
+
+    return `${now.getFullYear()}년 ${String(now.getMonth() + 1).padStart(2, '0')}월 ${String(now.getDate()).padStart(2, '0')}일, ${weekdays[now.getDay()]}`;
+  };
+
+  const renderMetricDateModeToggle = () => (
+    <div className="h-10 px-3 rounded-xl bg-white/85 border border-blue-100 shadow-[0_8px_24px_rgba(37,99,235,0.08)] flex items-center gap-2">
+      <span className="text-[11px] font-black text-slate-500">날짜 기준</span>
+      <div className="flex items-center gap-1 rounded-lg bg-slate-100 p-1">
+        <button
+          type="button"
+          onClick={() => handleMetricDateModeChange('previous')}
+          className={`h-7 px-3 rounded-md text-[11px] font-black transition-all ${
+            metricDateMode === 'previous'
+              ? 'bg-white text-blue-700 shadow-sm'
+              : 'text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          전일
+        </button>
+        <button
+          type="button"
+          onClick={() => handleMetricDateModeChange('today')}
+          className={`h-7 px-3 rounded-md text-[11px] font-black transition-all ${
+            metricDateMode === 'today'
+              ? 'bg-white text-blue-700 shadow-sm'
+              : 'text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          오늘
+        </button>
+      </div>
+    </div>
+  );
 
   const getHomeClassSavedSettings = (clsName) => {
     if (!clsName || clsName === '대구캠퍼스 전체') return null;
@@ -1748,8 +1964,9 @@ export default function App() {
     return getHomeClassSavedSettings(clsName)?.attendanceSettings?.[month]?.excludedDays || [];
   };
 
-  const getHomeDailyExcludedDays = (clsName, month = homeSelectedMonth) => {
-    return getHomeClassSavedSettings(clsName)?.dailySettings?.[month]?.excludedDays || [];
+  const getHomeDailyExcludedDays = (clsName, month = homeSelectedMonth, subject = 'english') => {
+    const monthSetting = getHomeClassSavedSettings(clsName)?.dailySettings?.[month] || {};
+    return getDailyExcludedDaysBySubject(monthSetting, subject);
   };
 
   const getHomeMonthDayLimit = (month = homeSelectedMonth) => {
@@ -1802,9 +2019,9 @@ export default function App() {
     return clsName ? getHomeAttendanceExcludedDays(clsName, month) : [];
   };
 
-  const getHomeDailyExcludedDaysForStudent = (student, month = homeSelectedMonth) => {
+  const getHomeDailyExcludedDaysForStudent = (student, month = homeSelectedMonth, subject = 'english') => {
     const clsName = getHomeStudentPrimaryClassName(student);
-    return clsName ? getHomeDailyExcludedDays(clsName, month) : [];
+    return clsName ? getHomeDailyExcludedDays(clsName, month, subject) : [];
   };
 
   const getHomeUnifiedAttendanceArray = (monthData = {}) => {
@@ -1815,53 +2032,35 @@ export default function App() {
   };
 
   const getHomeAttendanceRateForStudent = (student, month = homeSelectedMonth) => {
-    const monthData = student.attendance?.[month] || {};
-    const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
-    const excluded = getHomeAttendanceExcludedDaysForStudent(student, month);
-
-    return calculateAttendanceRateFromArray({
-      attendanceArray,
-      excludedDays: excluded,
+    return calculateAverageDailyAttendanceRateForStudents({
+      students: [student],
+      getAttendanceArrayForStudent: targetStudent => getHomeUnifiedAttendanceArray(targetStudent.attendance?.[month] || {}),
+      getExcludedDaysForStudent: targetStudent => getHomeAttendanceExcludedDaysForStudent(targetStudent, month),
       year: academicYear,
       month
-    });
+    }).rate;
   };
 
   const getHomeAttendanceRateMetricForStudent = (student, month = homeSelectedMonth) => {
-    const monthData = student.attendance?.[month] || {};
-    const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
-    const excluded = getHomeAttendanceExcludedDaysForStudent(student, month);
-    const dayLimit = getHomeMonthDayLimit(month);
-    let hasRecordedAttendance = false;
-
-    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
-      if (excluded.includes(dayIndex)) continue;
-
-      if (String(attendanceArray?.[dayIndex] ?? '').trim() !== '') {
-        hasRecordedAttendance = true;
-        break;
-      }
-    }
-
-    const parts = calculateAttendanceRatePartsFromArray({
-      attendanceArray,
-      excludedDays: excluded,
+    const result = calculateAverageDailyAttendanceRateForStudents({
+      students: [student],
+      getAttendanceArrayForStudent: targetStudent => getHomeUnifiedAttendanceArray(targetStudent.attendance?.[month] || {}),
+      getExcludedDaysForStudent: targetStudent => getHomeAttendanceExcludedDaysForStudent(targetStudent, month),
       year: academicYear,
       month
     });
 
-    if (!hasRecordedAttendance || parts.denominator === 0) return null;
-
-    return parts.rate;
+    return result.dayCount === 0 ? null : result.rate;
   };
 
   const getHomeDailyRateForStudent = (student, month = homeSelectedMonth) => {
     const dailyArray = student.dailyRecords?.[month] || [];
-    const excluded = getHomeDailyExcludedDaysForStudent(student, month);
+    const excluded = getHomeDailyExcludedDaysForStudent(student, month, 'english');
 
-    return calculateDailyDayParticipationRateFromArray({
+    return calculateDailySubjectParticipationRateFromArray({
       dailyArray,
       excludedDays: excluded,
+      subject: 'english',
       year: academicYear,
       month
     });
@@ -1869,7 +2068,7 @@ export default function App() {
 
   const getHomeDailyRateMetricForStudent = (student, month = homeSelectedMonth) => {
     const dailyArray = student.dailyRecords?.[month] || [];
-    const excluded = getHomeDailyExcludedDaysForStudent(student, month);
+    const excluded = getHomeDailyExcludedDaysForStudent(student, month, 'english');
     const dayLimit = getHomeMonthDayLimit(month);
     let hasDailyRecord = false;
 
@@ -1879,17 +2078,17 @@ export default function App() {
       const day = dailyArray?.[dayIndex] || {};
       const t1 = String(day?.t1 ?? '').trim();
       const t2 = String(day?.t2 ?? '').trim();
-      const math = String(day?.math ?? '').trim();
 
-      if (t1 !== '' || t2 !== '' || math !== '') {
+      if (t1 !== '' || t2 !== '') {
         hasDailyRecord = true;
         break;
       }
     }
 
-    const parts = calculateDailyDayParticipationRatePartsFromArray({
+    const parts = calculateDailySubjectParticipationRatePartsFromArray({
       dailyArray,
       excludedDays: excluded,
+      subject: 'english',
       year: academicYear,
       month
     });
@@ -1899,10 +2098,30 @@ export default function App() {
     return parts.rate;
   };
 
+  const getHomeDailyParticipationPartsForStudent = (student, month = homeSelectedMonth) => {
+    const dailyArray = student.dailyRecords?.[month] || [];
+    const excluded = getHomeDailyExcludedDaysForStudent(student, month, 'english');
+
+    return calculateDailySubjectParticipationRatePartsFromArray({
+      dailyArray,
+      excludedDays: excluded,
+      subject: 'english',
+      year: academicYear,
+      month
+    });
+  };
+
+  const getHomeDailyRawParticipationRateForStudent = (student, month = homeSelectedMonth) => {
+    const parts = getHomeDailyParticipationPartsForStudent(student, month);
+    if (!parts.denominator) return null;
+
+    return (parts.participatedCount / parts.denominator) * 100;
+  };
+
   const hasHomeDailyMissingToday = (student, month = homeSelectedMonth) => {
     const todayIndex = homeTodayIndex;
     const dayLimit = getHomeMonthDayLimit(month);
-    const excluded = getHomeDailyExcludedDaysForStudent(student, month);
+    const excluded = getHomeDailyExcludedDaysForStudent(student, month, 'english');
 
     if (dayLimit <= 0 || todayIndex < 0 || todayIndex >= dayLimit) return false;
     if (excluded.includes(todayIndex)) return false;
@@ -1910,30 +2129,14 @@ export default function App() {
     const day = student.dailyRecords?.[month]?.[todayIndex] || {};
     const t1 = String(day?.t1 ?? '').trim();
     const t2 = String(day?.t2 ?? '').trim();
-    const math = String(day?.math ?? '').trim();
 
-    return t1 === '' && t2 === '' && math === '';
+    return t1 === '' && t2 === '';
   };
 
   const hasHomeDailyMissingUntilToday = (student, month = homeSelectedMonth) => {
-    const dailyArray = student.dailyRecords?.[month] || [];
-    const dayLimit = getHomeMonthDayLimit(month);
-    const excluded = getHomeDailyExcludedDaysForStudent(student, month);
+    const rawRate = getHomeDailyRawParticipationRateForStudent(student, month);
 
-    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
-      if (excluded.includes(dayIndex)) continue;
-
-      const day = dailyArray[dayIndex] || {};
-      const t1 = String(day?.t1 ?? '').trim();
-      const t2 = String(day?.t2 ?? '').trim();
-      const math = String(day?.math ?? '').trim();
-
-      if (t1 === '' && t2 === '' && math === '') {
-        return true;
-      }
-    }
-
-    return false;
+    return rawRate !== null && rawRate < 50;
   };
 
   const getHomeWeeklyScoreValuesForStudent = (student, month = homeSelectedMonth) => {
@@ -1977,19 +2180,19 @@ export default function App() {
     return Math.round((participated / students.length) * 100);
   };
 
+  const parseHomeMetricNumber = (value) => {
+    const raw = String(value ?? '').trim();
+    if (raw === '') return null;
+
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
   const getHomeMonthlyScoreForStudent = (student, month = homeSelectedMonth) => {
-    const parseHomeMonthlyScore = (value) => {
-      const raw = String(value ?? '').trim();
-      if (raw === '') return null;
-
-      const parsed = Number(raw);
-      return Number.isFinite(parsed) ? parsed : null;
-    };
-
     const monthly = student.scores?.monthly?.[month] || {};
-    const english = parseHomeMonthlyScore(monthly.english?.score);
-    const math = parseHomeMonthlyScore(monthly.math?.score);
-    const total = parseHomeMonthlyScore(monthly.total?.score);
+    const english = parseHomeMetricNumber(monthly.english?.score);
+    const math = parseHomeMetricNumber(monthly.math?.score);
+    const total = parseHomeMetricNumber(monthly.total?.score);
     const track = String(student.targetTrack || '');
 
     if (total !== null) return total;
@@ -2006,6 +2209,68 @@ export default function App() {
     if (math !== null) return math;
 
     return null;
+  };
+
+  const getHomeMonthlySubjectScore = (student, month = homeSelectedMonth, subject = 'english') => {
+    return parseHomeMetricNumber(student.scores?.monthly?.[month]?.[subject]?.score);
+  };
+
+  const getHomeMonthlySubjectGlobalAverage = (month = homeSelectedMonth, subject = 'english') => {
+    const candidates = students
+      .map(student => {
+        const subjectData = student.scores?.monthly?.[month]?.[subject] || {};
+        return parseHomeMetricNumber(
+          subjectData.trackAvg ||
+          subjectData.totalAvg ||
+          subjectData.classAvg ||
+          subjectData.avg
+        );
+      })
+      .filter(value => value !== null && value > 0);
+
+    if (candidates.length > 0) {
+      return Math.round((candidates.reduce((sum, value) => sum + value, 0) / candidates.length) * 10) / 10;
+    }
+
+    const fallbackScores = students
+      .map(student => getHomeMonthlySubjectScore(student, month, subject))
+      .filter(value => value !== null && value > 0);
+
+    if (!fallbackScores.length) return null;
+
+    return Math.round((fallbackScores.reduce((sum, value) => sum + value, 0) / fallbackScores.length) * 10) / 10;
+  };
+
+  const getHomeIsNaturalTrack = (student) => {
+    const track = String(student.targetTrack || student.track || '').trim();
+    return track.includes('자연') || track.includes('이공') || track.includes('공학') || track.includes('수학');
+  };
+
+  const getHomeMonthlyEmergencyNeeds = (student, month = homeSelectedMonth) => {
+    const subjects = getHomeIsNaturalTrack(student)
+      ? [
+          { key: 'english', label: '영어' },
+          { key: 'math', label: '수학' }
+        ]
+      : [
+          { key: 'english', label: '영어' }
+        ];
+
+    return subjects.map(subject => {
+      const score = getHomeMonthlySubjectScore(student, month, subject.key);
+      const globalAverage = getHomeMonthlySubjectGlobalAverage(month, subject.key);
+
+      if (score === null || score <= 0 || globalAverage === null || globalAverage <= 0) return null;
+
+      const gap = Math.round((globalAverage - score) * 10) / 10;
+      if (gap < 30) return null;
+
+      return {
+        type: 'score',
+        label: '성적',
+        text: `${subject.label} Monthly 전체 평균 ${globalAverage}점 대비 ${gap}점 낮음`
+      };
+    }).filter(Boolean);
   };
 
   const getHomeMonthlyParticipationRate = (month = homeSelectedMonth) => {
@@ -2060,6 +2325,77 @@ export default function App() {
     }, 0);
   };
 
+  const getHomeStudentDailyStudyAverageMins = (student, month = homeSelectedMonth) => {
+    const daily = student.studyTime?.[month] || [];
+    const dayLimit = getHomeMonthDayLimit(month);
+    const validMins = daily
+      .slice(0, dayLimit)
+      .map(day => parseTimeDiffToMins(day?.in, day?.out))
+      .filter(mins => mins > 0);
+
+    if (!validMins.length) return 0;
+
+    return Math.round(validMins.reduce((sum, mins) => sum + mins, 0) / validMins.length);
+  };
+
+  const getHomeClassDailyStudyAverageMins = (clsName, month = homeSelectedMonth) => {
+    const values = getHomeClassStudents(clsName)
+      .map(student => getHomeStudentDailyStudyAverageMins(student, month))
+      .filter(mins => mins > 0);
+
+    if (!values.length) return 0;
+
+    return Math.round(values.reduce((sum, mins) => sum + mins, 0) / values.length);
+  };
+
+  const getHomeStudyEmergencyInfo = (student, month = homeSelectedMonth) => {
+    const clsName = getHomeStudentPrimaryClassName(student);
+    if (!clsName) return null;
+
+    const studentDailyAvg = getHomeStudentDailyStudyAverageMins(student, month);
+    const classDailyAvg = getHomeClassDailyStudyAverageMins(clsName, month);
+
+    if (studentDailyAvg <= 0 || classDailyAvg <= 0) return null;
+
+    const ratio = Math.round((studentDailyAvg / classDailyAvg) * 100);
+    if (ratio >= 60) return null;
+
+    return {
+      type: 'study',
+      label: '학습시간',
+      text: `반 일평균 ${formatMinsToTime(classDailyAvg)} 대비 ${ratio}%`
+    };
+  };
+
+  const getHomeEmergencyManagementReasons = (student, month = homeSelectedMonth) => {
+    const reasons = [];
+    const attendanceRate = getHomeAttendanceRateMetricForStudent(student, month);
+    const dailyRate = getHomeDailyRateMetricForStudent(student, month);
+
+    if (attendanceRate !== null && attendanceRate <= 50) {
+      reasons.push({
+        type: 'attendance',
+        label: '출석',
+        text: `출석률 ${attendanceRate}%`
+      });
+    }
+
+    if (dailyRate !== null && dailyRate <= 50) {
+      reasons.push({
+        type: 'daily',
+        label: 'Daily',
+        text: `영어 Daily 참여율 ${dailyRate}%`
+      });
+    }
+
+    getHomeMonthlyEmergencyNeeds(student, month).forEach(reason => reasons.push(reason));
+
+    const studyEmergency = getHomeStudyEmergencyInfo(student, month);
+    if (studyEmergency) reasons.push(studyEmergency);
+
+    return reasons;
+  };
+
   const getAverageRate = (values) => {
     if (!values.length) return 0;
     return Math.round(values.reduce((sum, v) => sum + Number(v || 0), 0) / values.length);
@@ -2069,116 +2405,64 @@ export default function App() {
     const targetStudents = getHomeClassStudents(clsName);
     if (targetStudents.length === 0) return 0;
 
-    let denominator = 0;
-    let presentTotal = 0;
-
-    targetStudents.forEach(student => {
-      const excluded = clsName === '대구캠퍼스 전체'
+    return calculateAverageDailyAttendanceRateForStudents({
+      students: targetStudents,
+      getAttendanceArrayForStudent: student => getHomeUnifiedAttendanceArray(student.attendance?.[homeSelectedMonth] || {}),
+      getExcludedDaysForStudent: student => clsName === '대구캠퍼스 전체'
         ? getHomeAttendanceExcludedDaysForStudent(student, homeSelectedMonth)
-        : getHomeAttendanceExcludedDays(clsName, homeSelectedMonth);
-
-      const monthData = student.attendance?.[homeSelectedMonth] || {};
-      const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
-
-      const parts = calculateAttendanceRatePartsFromArray({
-        attendanceArray,
-        excludedDays: excluded,
-        year: academicYear,
-        month: homeSelectedMonth
-      });
-
-      denominator += parts.denominator;
-      presentTotal += parts.presentCount;
-    });
-
-    return denominator === 0 ? 0 : Math.round((presentTotal / denominator) * 100);
+        : getHomeAttendanceExcludedDays(clsName, homeSelectedMonth),
+      year: academicYear,
+      month: homeSelectedMonth
+    }).rate;
   };
 
   const getHomeClassAttendanceRateUntilDay = (clsName, month = homeSelectedMonth, dayLimitOverride = getHomeMonthDayLimit(month)) => {
     const targetStudents = getHomeClassStudents(clsName);
     if (!targetStudents.length) return 0;
 
-    let denominator = 0;
-    let presentTotal = 0;
-
-    targetStudents.forEach(student => {
-      const excluded = clsName === '대구캠퍼스 전체'
+    return calculateAverageDailyAttendanceRateForStudents({
+      students: targetStudents,
+      getAttendanceArrayForStudent: student => getHomeUnifiedAttendanceArray(student.attendance?.[month] || {}),
+      getExcludedDaysForStudent: student => clsName === '대구캠퍼스 전체'
         ? getHomeAttendanceExcludedDaysForStudent(student, month)
-        : getHomeAttendanceExcludedDays(clsName, month);
-
-      const monthData = student.attendance?.[month] || {};
-      const attendanceArray = getHomeUnifiedAttendanceArray(monthData);
-
-      const parts = calculateAttendanceRatePartsFromArray({
-        attendanceArray,
-        excludedDays: excluded,
-        year: academicYear,
-        month,
-        dayLimitOverride
-      });
-
-      denominator += parts.denominator;
-      presentTotal += parts.presentCount;
-    });
-
-    return denominator === 0 ? 0 : Math.round((presentTotal / denominator) * 100);
+        : getHomeAttendanceExcludedDays(clsName, month),
+      year: academicYear,
+      month,
+      dayLimitOverride
+    }).rate;
   };
 
   const getHomeClassDailyRate = (clsName) => {
     const targetStudents = getHomeClassStudents(clsName);
     if (targetStudents.length === 0) return 0;
 
-    let denominator = 0;
-    let participatedCount = 0;
-
-    targetStudents.forEach(student => {
-      const excluded = clsName === '대구캠퍼스 전체'
-        ? getHomeDailyExcludedDaysForStudent(student, homeSelectedMonth)
-        : getHomeDailyExcludedDays(clsName, homeSelectedMonth);
-
-      const dailyArray = student.dailyRecords?.[homeSelectedMonth] || [];
-
-      const parts = calculateDailyDayParticipationRatePartsFromArray({
-        dailyArray,
-        excludedDays: excluded,
-        year: academicYear,
-        month: homeSelectedMonth
-      });
-
-      denominator += parts.denominator;
-      participatedCount += parts.participatedCount;
-    });
-
-    return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
+    return calculateAverageDailySubjectParticipationRateForStudents({
+      students: targetStudents,
+      getDailyArrayForStudent: student => student.dailyRecords?.[homeSelectedMonth] || [],
+      getExcludedDaysForStudent: student => clsName === '대구캠퍼스 전체'
+        ? getHomeDailyExcludedDaysForStudent(student, homeSelectedMonth, 'english')
+        : getHomeDailyExcludedDays(clsName, homeSelectedMonth, 'english'),
+      subject: 'english',
+      year: academicYear,
+      month: homeSelectedMonth
+    }).rate;
   };
 
   const getHomeClassDailyRateUntilDay = (clsName, month = homeSelectedMonth, dayLimitOverride = getHomeMonthDayLimit(month)) => {
     const targetStudents = getHomeClassStudents(clsName);
     if (!targetStudents.length) return 0;
 
-    let denominator = 0;
-    let participatedCount = 0;
-
-    targetStudents.forEach(student => {
-      const excluded = clsName === '대구캠퍼스 전체'
-        ? getHomeDailyExcludedDaysForStudent(student, month)
-        : getHomeDailyExcludedDays(clsName, month);
-
-      const dailyArray = student.dailyRecords?.[month] || [];
-
-      const parts = calculateDailyDayParticipationRatePartsFromArray({
-        dailyArray,
-        excludedDays: excluded,
-        year: academicYear,
-        month,
-        dayLimitOverride
-      });
-
-      denominator += parts.denominator;
-      participatedCount += parts.participatedCount;
-    });
-
-    return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
+    return calculateAverageDailySubjectParticipationRateForStudents({
+      students: targetStudents,
+      getDailyArrayForStudent: student => student.dailyRecords?.[month] || [],
+      getExcludedDaysForStudent: student => clsName === '대구캠퍼스 전체'
+        ? getHomeDailyExcludedDaysForStudent(student, month, 'english')
+        : getHomeDailyExcludedDays(clsName, month, 'english'),
+      subject: 'english',
+      year: academicYear,
+      month,
+      dayLimitOverride
+    }).rate;
   };
 
   const getHomeClassAttendanceRateMetric = (clsName) => {
@@ -2227,15 +2511,7 @@ export default function App() {
     const targetStudents = getHomeClassStudents(clsName);
 
     return targetStudents.filter(student => {
-      const attendanceRate = getHomeAttendanceRateMetricForStudent(student, homeSelectedMonth);
-      const dailyRate = getHomeDailyRateMetricForStudent(student, homeSelectedMonth);
-      const weeklyAverage = getHomeWeeklyAverageForStudent(student, homeSelectedMonth);
-
-      return (
-        (attendanceRate !== null && attendanceRate <= 70) ||
-        (dailyRate !== null && dailyRate <= 70) ||
-        (weeklyAverage !== null && weeklyAverage <= 50)
-      );
+      return getHomeEmergencyManagementReasons(student, homeSelectedMonth).length > 0;
     }).length;
   };
 
@@ -2289,6 +2565,69 @@ export default function App() {
     });
   };
 
+  const HOME_MAIN_HELP_TEXTS = {
+    need: `출석률 50% 이하
+영어 Daily 참여율 50% 이하
+Monthly 점수가 전국/전체 평균보다 30점 이상 낮음
+학습시간이 반 일평균의 60% 미만
+
+위 기준 중 하나라도 해당하는 긴급 관리 학생만 포함합니다.`,
+    counseling: `출석률 50% 이하
+영어 Daily 참여율 50% 이하
+Weekly 평균 30점 이하
+
+위 기준 중 2개 이상 해당하는 학생입니다.
+null 값은 판단에서 제외합니다.`,
+    longDailyMissing: `선택 월 1일부터 오늘까지
+영어 Daily 비테스트일을 제외하고
+영어 Daily t1/t2 누적 참여율이 50% 미만인 학생입니다.
+
+수학 Daily는 제외합니다.`,
+    scoreOverview: `선택 월 Monthly 점수가 있는 학생만 대상으로 평균을 계산합니다.
+
+평균 미만 학생과 최고/최저 반을 표시합니다.`,
+    lowStudyTime: `이번 주 학습시간이 0분 초과 600분 미만인 학생입니다.
+
+600분은 10시간입니다.
+0분은 데이터 없음으로 보고 제외합니다.`
+  };
+
+  const renderHomeHelpButton = (helpKey) => {
+    if (!helpKey || !HOME_MAIN_HELP_TEXTS[helpKey]) return null;
+
+    const isOpen = homeHelpKey === helpKey;
+
+    return (
+      <span className="relative inline-flex align-middle">
+        <span
+          role="button"
+          tabIndex={0}
+          aria-label="기준 도움말"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setHomeHelpKey(prev => prev === helpKey ? null : helpKey);
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            event.stopPropagation();
+            setHomeHelpKey(prev => prev === helpKey ? null : helpKey);
+          }}
+          className="ml-1 inline-flex w-4 h-4 rounded-full border border-slate-200 bg-white text-slate-400 hover:text-blue-600 hover:border-blue-200 items-center justify-center cursor-pointer shadow-sm"
+        >
+          <Info size={11} />
+        </span>
+
+        {isOpen && (
+          <span className="absolute left-1/2 top-5 z-[80] w-64 -translate-x-1/2 rounded-xl border border-blue-100 bg-white px-3 py-2 text-[11px] font-bold leading-5 text-slate-600 shadow-xl whitespace-pre-line">
+            {HOME_MAIN_HELP_TEXTS[helpKey]}
+          </span>
+        )}
+      </span>
+    );
+  };
+
   const homeDailyMissingTodayStudents = students.filter(s => hasHomeDailyMissingToday(s, homeSelectedMonth));
 
   const homeLongTermDailyMissingStudents = students.filter(s => hasHomeDailyMissingUntilToday(s, homeSelectedMonth));
@@ -2314,23 +2653,17 @@ export default function App() {
     const dailyRate = getHomeDailyRateMetricForStudent(student, homeSelectedMonth);
     const weeklyAverage = getHomeWeeklyAverageForStudent(student, homeSelectedMonth);
 
-    return (
-      (attendanceRate !== null && attendanceRate <= 50) ||
-      (dailyRate !== null && dailyRate <= 50) ||
-      (weeklyAverage !== null && weeklyAverage <= 30)
-    );
+    const severeCount = [
+      attendanceRate !== null && attendanceRate <= 50,
+      dailyRate !== null && dailyRate <= 50,
+      weeklyAverage !== null && weeklyAverage <= 30
+    ].filter(Boolean).length;
+
+    return severeCount >= 2;
   });
 
   const homeNeedStudents = students.filter(student => {
-    const attendanceRate = getHomeAttendanceRateMetricForStudent(student, homeSelectedMonth);
-    const dailyRate = getHomeDailyRateMetricForStudent(student, homeSelectedMonth);
-    const weeklyAverage = getHomeWeeklyAverageForStudent(student, homeSelectedMonth);
-
-    return (
-      (attendanceRate !== null && attendanceRate <= 70) ||
-      (dailyRate !== null && dailyRate <= 70) ||
-      (weeklyAverage !== null && weeklyAverage <= 50)
-    );
+    return getHomeEmergencyManagementReasons(student, homeSelectedMonth).length > 0;
   });
 
   const homeRecentNewStudents = students.filter(student => {
@@ -2634,19 +2967,18 @@ export default function App() {
     getHomeDatesInPeriod(period).forEach(date => {
       const month = getHomeMonthLabelFromDate(date);
       const dayIndex = date.getDate() - 1;
-      const excluded = getHomeDailyExcludedDaysForStudent(student, month);
+      const excluded = getHomeDailyExcludedDaysForStudent(student, month, 'english');
 
       if (excluded.includes(dayIndex)) return;
-
-      denominator += 1;
 
       const dailyArray = student.dailyRecords?.[month] || [];
       const day = dailyArray[dayIndex] || {};
       const t1 = String(day?.t1 ?? '').trim();
       const t2 = String(day?.t2 ?? '').trim();
-      const math = String(day?.math ?? '').trim();
 
-      if (t1 !== '' || t2 !== '' || math !== '') participatedCount += 1;
+      denominator += 2;
+      if (t1 !== '') participatedCount += 1;
+      if (t2 !== '') participatedCount += 1;
     });
 
     return denominator === 0 ? null : roundHomeValue((participatedCount / denominator) * 100, 1);
@@ -2910,6 +3242,9 @@ export default function App() {
     needCount: homeNeedStudents.length
   };
 
+  const homeRateBaseDateText = getMetricBaseDateLabel(academicYear, homeSelectedMonth, {
+    dateMode: metricDateMode === 'today' ? 'today' : 'previous'
+  });
   const homeTodayText = new Date().toISOString().slice(0, 10).replaceAll('-', '.');
 
   const homeNotices = [
@@ -2970,7 +3305,8 @@ export default function App() {
       count: homeLowStudyTimeStudents.length,
       color: 'purple',
       icon: Clock,
-      students: homeLowStudyTimeStudents
+      students: homeLowStudyTimeStudents,
+      helpKey: 'lowStudyTime'
     }
   ];
 
@@ -3129,6 +3465,12 @@ export default function App() {
 
             <div className="flex items-center gap-3">
               {/* 저장 상태 UI와 전체 변경사항 저장 버튼은 왼쪽 사이드바 하단으로 이동 */}
+
+              <div className="h-11 px-4 rounded-xl bg-white/85 border border-blue-100 shadow-[0_8px_28px_rgba(37,99,235,0.10)] flex items-center text-sm font-extrabold text-slate-700">
+                {getTodayKoreanDateText()}
+              </div>
+
+              {renderMetricDateModeToggle()}
 
               <select
                 value={academicYear}
@@ -3309,9 +3651,9 @@ export default function App() {
 
                       <div className="space-y-3">
                         {[
-                          { label: '상담 필요 학생', count: homeCounselingNeededStudents.length, color: 'text-red-500', bg: 'bg-red-50', list: homeCounselingNeededStudents },
-                          { label: '장기 미응시 학생', count: homeLongTermDailyMissingStudents.length, color: 'text-orange-500', bg: 'bg-orange-50', list: homeLongTermDailyMissingStudents },
-                          { label: '관리 필요 학생', count: homeNeedStudents.length, color: 'text-orange-500', bg: 'bg-orange-50', list: homeNeedStudents },
+                          { label: '상담 필요 학생', count: homeCounselingNeededStudents.length, color: 'text-red-500', bg: 'bg-red-50', list: homeCounselingNeededStudents, helpKey: 'counseling' },
+                          { label: '장기 미응시 학생', count: homeLongTermDailyMissingStudents.length, color: 'text-orange-500', bg: 'bg-orange-50', list: homeLongTermDailyMissingStudents, helpKey: 'longDailyMissing' },
+                          { label: '관리 필요 학생', count: homeNeedStudents.length, color: 'text-red-500', bg: 'bg-red-50', list: homeNeedStudents, helpKey: 'need' },
                           { label: '최근 신규 등록', count: homeRecentNewStudents.length, color: 'text-violet-600', bg: 'bg-violet-50', list: homeRecentNewStudents }
                         ].map(item => (
                           <button
@@ -3324,7 +3666,10 @@ export default function App() {
                               <span className={`w-8 h-8 rounded-xl ${item.bg} ${item.color} flex items-center justify-center`}>
                                 <AlertTriangle size={15} />
                               </span>
-                              <span className="text-sm font-black text-slate-700">{item.label}</span>
+                              <span className="text-sm font-black text-slate-700 inline-flex items-center">
+                                {item.label}
+                                {renderHomeHelpButton(item.helpKey)}
+                              </span>
                             </span>
                             <strong className={`text-lg font-black ${item.color}`}>{item.count}명</strong>
                           </button>
@@ -3479,7 +3824,12 @@ export default function App() {
                     </div>
 
                     <div className="rounded-2xl bg-white border border-blue-100 p-4 shadow-sm">
-                      <p className="text-sm font-black text-slate-700 mb-3">미응시 현황</p>
+                      <p className="text-sm font-black text-slate-700 mb-3">
+                        미응시 현황
+                        <span className="ml-2 text-[11px] font-black text-blue-600">
+                          · {homeRateBaseDateText}
+                        </span>
+                      </p>
 
                       <div className="space-y-3">
                         {[
@@ -3506,7 +3856,10 @@ export default function App() {
                     </div>
 
                     <div className="rounded-2xl bg-white border border-blue-100 p-4 shadow-sm">
-                      <p className="text-sm font-black text-slate-700 mb-3">성적 개요</p>
+                      <p className="text-sm font-black text-slate-700 mb-3 inline-flex items-center">
+                        성적 개요
+                        {renderHomeHelpButton('scoreOverview')}
+                      </p>
 
                       <div className="flex items-start justify-between mb-4">
                         <div>
@@ -3685,9 +4038,9 @@ export default function App() {
             {[
               { title: '총 등록 인원', value: homeDashboardStats.totalStudents, unit: '명', sub: '전체 학생 수', icon: Users, color: 'text-slate-950' },
               { title: '운영 반 수', value: homeDashboardStats.classCount, unit: '개', sub: '현재 운영 중인 반', icon: FileText, color: 'text-slate-950' },
-              { title: '이번 달 출석률', value: homeDashboardStats.attendanceRate, unit: '%', sub: '현재 데이터 기준', icon: CalendarCheck, color: getRateTextClass(homeDashboardStats.attendanceRate) },
-              { title: 'Daily 참여율', value: homeDashboardStats.dailyRate, unit: '%', sub: '현재 데이터 기준', icon: BarChart3, color: getRateTextClass(homeDashboardStats.dailyRate) },
-              { title: '관리 필요 학생', value: homeDashboardStats.needCount, unit: '명', sub: '즉시 확인 필요', icon: AlertTriangle, color: getNeedTextClass(homeDashboardStats.needCount) }
+              { title: '이번 달 출석률', value: homeDashboardStats.attendanceRate, unit: '%', sub: homeRateBaseDateText, icon: CalendarCheck, color: getRateTextClass(homeDashboardStats.attendanceRate) },
+              { title: 'Daily 참여율', value: homeDashboardStats.dailyRate, unit: '%', sub: homeRateBaseDateText, icon: BarChart3, color: getRateTextClass(homeDashboardStats.dailyRate) },
+              { title: '관리 필요 학생', value: homeDashboardStats.needCount, unit: '명', sub: '긴급 관리 학생', icon: AlertTriangle, color: getNeedTextClass(homeDashboardStats.needCount), helpKey: 'need' }
             ].map((card, idx) => {
               const Icon = card.icon;
 
@@ -3701,7 +4054,10 @@ export default function App() {
                     <Icon size={29} />
                   </div>
                   <div>
-                    <p className="text-sm font-extrabold text-slate-500 mb-1">{card.title}</p>
+                    <p className="text-sm font-extrabold text-slate-500 mb-1 inline-flex items-center">
+                      {card.title}
+                      {renderHomeHelpButton(card.helpKey)}
+                    </p>
                     <div className="flex items-end gap-1">
                       <strong className={`text-3xl font-black ${card.color}`}>{card.value}</strong>
                       <span className="font-extrabold text-slate-700 mb-1">{card.unit}</span>
@@ -3838,7 +4194,10 @@ export default function App() {
                         <Icon size={18} />
                       </span>
                       <div className="flex-1">
-                        <p className="text-sm font-black text-slate-800">{item.title}</p>
+                        <p className="text-sm font-black text-slate-800 inline-flex items-center">
+                          {item.title}
+                          {renderHomeHelpButton(item.helpKey)}
+                        </p>
                         <p className="text-[11px] font-bold text-slate-500">{item.desc}</p>
                       </div>
                       <strong className={`text-lg font-black ${
@@ -3993,6 +4352,8 @@ export default function App() {
       manualSaveMessage={manualSaveMessage}
       dirtyStudentIds={dirtyStudentIds}
       getDirtyCountForScope={getDirtyCountForScope}
+      metricDateMode={metricDateMode}
+      setMetricDateMode={handleMetricDateModeChange}
     />
   );
 }
@@ -4017,7 +4378,9 @@ function ClassDashboard({
   manualSaveStatus = 'idle',
   manualSaveMessage = '',
   dirtyStudentIds = new Set(),
-  getDirtyCountForScope = () => 0
+  getDirtyCountForScope = () => 0,
+  metricDateMode = 'previous',
+  setMetricDateMode = () => {}
 }) {
   const [activeTab, setActiveTab] = useState('dashboard'); 
   const [activeTestTab, setActiveTestTab] = useState('monthly'); 
@@ -4034,6 +4397,8 @@ function ClassDashboard({
   const [needReasonFilter, setNeedReasonFilter] = useState('전체');
   const [needPeriodFilter, setNeedPeriodFilter] = useState('all');
   const [needSummaryPopover, setNeedSummaryPopover] = useState(null);
+  const [dashboardNeedHelpKey, setDashboardNeedHelpKey] = useState(null);
+  const [needPageHelpKey, setNeedPageHelpKey] = useState(null);
   const [needReasonBubble, setNeedReasonBubble] = useState(null);
   const [needViewMode, setNeedViewMode] = useState('summary');
   const [selectedNeedGroup, setSelectedNeedGroup] = useState('urgent');
@@ -4047,6 +4412,36 @@ function ClassDashboard({
   const [learningNeedPopover, setLearningNeedPopover] = useState(null);
   const [showTrendAnalysis, setShowTrendAnalysis] = useState(false);
   const [hoveredTrendIndex, setHoveredTrendIndex] = useState(null);
+
+  const renderDashboardMetricDateModeToggle = () => (
+    <div className="h-9 px-3 rounded-xl bg-white border border-blue-100 shadow-sm flex items-center gap-2">
+      <span className="text-[11px] font-black text-slate-500">날짜 기준</span>
+      <div className="flex items-center gap-1 rounded-lg bg-slate-100 p-1">
+        <button
+          type="button"
+          onClick={() => setMetricDateMode('previous')}
+          className={`h-7 px-3 rounded-md text-[11px] font-black transition-all ${
+            metricDateMode === 'previous'
+              ? 'bg-white text-blue-700 shadow-sm'
+              : 'text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          전일
+        </button>
+        <button
+          type="button"
+          onClick={() => setMetricDateMode('today')}
+          className={`h-7 px-3 rounded-md text-[11px] font-black transition-all ${
+            metricDateMode === 'today'
+              ? 'bg-white text-blue-700 shadow-sm'
+              : 'text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          오늘
+        </button>
+      </div>
+    </div>
+  );
 
   // ✅ 브라우저 뒤로가기: ClassDashboard 내부 탭/하위탭 이동 기록
   const dashboardHistoryRestoreRef = useRef(false);
@@ -5944,11 +6339,20 @@ function ClassDashboard({
   const [customStudyTimeOut, setCustomStudyTimeOut] = useState('');
   const [customStudyTimePresets, setCustomStudyTimePresets] = useState([]);
   const [studyTimeSummaryMode, setStudyTimeSummaryMode] = useState('time');
+  const [studyTimeDetailViewMode, setStudyTimeDetailViewMode] = useState('total');
+  const [studyTimeDetailMonth, setStudyTimeDetailMonth] = useState(currentMonthLabel);
   const [dailyMonth, setDailyMonth] = useState(currentMonthLabel);
   const [weeklyMonth, setWeeklyMonth] = useState(currentMonthLabel);
   const [selectedMonth, setSelectedMonth] = useState(currentMonthLabel); 
   const [detailSelectedMonth, setDetailSelectedMonth] = useState(currentMonthLabel);
   const [dashboardMonth, setDashboardMonth] = useState(currentMonthLabel);
+
+  useEffect(() => {
+    if (!viewingStudyTimeSummary) return;
+
+    setStudyTimeDetailViewMode('total');
+    setStudyTimeDetailMonth(studyTimeMonth);
+  }, [viewingStudyTimeSummary, studyTimeMonth]);
 
   useEffect(() => {
     setWeeklyScoresCurrentPage(1);
@@ -5993,7 +6397,13 @@ function ClassDashboard({
 
   const createDefaultDailySettings = () => {
     const settings = {};
-    MONTHS.forEach(m => settings[m] = { excludedDays: [] });
+    MONTHS.forEach(m => {
+      settings[m] = {
+        excludedDays: [],
+        englishExcludedDays: [],
+        mathExcludedDays: []
+      };
+    });
     return settings;
   };
 
@@ -6071,29 +6481,46 @@ function ClassDashboard({
       month,
       dayIndex,
       shouldExclude,
-      overrideSettingMap = null
+      overrideSettingMap = null,
+      excludedKey = 'excludedDays'
   ) => {
       if (!targetClassName || targetClassName === '대구캠퍼스 전체') return;
 
       const currentSettings = loadClassSettingsByName(targetClassName);
       const baseSettingMap = overrideSettingMap || currentSettings[settingType] || {};
-      const currentMonthSetting = baseSettingMap[month] || { excludedDays: [] };
-      const currentArr = Array.isArray(currentMonthSetting.excludedDays)
-          ? currentMonthSetting.excludedDays
-          : [];
+      const currentMonthSetting = baseSettingMap[month] || { excludedDays: [], englishExcludedDays: [], mathExcludedDays: [] };
+      const currentArr = Array.isArray(currentMonthSetting[excludedKey])
+          ? currentMonthSetting[excludedKey]
+          : excludedKey === 'englishExcludedDays' && Array.isArray(currentMonthSetting.excludedDays)
+            ? currentMonthSetting.excludedDays
+            : [];
 
       const nextArr = shouldExclude
           ? Array.from(new Set([...currentArr, dayIndex])).sort((a, b) => a - b)
           : currentArr.filter(i => i !== dayIndex);
 
+      const nextMonthSetting = {
+          ...currentMonthSetting,
+          [excludedKey]: nextArr
+      };
+
+      if (settingType === 'dailySettings' && excludedKey === 'englishExcludedDays') {
+          nextMonthSetting.excludedDays = nextArr;
+      }
+
+      if (settingType === 'dailySettings' && excludedKey === 'mathExcludedDays') {
+          nextMonthSetting.excludedDays = Array.isArray(currentMonthSetting.englishExcludedDays)
+              ? currentMonthSetting.englishExcludedDays
+              : Array.isArray(currentMonthSetting.excludedDays)
+                ? currentMonthSetting.excludedDays
+                : [];
+      }
+
       const nextSettings = {
           ...currentSettings,
           [settingType]: {
               ...baseSettingMap,
-              [month]: {
-                  ...currentMonthSetting,
-                  excludedDays: nextArr
-              }
+              [month]: nextMonthSetting
           }
       };
 
@@ -6114,7 +6541,8 @@ function ClassDashboard({
       month,
       dayIndex,
       shouldExclude,
-      currentScreenSettingMap = null
+      currentScreenSettingMap = null,
+      excludedKey = 'excludedDays'
   ) => {
       const targetClassNames = getClassSettingsTargetNames();
 
@@ -6128,7 +6556,8 @@ function ClassDashboard({
               month,
               dayIndex,
               shouldExclude,
-              shouldUseCurrentScreenSettings ? currentScreenSettingMap : null
+              shouldUseCurrentScreenSettings ? currentScreenSettingMap : null,
+              excludedKey
           );
       });
   };
@@ -6476,29 +6905,51 @@ function ClassDashboard({
       return getMetricDayLimit(academicYear, month);
   };
 
-  const getAttendanceRate = (student, month) => {
-      const excluded = attendanceSettings[month]?.excludedDays || [];
-      const attendanceData = getUnifiedAttendanceArray(student.attendance?.[month] || {});
-      const rate = calculateAttendanceRateFromArray({
-          attendanceArray: attendanceData,
-          excludedDays: excluded,
-          year: academicYear,
-          month
-      });
+  const getAttendanceExcludedDaysForStudent = (student, month = dashboardMonth) => {
+      if (className !== '대구캠퍼스 전체') {
+          return attendanceSettings?.[month]?.excludedDays || [];
+      }
 
-      return `${rate}%`;
-  }
+      const classList = Array.isArray(student.classNames)
+          ? student.classNames.filter(Boolean)
+          : [student.className].filter(Boolean);
+
+      const targetClassName = classList.find(clsName => classes.includes(clsName)) || classList[0] || '';
+      if (!targetClassName) return [];
+
+      return loadClassSettingsByName(targetClassName)?.attendanceSettings?.[month]?.excludedDays || [];
+  };
+
+  const getDailyExcludedDaysForStudent = (student, month = dashboardMonth, subject = 'english') => {
+      if (className !== '대구캠퍼스 전체') {
+          return getDailyExcludedDaysBySubject(dailySettings?.[month] || {}, subject);
+      }
+
+      const classList = Array.isArray(student.classNames)
+          ? student.classNames.filter(Boolean)
+          : [student.className].filter(Boolean);
+
+      const targetClassName = classList.find(clsName => classes.includes(clsName)) || classList[0] || '';
+      if (!targetClassName) return [];
+
+      const savedSettings = loadClassSettingsByName(targetClassName);
+      return getDailyExcludedDaysBySubject(savedSettings?.dailySettings?.[month] || {}, subject);
+  };
 
   const getAttendanceRateNum = (student, month) => {
-      const excluded = attendanceSettings[month]?.excludedDays || [];
-      const attendanceData = getUnifiedAttendanceArray(student.attendance?.[month] || {});
-
-      return calculateAttendanceRateFromArray({
-          attendanceArray: attendanceData,
-          excludedDays: excluded,
+      const result = calculateAverageDailyAttendanceRateForStudents({
+          students: [student],
+          getAttendanceArrayForStudent: targetStudent => getUnifiedAttendanceArray(targetStudent.attendance?.[month] || {}),
+          getExcludedDaysForStudent: targetStudent => getAttendanceExcludedDaysForStudent(targetStudent, month),
           year: academicYear,
           month
       });
+
+      return result.rate;
+  };
+
+  const getAttendanceRate = (student, month) => {
+      return `${getAttendanceRateNum(student, month)}%`;
   }
 
   const getDashboardAlerts = () => {
@@ -6541,15 +6992,15 @@ function ClassDashboard({
   }
 
   const getDailyStats = (records, month, subject = 'english') => {
-    const excluded = dailySettings[month]?.excludedDays || [];
+    const excluded = getDailyExcludedDaysBySubject(dailySettings?.[month] || {}, subject);
     const dayLimit = getMetricDayLimit(academicYear, month);
-    const testsPerDay = subject === 'math' ? 1 : 2;
+    const testKeys = getDailyTestKeysBySubject(subject);
     const validDayIndexes = Array.from({ length: dayLimit }, (_, index) => index)
       .filter(dayIndex => !excluded.includes(dayIndex));
 
     let sum = 0;
     let count = 0;
-    const MAX_POSSIBLE = validDayIndexes.length * testsPerDay;
+    const MAX_POSSIBLE = validDayIndexes.length * testKeys.length;
 
     if (!records) {
       return { sum: 0, avg: '0.0', rate: 0, missedRate: 0, count: 0, MAX_POSSIBLE };
@@ -6558,38 +7009,17 @@ function ClassDashboard({
     validDayIndexes.forEach((dayIndex) => {
       const row = { t1: '', t2: '', math: '', ...(records[dayIndex] || {}) };
 
-      if (subject === 'math') {
-        const mathValue = String(row.math ?? '').trim();
+      testKeys.forEach(key => {
+        const rawValue = String(row?.[key] ?? '').trim();
 
-        if (mathValue !== '') {
-          const score = Number(mathValue);
+        if (rawValue !== '') {
+          const score = Number(rawValue);
           if (Number.isFinite(score)) {
             sum += score;
             count += 1;
           }
         }
-
-        return;
-      }
-
-      const t1Value = String(row.t1 ?? '').trim();
-      const t2Value = String(row.t2 ?? '').trim();
-
-      if (t1Value !== '') {
-        const score = Number(t1Value);
-        if (Number.isFinite(score)) {
-          sum += score;
-          count += 1;
-        }
-      }
-
-      if (t2Value !== '') {
-        const score = Number(t2Value);
-        if (Number.isFinite(score)) {
-          sum += score;
-          count += 1;
-        }
-      }
+      });
     });
 
     const avg = count > 0 ? (sum / count).toFixed(1) : '0.0';
@@ -6784,48 +7214,27 @@ function ClassDashboard({
   const getClassAttendanceRateForMonth = (month = dashboardMonth) => {
     if (classStudents.length === 0) return 0;
 
-    const excluded = attendanceSettings[month]?.excludedDays || [];
-    let denominator = 0;
-    let presentCount = 0;
-
-    classStudents.forEach(student => {
-      const attendanceData = getUnifiedAttendanceArray(student.attendance?.[month] || {});
-      const parts = calculateAttendanceRatePartsFromArray({
-        attendanceArray: attendanceData,
-        excludedDays: excluded,
-        year: academicYear,
-        month
-      });
-
-      denominator += parts.denominator;
-      presentCount += parts.presentCount;
-    });
-
-    return denominator === 0 ? 0 : Math.round((presentCount / denominator) * 100);
+    return calculateAverageDailyAttendanceRateForStudents({
+      students: classStudents,
+      getAttendanceArrayForStudent: student => getUnifiedAttendanceArray(student.attendance?.[month] || {}),
+      getExcludedDaysForStudent: student => getAttendanceExcludedDaysForStudent(student, month),
+      year: academicYear,
+      month
+    }).rate;
   };
 
-  const getClassDailyRateForMonth = (month = dashboardMonth, subject = 'all') => {
+  const getClassDailyRateForMonth = (month = dashboardMonth, subject = 'english') => {
     if (classStudents.length === 0) return 0;
-    const excluded = dailySettings[month]?.excludedDays || [];
-    const dayLimit = getClassMonthDayLimit ? getClassMonthDayLimit(month) : 31;
-    let denominator = 0;
-    let participatedCount = 0;
+    const safeSubject = subject === 'math' ? 'math' : 'english';
 
-    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
-      if (excluded.includes(dayIndex)) continue;
-      classStudents.forEach(student => {
-        denominator += 1;
-        const dRecords = student.dailyRecords?.[month] || [];
-        const row = { t1: '', t2: '', math: '', ...(dRecords[dayIndex] || {}) };
-        const hasEnglish = String(row.t1 ?? '').trim() !== '' || String(row.t2 ?? '').trim() !== '';
-        const hasMath = String(row.math ?? '').trim() !== '';
-        if (subject === 'math' ? hasMath : subject === 'english' ? hasEnglish : (hasEnglish || hasMath)) {
-          participatedCount += 1;
-        }
-      });
-    }
-
-    return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
+    return calculateAverageDailySubjectParticipationRateForStudents({
+      students: classStudents,
+      getDailyArrayForStudent: student => student.dailyRecords?.[month] || [],
+      getExcludedDaysForStudent: student => getDailyExcludedDaysForStudent(student, month, safeSubject),
+      subject: safeSubject,
+      year: academicYear,
+      month
+    }).rate;
   };
 
   const getClassDailyAvgScoreForMonth = (month = dashboardMonth, subject = dailySubject) => {
@@ -6876,57 +7285,38 @@ function ClassDashboard({
 
   const getClassDailyRate = (month = dashboardMonth) => {
     if (classStudents.length === 0) return 0;
-    const excluded = dailySettings[month]?.excludedDays || [];
-    const dayLimit = getClassMonthDayLimit(month);
-    let denominator = 0;
-    let participatedCount = 0;
 
-    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
-      if (excluded.includes(dayIndex)) continue;
-      classStudents.forEach(student => {
-        denominator += 1;
-        const records = student.dailyRecords?.[month] || [];
-        const row = { t1: '', t2: '', math: '', ...(records[dayIndex] || {}) };
-        if (String(row.t1 ?? '').trim() !== '' || String(row.t2 ?? '').trim() !== '' || String(row.math ?? '').trim() !== '') {
-          participatedCount += 1;
-        }
-      });
-    }
-
-    return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
+    return calculateAverageDailySubjectParticipationRateForStudents({
+      students: classStudents,
+      getDailyArrayForStudent: student => student.dailyRecords?.[month] || [],
+      getExcludedDaysForStudent: student => getDailyExcludedDaysForStudent(student, month, 'english'),
+      subject: 'english',
+      year: academicYear,
+      month
+    }).rate;
   };
 
 const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
-    const excluded = attendanceSettings[month]?.excludedDays || [];
-    const attendanceData = getUnifiedAttendanceArray(student.attendance?.[month] || {});
+    return calculateAverageDailyAttendanceRateForStudents({
+      students: [student],
+      getAttendanceArrayForStudent: targetStudent => getUnifiedAttendanceArray(targetStudent.attendance?.[month] || {}),
+      getExcludedDaysForStudent: targetStudent => getAttendanceExcludedDaysForStudent(targetStudent, month),
+      year: academicYear,
+      month
+    }).rate;
+  };
 
-    return calculateAttendanceRateFromArray({
-      attendanceArray: attendanceData,
-      excludedDays: excluded,
+  const getClassStudentDailyRate = (student, month = dashboardMonth, subject = 'english') => {
+    const records = student.dailyRecords?.[month] || Array(31).fill({ t1: '', t2: '', math: '' });
+    const safeSubject = subject === 'math' ? 'math' : 'english';
+
+    return calculateDailySubjectParticipationRateFromArray({
+      dailyArray: records,
+      excludedDays: getDailyExcludedDaysForStudent(student, month, safeSubject),
+      subject: safeSubject,
       year: academicYear,
       month
     });
-  };
-
-  const getClassStudentDailyRate = (student, month = dashboardMonth, subject = 'all') => {
-    const records = student.dailyRecords?.[month] || Array(31).fill({ t1: '', t2: '', math: '' });
-    const excluded = dailySettings[month]?.excludedDays || [];
-    const dayLimit = getClassMonthDayLimit ? getClassMonthDayLimit(month) : 31;
-    let denominator = 0;
-    let participatedCount = 0;
-
-    for (let dayIndex = 0; dayIndex < dayLimit; dayIndex++) {
-      if (excluded.includes(dayIndex)) continue;
-      denominator += 1;
-      const row = { t1: '', t2: '', math: '', ...(records[dayIndex] || {}) };
-      const hasEnglish = String(row.t1 ?? '').trim() !== '' || String(row.t2 ?? '').trim() !== '';
-      const hasMath = String(row.math ?? '').trim() !== '';
-      if (subject === 'math' ? hasMath : subject === 'english' ? hasEnglish : (hasEnglish || hasMath)) {
-        participatedCount += 1;
-      }
-    }
-
-    return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
   };
 
   const getClassStudentAvgScore = (student, month = dashboardMonth) => {
@@ -6942,12 +7332,13 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
   };
 
   const getClassStudentWeekStudyMins = (student, month = dashboardMonth) => {
-    const currentMonth = `${new Date().getMonth() + 1}월`;
-    const dayLimit = month === currentMonth ? Math.max(1, Math.min(31, new Date().getDate())) : 31;
+    const dayLimit = getMetricDayLimit(academicYear, month);
+    if (dayLimit <= 0) return 0;
+
     const currentWeek = Math.max(1, Math.min(5, Math.ceil(dayLimit / 7)));
     const daily = student.studyTime?.[month] || [];
     const start = (currentWeek - 1) * 7;
-    const end = Math.min(start + 7, daily.length);
+    const end = Math.min(start + 7, dayLimit, daily.length);
 
     return daily.slice(start, end).reduce((sum, day) => {
       return sum + parseTimeDiffToMins(day?.in, day?.out);
@@ -7063,6 +7454,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
           label: '성적',
           subject: subject.label,
           severity,
+          gap,
           text: `${subject.label}: 전체 평균 ${globalAvg}점 대비 ${gap}점 낮음`
         });
       }
@@ -7081,15 +7473,64 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
     return values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : 0;
   };
 
-  const getNeedStudentsByType = (type = 'all', month = dashboardMonth) => {
-    const studyAvg = getClassMonthlyStudyAverage(month);
+  const getClassStudentDailyStudyAverageMins = (student, month = dashboardMonth) => {
+    const daily = student.studyTime?.[month] || [];
+    const dayLimit = getMetricDayLimit(academicYear, month);
+    const validMins = daily
+      .slice(0, dayLimit)
+      .map(day => parseTimeDiffToMins(day?.in, day?.out))
+      .filter(mins => mins > 0);
 
-    return classStudents.map(student => {
+    if (!validMins.length) return 0;
+
+    return Math.round(validMins.reduce((sum, mins) => sum + mins, 0) / validMins.length);
+  };
+
+  const getClassDailyStudyAverage = (month = dashboardMonth) => {
+    const values = classStudents
+      .map(student => getClassStudentDailyStudyAverageMins(student, month))
+      .filter(value => value > 0);
+
+    return values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : 0;
+  };
+
+  const getCampusDailyStudyAverageMins = (month = dashboardMonth) => {
+    const values = students
+      .map(student => getClassStudentDailyStudyAverageMins(student, month))
+      .filter(value => value > 0);
+
+    return values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : 0;
+  };
+
+  const getNeedStudentsByType = (type = 'all', month = dashboardMonth) => {
+    const classDailyStudyAvg = getClassDailyStudyAverage(month);
+    const campusDailyStudyAvg = getCampusDailyStudyAverageMins(month);
+
+    const getNeedSeverityOrder = (item) => {
+      const orders = { danger: 3, warning: 2, caution: 1 };
+      return Math.max(
+        0,
+        ...(item.reasons || []).map(reason => orders[reason.severity?.key] || 0)
+      );
+    };
+
+    const getScoreMaxGap = (item) => {
+      return Math.max(
+        0,
+        ...(item.reasons || [])
+          .filter(reason => reason.type === 'score')
+          .map(reason => Number(reason.gap || 0))
+      );
+    };
+
+    const rows = classStudents.map(student => {
       const attendanceRate = getClassStudentAttendanceRate(student, month);
-      const dailyRate = getClassStudentDailyRate(student, month, 'all');
+      const dailyRate = getClassStudentDailyRate(student, month, 'english');
       const monthlyScore = getClassStudentMonthlyScore(student, month);
       const studyMins = getClassStudentMonthlyStudyMins(student, month);
-      const studyRatio = studyAvg > 0 && studyMins > 0 ? Math.round((studyMins / studyAvg) * 100) : 0;
+      const studyDailyAvgMins = getClassStudentDailyStudyAverageMins(student, month);
+      const studyRatio = classDailyStudyAvg > 0 ? Math.round((studyDailyAvgMins / classDailyStudyAvg) * 100) : 0;
+      const studyShortageMins = campusDailyStudyAvg > 0 ? Math.max(0, campusDailyStudyAvg - studyDailyAvgMins) : 0;
       const reasons = [];
 
       const attendanceSeverity = getNeedSeverityByRate(attendanceRate);
@@ -7100,6 +7541,13 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
           severity: attendanceSeverity,
           text: `출석률 ${attendanceRate}%`
         });
+      } else if (attendanceRate > 70 && attendanceRate <= 80) {
+        reasons.push({
+          type: 'attendance',
+          label: '출석',
+          severity: null,
+          text: `출석률 ${attendanceRate}%`
+        });
       }
 
       const dailySeverity = getNeedSeverityByRate(dailyRate);
@@ -7108,7 +7556,14 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
           type: 'daily',
           label: 'Daily',
           severity: dailySeverity,
-          text: `Daily 참여율 ${dailyRate}%`
+          text: `영어 Daily 참여율 ${dailyRate}%`
+        });
+      } else if (dailyRate > 70 && dailyRate <= 80) {
+        reasons.push({
+          type: 'daily',
+          label: 'Daily',
+          severity: null,
+          text: `영어 Daily 참여율 ${dailyRate}%`
         });
       }
 
@@ -7116,7 +7571,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
       const scoreNeeds = getStudentSubjectScoreNeeds(student, month);
       scoreNeeds.forEach(reason => reasons.push(reason));
 
-      if (studyAvg > 0 && studyMins > 0) {
+      if (classDailyStudyAvg > 0) {
         const studySeverity = getStudySeverityByRatio(studyRatio);
 
         if (studySeverity) {
@@ -7124,7 +7579,11 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
             type: 'study',
             label: '학습시간',
             severity: studySeverity,
-            text: `월 평균의 ${studyRatio}%`
+            text: `반 일평균 대비 ${studyRatio}%`,
+            studentDailyAvgMins: studyDailyAvgMins,
+            classDailyAvgMins: classDailyStudyAvg,
+            campusDailyAvgMins: campusDailyStudyAvg,
+            shortageMins: studyShortageMins
           });
         }
       }
@@ -7137,12 +7596,26 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
         avgScore: monthlyScore,
         studyMins,
         studyText: formatMinsToTime(studyMins),
+        studyDailyAvgMins,
+        studyDailyText: formatMinsToTime(studyDailyAvgMins),
+        classStudyDailyAvgMins: classDailyStudyAvg,
+        campusStudyDailyAvgMins: campusDailyStudyAvg,
+        studyShortageMins,
         studyRatio,
         reasons
       };
     }).filter(item => {
       if (type === 'all') return item.reasons.length > 0;
       return item.reasons.some(reason => reason.type === type);
+    });
+
+    return rows.sort((a, b) => {
+      if (type === 'attendance') return Number(a.attendanceRate || 0) - Number(b.attendanceRate || 0);
+      if (type === 'daily') return Number(a.dailyRate || 0) - Number(b.dailyRate || 0);
+      if (type === 'score') return getScoreMaxGap(b) - getScoreMaxGap(a);
+      if (type === 'study') return Number(a.studyRatio || 0) - Number(b.studyRatio || 0);
+
+      return getNeedSeverityOrder(b) - getNeedSeverityOrder(a);
     });
   };
 
@@ -7151,7 +7624,9 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
   const dailyNeedStudents = getNeedStudentsByType('daily', dashboardMonth);
   const scoreNeedStudents = getNeedStudentsByType('score', dashboardMonth);
   const studyNeedStudents = getNeedStudentsByType('study', dashboardMonth);
-  const managementNeedStudents = allNeedStudents;
+  const managementNeedStudents = allNeedStudents.filter(item =>
+    item.reasons?.some(reason => reason.severity?.key === 'danger')
+  );
 
   const studyTimeRankings = useMemo(() => {
     const sorted = [...classStudents].sort((a,b) => getStudyTimeStats(b).totalMins - getStudyTimeStats(a).totalMins);
@@ -7544,16 +8019,25 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
 
   const toggleDailyExcluded = (month, dayIndex) => {
     setDailySettings(prev => {
-        const currentArr = prev[month]?.excludedDays || [];
+        const excludedKey = getDailySubjectExcludedKey(dailySubject);
+        const currentMonthSetting = prev[month] || { excludedDays: [], englishExcludedDays: [], mathExcludedDays: [] };
+        const currentArr = getDailyExcludedDaysBySubject(currentMonthSetting, dailySubject);
         const isExcluded = currentArr.includes(dayIndex);
         const shouldExclude = !isExcluded;
         const newArr = shouldExclude ? [...currentArr, dayIndex] : currentArr.filter(i => i !== dayIndex);
+        const nextArr = Array.from(new Set(newArr)).sort((a, b) => a - b);
+        const nextMonthSetting = {
+          ...currentMonthSetting,
+          [excludedKey]: nextArr
+        };
+
+        if (excludedKey === 'englishExcludedDays') {
+          nextMonthSetting.excludedDays = nextArr;
+        }
+
         const nextDailySettings = {
           ...prev,
-          [month]: {
-            ...prev[month],
-            excludedDays: Array.from(new Set(newArr)).sort((a, b) => a - b)
-          }
+          [month]: nextMonthSetting
         };
 
         applyExcludedDayToClassSettingsTargets(
@@ -7561,7 +8045,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
           month,
           dayIndex,
           shouldExclude,
-          nextDailySettings
+          nextDailySettings,
+          excludedKey
         );
 
         return nextDailySettings;
@@ -9263,7 +9748,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
             };
 
             const getDashboardDailyRate = () => {
-              return getClassDailyRateForMonth(dashboardMonth, 'all');
+              return getClassDailyRateForMonth(dashboardMonth, 'english');
             };
 
             const getDashboardAvgScore = () => {
@@ -9304,6 +9789,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
             const studyList = normalizeAlertList(alerts.studyTime, '학습시간 데이터 부족');
 
             const dashboardAttendanceRate = getClassAttendanceRateForMonth(dashboardMonth);
+            const dashboardRateBaseDateText = getMetricBaseDateLabel(academicYear, dashboardMonth);
             const dailyRate = getDashboardDailyRate();
             const avgScore = getDashboardAvgScore();
             const avgStudyHours = getDashboardAvgStudyHours();
@@ -9317,7 +9803,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
             );
             const dailyDelta = formatDashboardDelta(
               dailyRate,
-              prevDashboardMonth ? getClassDailyRateForMonth(prevDashboardMonth, 'all') : null,
+              prevDashboardMonth ? getClassDailyRateForMonth(prevDashboardMonth, 'english') : null,
               '%p'
             );
             const scoreDelta = formatDashboardDelta(
@@ -9366,14 +9852,14 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
               return savedSettings?.attendanceSettings?.[month]?.excludedDays || [];
             };
 
-            const getDashboardDailyExcludedDaysForStudent = (student, month) => {
+            const getDashboardDailyExcludedDaysForStudent = (student, month, subject = 'english') => {
               if (className !== '대구캠퍼스 전체') {
-                return dailySettings?.[month]?.excludedDays || [];
+                return getDailyExcludedDaysBySubject(dailySettings?.[month] || {}, subject);
               }
 
               const targetClassName = getDashboardPrimaryClassNameForStudent(student);
               const savedSettings = getDashboardSavedClassSettings(targetClassName);
-              return savedSettings?.dailySettings?.[month]?.excludedDays || [];
+              return getDailyExcludedDaysBySubject(savedSettings?.dailySettings?.[month] || {}, subject);
             };
 
             const getWeeklyScoreValuesByDateRange = (student, startDate, endDate) => {
@@ -9505,35 +9991,41 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
 
               if (!trendStudents.length) return 0;
 
-              let denominator = 0;
-              let participatedCount = 0;
+              const dailyRates = [];
               const cursor = new Date(startDate);
 
               while (cursor <= endDate) {
                 if (!isFutureDateForTrend(cursor)) {
                   const month = `${cursor.getMonth() + 1}월`;
                   const dayIndex = cursor.getDate() - 1;
+                  let denominator = 0;
+                  let participatedCount = 0;
 
                   trendStudents.forEach(student => {
-                    const excluded = getDashboardDailyExcludedDaysForStudent(student, month);
+                    const excluded = getDashboardDailyExcludedDaysForStudent(student, month, 'english');
                     if (excluded.includes(dayIndex)) return;
-
-                    denominator += 1;
 
                     const dailyArray = student.dailyRecords?.[month] || [];
                     const day = dailyArray[dayIndex] || {};
                     const t1 = String(day?.t1 ?? '').trim();
                     const t2 = String(day?.t2 ?? '').trim();
-                    const math = String(day?.math ?? '').trim();
 
-                    if (t1 !== '' || t2 !== '' || math !== '') participatedCount += 1;
+                    denominator += 2;
+                    if (t1 !== '') participatedCount += 1;
+                    if (t2 !== '') participatedCount += 1;
                   });
+
+                  if (denominator > 0) {
+                    dailyRates.push((participatedCount / denominator) * 100);
+                  }
                 }
 
                 cursor.setDate(cursor.getDate() + 1);
               }
 
-              return denominator === 0 ? 0 : Math.round((participatedCount / denominator) * 100);
+              return dailyRates.length
+                ? Math.round(dailyRates.reduce((sum, rate) => sum + rate, 0) / dailyRates.length)
+                : 0;
             };
 
             const getDashboardStudyHoursAverageByDateRange = (startDate, endDate) => {
@@ -9619,6 +10111,77 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                 .join(' ');
             };
 
+            const MANAGEMENT_CARD_HELP_TEXTS = {
+              attendance: `출석률 70% 이하 학생입니다.
+
+61~70%는 주의
+51~60%는 경고
+50% 이하는 위험으로 분류합니다.`,
+              daily: `영어 Daily 참여율 70% 이하 학생입니다.
+
+영어 t1/t2 회차 기준으로 계산합니다.
+수학 Daily는 제외합니다.
+
+61~70%는 주의
+51~60%는 경고
+50% 이하는 위험입니다.`,
+              score: `Monthly 점수가 전체 평균보다 10점 이상 낮은 학생입니다.
+
+10점 이상은 주의
+20점 이상은 경고
+30점 이상은 위험으로 분류합니다.`,
+              study: `학생 일평균 학습시간이 반 일평균보다 낮은 학생입니다.
+
+80~99%는 주의
+60~79%는 경고
+60% 미만은 위험으로 분류합니다.`
+            };
+
+            const renderManagementHelpButton = (helpKey) => {
+              if (!helpKey || !MANAGEMENT_CARD_HELP_TEXTS[helpKey]) return null;
+              const isOpen = dashboardNeedHelpKey === helpKey;
+
+              return (
+                <span className="relative inline-flex align-middle">
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    aria-label="관리 기준 도움말"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setDashboardNeedHelpKey(prev => prev === helpKey ? null : helpKey);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== 'Enter' && event.key !== ' ') return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setDashboardNeedHelpKey(prev => prev === helpKey ? null : helpKey);
+                    }}
+                    className="ml-1 inline-flex w-4 h-4 rounded-full border border-slate-200 bg-white text-slate-400 hover:text-blue-600 hover:border-blue-200 items-center justify-center cursor-pointer shadow-sm"
+                  >
+                    <Info size={11} />
+                  </span>
+
+                  {isOpen && (
+                    <span className="absolute left-1/2 top-5 z-[80] w-64 -translate-x-1/2 rounded-xl border border-blue-100 bg-white px-3 py-2 text-[11px] font-bold leading-5 text-slate-600 shadow-xl whitespace-pre-line">
+                      {MANAGEMENT_CARD_HELP_TEXTS[helpKey]}
+                    </span>
+                  )}
+                </span>
+              );
+            };
+
+            const openManagementNeedList = (reasonType) => {
+              setActiveTab('needs');
+              setActiveNeedTab('all');
+              setNeedReasonFilter(reasonType);
+              setNeedViewMode('summary');
+              setNeedListPage(1);
+              setSelectedNeedStudent(null);
+              setNeedReasonBubble(null);
+            };
+
             const managementCards = [
               {
                 key: 'attendance',
@@ -9627,9 +10190,10 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                 icon: CalendarCheck,
                 iconClass: 'text-emerald-600',
                 badgeClass: 'bg-emerald-500 text-white',
-                list: attendanceNeedStudents.slice(0, 4),
+                list: attendanceNeedStudents.slice(0, 3),
                 empty: '출석 관리 대상이 없습니다.',
-                onViewAll: () => { setActiveTab('needs'); setActiveNeedTab('attendance'); }
+                helpKey: 'attendance',
+                onViewAll: () => openManagementNeedList('attendance')
               },
               {
                 key: 'daily',
@@ -9638,9 +10202,10 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                 icon: AlertTriangle,
                 iconClass: 'text-orange-500',
                 badgeClass: 'bg-orange-500 text-white',
-                list: dailyNeedStudents.slice(0, 4),
+                list: dailyNeedStudents.slice(0, 3),
                 empty: 'Daily 관리 대상이 없습니다.',
-                onViewAll: () => { setActiveTab('needs'); setActiveNeedTab('daily'); }
+                helpKey: 'daily',
+                onViewAll: () => openManagementNeedList('daily')
               },
               {
                 key: 'score',
@@ -9649,9 +10214,10 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                 icon: Trophy,
                 iconClass: 'text-violet-600',
                 badgeClass: 'bg-violet-600 text-white',
-                list: scoreNeedStudents.slice(0, 4),
+                list: scoreNeedStudents.slice(0, 3),
                 empty: '성적 관리 대상이 없습니다.',
-                onViewAll: () => { setActiveTab('needs'); setActiveNeedTab('score'); }
+                helpKey: 'score',
+                onViewAll: () => openManagementNeedList('score')
               },
               {
                 key: 'study',
@@ -9660,9 +10226,10 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                 icon: Clock,
                 iconClass: 'text-blue-600',
                 badgeClass: 'bg-blue-600 text-white',
-                list: studyNeedStudents.slice(0, 4),
+                list: studyNeedStudents.slice(0, 3),
                 empty: '학습시간 관리 대상이 없습니다.',
-                onViewAll: () => { setActiveTab('needs'); setActiveNeedTab('study'); }
+                helpKey: 'study',
+                onViewAll: () => openManagementNeedList('study')
               }
             ];
 
@@ -9733,6 +10300,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                 unit: '%',
                 sub: attendanceDelta.text,
                 link: '상세 보기',
+                dateLabel: dashboardRateBaseDateText,
                 icon: CalendarCheck,
                 iconBox: 'bg-blue-50 text-blue-600',
                 valueClass: 'text-slate-950',
@@ -9748,6 +10316,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                 unit: '%',
                 sub: dailyDelta.text,
                 link: '상세 보기',
+                dateLabel: dashboardRateBaseDateText,
                 icon: PenTool,
                 iconBox: 'bg-blue-50 text-blue-600',
                 valueClass: 'text-slate-950',
@@ -9809,9 +10378,12 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                 <div className="relative z-10">
                   <div className="flex items-start justify-between gap-6 mb-4">
                     <div>
-                      <h1 className="text-[34px] leading-tight font-black tracking-tight text-slate-950 mb-2">
-                        {className} 클래스 대시보드
-                      </h1>
+                      <div className="flex flex-wrap items-center gap-3 mb-2">
+                        <h1 className="text-[34px] leading-tight font-black tracking-tight text-slate-950">
+                          {className} 클래스 대시보드
+                        </h1>
+                        {renderDashboardMetricDateModeToggle()}
+                      </div>
                     </div>
 
                     <select
@@ -9847,8 +10419,15 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                               <p className={`text-xs font-black ${card.subClass || 'text-slate-500'}`}>{card.sub}</p>
                             </div>
                           </div>
-                          <div className="mt-4 flex items-center justify-end gap-1 text-xs font-black text-blue-600">
-                            {card.link} <ChevronRight size={14} />
+                          <div className="mt-4 flex items-center justify-between gap-2 text-xs font-black text-blue-600">
+                            {card.dateLabel ? (
+                              <span className="text-[11px] font-extrabold text-slate-400">{card.dateLabel}</span>
+                            ) : (
+                              <span />
+                            )}
+                            <span className="inline-flex items-center gap-1">
+                              {card.link} <ChevronRight size={14} />
+                            </span>
                           </div>
                         </button>
                       );
@@ -9867,7 +10446,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                           <div className="flex items-center justify-between mb-4">
                             <h3 className={`flex items-center gap-2 text-lg font-black ${index === 0 ? 'text-emerald-700' : index === 1 ? 'text-slate-900' : index === 2 ? 'text-violet-700' : 'text-blue-700'}`}>
                               <Icon size={20} className={card.iconClass} />
-                              {card.title}
+                              <span>{card.title}</span>
+                              {renderManagementHelpButton(card.helpKey)}
                             </h3>
                             <span className={`px-3 py-1 rounded-lg text-xs font-black ${card.badgeClass}`}>
                               {card.count}명
@@ -9905,7 +10485,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                             onClick={card.onViewAll}
                             className="mt-4 w-full border-t border-slate-100 pt-3 text-sm font-black text-blue-600 flex items-center justify-center gap-1"
                           >
-                            전체 보기 <ChevronRight size={15} />
+                            전체 학생 보기 <ChevronRight size={15} />
                           </button>
                         </div>
                       );
@@ -10067,12 +10647,61 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
 
           {/* [0-1] 관리 필요 학생 탭 */}
           {activeTab === 'needs' && (() => {
-            const getNeedRiskLevel = (item) => {
-              const keys = item.reasons.map(reason => reason.severity?.key).filter(Boolean);
+            const getNeedScoreGap = (item) => {
+              return Math.max(
+                0,
+                ...(item.reasons || [])
+                  .filter(reason => reason.type === 'score')
+                  .map(reason => Number(reason.gap || 0))
+              );
+            };
 
-              if (keys.includes('danger')) return 'urgent';
-              if (keys.includes('warning') || keys.includes('caution')) return 'warning';
-              return 'watch';
+            const hasNeedReasonType = (item, reasonType) => {
+              return (item.reasons || []).some(reason => reason.type === reasonType);
+            };
+
+            const getNeedSignalSummary = (item) => {
+              const attendanceRate = Number(item.attendanceRate || 0);
+              const dailyRate = Number(item.dailyRate || 0);
+              const scoreGap = getNeedScoreGap(item);
+              const studyRatio = Number(item.studyRatio || 0);
+
+              const dangerSignals = [
+                hasNeedReasonType(item, 'attendance') && attendanceRate <= 50,
+                hasNeedReasonType(item, 'daily') && dailyRate <= 50,
+                hasNeedReasonType(item, 'score') && scoreGap >= 30,
+                hasNeedReasonType(item, 'study') && studyRatio < 60
+              ].filter(Boolean).length;
+
+              const warningSignals = [
+                hasNeedReasonType(item, 'attendance') && attendanceRate <= 70,
+                hasNeedReasonType(item, 'daily') && dailyRate <= 70,
+                hasNeedReasonType(item, 'score') && scoreGap >= 20,
+                hasNeedReasonType(item, 'study') && studyRatio < 80
+              ].filter(Boolean).length;
+
+              const watchSignals = [
+                hasNeedReasonType(item, 'attendance') && attendanceRate <= 80,
+                hasNeedReasonType(item, 'daily') && dailyRate <= 80,
+                hasNeedReasonType(item, 'score') && scoreGap >= 10,
+                hasNeedReasonType(item, 'study') && studyRatio < 100
+              ].filter(Boolean).length;
+
+              return {
+                dangerSignals,
+                warningSignals,
+                watchSignals
+              };
+            };
+
+            const getNeedRiskLevel = (item) => {
+              const signals = getNeedSignalSummary(item);
+
+              if (signals.dangerSignals >= 3) return 'urgent';
+              if (signals.warningSignals >= 3) return 'warning';
+              if (signals.watchSignals > 0) return 'watch';
+
+              return 'none';
             };
 
             const applyNeedFilters = (items = []) => {
@@ -10147,7 +10776,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                 .map(reason => {
                   if (reason.type === 'attendance') return `출석률 ${item.attendanceRate}%`;
                   if (reason.type === 'daily') return `Daily 참여율 ${item.dailyRate}%`;
-                  if (reason.type === 'study') return `학습시간 ${item.studyText}`;
+                  if (reason.type === 'study') return `학습시간 반 일평균 대비 ${item.studyRatio ?? 0}%`;
                   if (reason.type === 'score') return reason.text || getNeedReasonText(reason);
                   if (reason.type === 'recent') return reason.text || '최근 신규 등록 또는 이번 달 시작 학생';
                   return reason.text || reason.label || '관리 필요';
@@ -10289,7 +10918,19 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                 }
 
                 if (reason.type === 'study') {
-                  return `학습 시간이 부족합니다. 현재 누적 학습시간은 ${item.studyText || '0시간 0분'}입니다.`;
+                  const studentDailyText = item.studyDailyText || formatMinsToTime(item.studyDailyAvgMins || 0);
+                  const campusDailyAvg = Number(item.campusStudyDailyAvgMins || 0);
+                  const shortageMins = Math.max(0, Number(item.studyShortageMins || 0));
+
+                  if (campusDailyAvg > 0 && shortageMins > 0) {
+                    return `학습 시간이 부족합니다.
+현재 일평균 학습시간은 ${studentDailyText}으로,
+대구캠퍼스 전체 일평균 학습시간 대비 ${formatMinsToTime(shortageMins)} 부족합니다.`;
+                  }
+
+                  return `학습 시간이 부족합니다.
+현재 일평균 학습시간은 ${studentDailyText}이며,
+반 일평균 대비 ${item.studyRatio ?? 0}% 수준입니다.`;
                 }
 
                 if (reason.type === 'score') {
@@ -10377,6 +11018,69 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                 title: '최근 신규 관리',
                 rows: recentNeedStudents
               }
+            };
+
+            const NEED_GROUP_HELP_TEXTS = {
+              urgent: `위험 단계 중 3개 이상 포함된 학생입니다.
+
+출석률 50% 이하
+영어 Daily 참여율 50% 이하
+Monthly 점수가 전국/전체 평균보다 30점 이상 낮음
+학습시간이 반 일평균의 60% 미만
+
+위 기준 중 3개 이상 해당하면 긴급 관리 학생으로 분류합니다.`,
+              warning: `위험 단계는 아니지만 주의 신호가 3개 이상 있는 학생입니다.
+
+출석률 51~70%
+영어 Daily 참여율 51~70%
+Monthly 점수가 전국/전체 평균보다 20점 이상 낮음
+학습시간이 반 일평균의 80% 미만
+
+위 기준 중 3개 이상 해당하면 주의 관리 학생으로 분류합니다.`,
+              watch: `긴급/주의 단계는 아니지만
+지속 모니터링이 필요한 이상 신호가 있는 학생입니다.
+
+출석률 71~80%
+영어 Daily 참여율 71~80%
+Monthly 점수가 전국/전체 평균보다 10~19점 낮음
+학습시간이 반 일평균의 80~99%
+
+또는 위험/주의 신호가 1~2개만 있는 경우 관찰 학생으로 분류합니다.`
+            };
+
+            const renderNeedGroupHelpButton = (helpKey) => {
+              if (!helpKey || !NEED_GROUP_HELP_TEXTS[helpKey]) return null;
+              const isOpen = needPageHelpKey === helpKey;
+
+              return (
+                <span className="relative inline-flex align-middle">
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    aria-label="관리 필요 학생 분류 기준 도움말"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setNeedPageHelpKey(prev => prev === helpKey ? null : helpKey);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== 'Enter' && event.key !== ' ') return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setNeedPageHelpKey(prev => prev === helpKey ? null : helpKey);
+                    }}
+                    className="ml-1 inline-flex w-4 h-4 rounded-full border border-slate-200 bg-white text-slate-400 hover:text-blue-600 hover:border-blue-200 items-center justify-center cursor-pointer shadow-sm"
+                  >
+                    <Info size={11} />
+                  </span>
+
+                  {isOpen && (
+                    <span className="absolute left-1/2 top-5 z-[90] w-72 -translate-x-1/2 rounded-xl border border-blue-100 bg-white px-3 py-2 text-[11px] font-bold leading-5 text-slate-600 shadow-xl whitespace-pre-line">
+                      {NEED_GROUP_HELP_TEXTS[helpKey]}
+                    </span>
+                  )}
+                </span>
+              );
             };
 
             const openNeedListPage = (groupKey) => {
@@ -10531,7 +11235,10 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                     </div>
 
                     <div className="min-w-0 flex-1">
-                      <p className="text-[13px] font-black text-slate-700 mb-0.5">{title}</p>
+                      <p className="text-[13px] font-black text-slate-700 mb-0.5 inline-flex items-center">
+                        {title}
+                        {renderNeedGroupHelpButton(popoverKey)}
+                      </p>
                       <div className="flex items-end gap-1">
                         <strong className={`text-[26px] leading-none font-black ${style.value}`}>{count}</strong>
                         <span className="text-sm font-black text-slate-700 mb-0.5">명</span>
@@ -11301,10 +12008,13 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
               <div className="max-w-[1560px] mx-auto px-1 pb-4 animate-in fade-in duration-300">
                 <div className="flex items-start justify-between gap-3 mb-4">
                   <div>
-                    <h1 className="text-2xl font-black text-slate-950 flex items-center gap-2 tracking-[-0.03em]">
-                      <AlertTriangle className="text-red-500" size={25} strokeWidth={2.1} />
-                      관리 필요 학생
-                    </h1>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <h1 className="text-2xl font-black text-slate-950 flex items-center gap-2 tracking-[-0.03em]">
+                        <AlertTriangle className="text-red-500" size={25} strokeWidth={2.1} />
+                        관리 필요 학생
+                      </h1>
+                      {renderDashboardMetricDateModeToggle()}
+                    </div>
                     <p className="text-xs font-bold text-slate-500 mt-1.5">
                       출석, Daily, 학습시간, 성적을 종합 분석하여 우선 관리가 필요한 학생을 보여드립니다.
                     </p>
@@ -14216,6 +14926,13 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                         >
                           + 사용자 설정
                         </button>
+
+                        <div className="ml-auto h-10 min-w-[150px] px-4 rounded-xl border border-blue-100 bg-blue-50/80 flex items-center justify-between gap-3">
+                          <span className="text-[11px] font-black text-blue-500">일 평균 시간</span>
+                          <strong className="text-sm font-black text-slate-900">
+                            {formatMinsToTime(getClassDailyStudyAverage(dashboardMonth))}
+                          </strong>
+                        </div>
                       </div>
 
                       {showStudyTimeCustomSetting && (
@@ -14691,10 +15408,10 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
 
               {/* -- DAILY TEST (입력 페이지 리디자인) -- */}
               {activeTestTab === 'daily' && activeDailyTab === 'input' && (() => {
-                const excludedDays = dailySettings?.[dailyMonth]?.excludedDays || [];
-                const testsPerDay = dailySubject === 'math' ? 1 : 2;
-                const todayLimitedDayCount = getMetricDayLimit(academicYear, dailyMonth);
-                const validDayIndexes = Array.from({ length: todayLimitedDayCount }, (_, i) => i).filter(dayIdx => !excludedDays.includes(dayIdx));
+                const excludedDays = getDailyExcludedDaysBySubject(dailySettings?.[dailyMonth] || {}, dailySubject);
+                const testsPerDay = getDailyTestKeysBySubject(dailySubject).length;
+                const metricLimitedDayCount = getMetricDayLimit(academicYear, dailyMonth);
+                const validDayIndexes = Array.from({ length: metricLimitedDayCount }, (_, i) => i).filter(dayIdx => !excludedDays.includes(dayIdx));
                 const totalPossibleCount = filteredStudents.length * validDayIndexes.length * testsPerDay;
 
                 let completedCount = 0;
@@ -14862,9 +15579,12 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                   <div className="space-y-2.5">
                     <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-2">
                       <div className="flex flex-col gap-1.5">
-                        <h1 className="text-[22px] font-black text-slate-950 tracking-tight">
-                          DAILY TEST 관리 (입력 페이지)
-                        </h1>
+                        <div className="flex flex-wrap items-center gap-3">
+                          <h1 className="text-[22px] font-black text-slate-950 tracking-tight">
+                            DAILY TEST 관리 (입력 페이지)
+                          </h1>
+                          {renderDashboardMetricDateModeToggle()}
+                        </div>
 
                         <div className="inline-flex w-fit rounded-xl bg-slate-100 p-1 border border-slate-200 shadow-inner">
                           <button
@@ -14959,7 +15679,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
 
                     <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-3">
                       <div className="text-sm font-black text-slate-800 mb-2">
-                        비테스트 일자 (휴일 및 시작일 제외)
+                        {dailySubject === 'math' ? '수학 Daily 비테스트 일자' : '영어 Daily 비테스트 일자'}
                       </div>
 
                       <div
@@ -15009,7 +15729,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                       </div>
 
                       <p className="mt-2 text-[11px] font-bold text-slate-400">
-                        ※ 비테스트 일자는 점수 입력에서 제외되며, 리포트 계산 시 자동으로 반영됩니다.
+                        ※ 영어 비테스트일은 t1/t2만, 수학 비테스트일은 math만 제외됩니다.
                       </p>
                     </div>
 
@@ -22646,7 +23366,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                 const learningStudentCount = getLearningStudentCountForMonth(selectedMonth);
 
                 const StatGrid = () => (
-                  <div className="grid grid-cols-5 gap-2">
+                  <div className="grid grid-cols-4 gap-2">
                     <StatCard
                       title="전체 학생"
                       value={`${learningStudentCount}명`}
@@ -22679,14 +23399,6 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                       iconClassName="bg-emerald-50 text-emerald-600"
                       valueClassName="text-emerald-600"
                     />
-                    <StatCard
-                      title="관리 필요 학생"
-                      value={`${managementNeedCount}명`}
-                      subText="집중 관리가 필요해요"
-                      icon={AlertTriangle}
-                      iconClassName="bg-red-50 text-red-500"
-                      valueClassName="text-red-500"
-                    />
                   </div>
                 );
 
@@ -22694,7 +23406,10 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                   <div className="space-y-3">
                     <div className="flex items-start justify-between gap-3">
                       <div>
-                        <h1 className="text-2xl font-black text-slate-950 tracking-tight">학습 데이터</h1>
+                        <div className="flex flex-wrap items-center gap-3">
+                          <h1 className="text-2xl font-black text-slate-950 tracking-tight">학습 데이터</h1>
+                          {renderDashboardMetricDateModeToggle()}
+                        </div>
                         <p className="text-xs font-bold text-slate-500 mt-1">
                           학생별 성적 및 학습 데이터를 한눈에 확인하고 관리하세요.
                         </p>
@@ -25238,7 +25953,9 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
   const student = viewingStudyTimeSummary || {};
   const safeStudyTime = student.studyTime || {};
   const safeClassStudents = Array.isArray(classStudents) ? classStudents : [];
-  const currentMonthIndex = Math.max(0, MONTHS.indexOf(studyTimeMonth));
+  const detailViewMode = studyTimeDetailViewMode === 'monthly' ? 'monthly' : 'total';
+  const detailMonth = MONTHS.includes(studyTimeDetailMonth) ? studyTimeDetailMonth : studyTimeMonth;
+  const currentMonthIndex = Math.max(0, MONTHS.indexOf(detailMonth));
   const summaryMode = studyTimeSummaryMode === 'days' ? 'days' : 'time';
 
   const displayClassName = (
@@ -25310,6 +26027,52 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
   const monthlyAverageMins = monthsWithData.length
     ? Math.floor(monthsWithData.reduce((sum, item) => sum + item.studentMins, 0) / monthsWithData.length)
     : 0;
+
+  const dailyAverageMins = totalDays > 0
+    ? Math.floor(totalMins / totalDays)
+    : 0;
+
+  const monthlyDetailDayLimit = getMetricDayLimit(academicYear, detailMonth, {
+    dateMode: metricDateMode === 'today' ? 'today' : 'previous'
+  });
+
+  const monthlyDetailDaily = Array.isArray(safeStudyTime?.[detailMonth])
+    ? safeStudyTime[detailMonth]
+    : [];
+
+  const monthlyDetailBaseDays = Math.max(0, monthlyDetailDayLimit);
+  const detailMonthBaseDayLabel = monthlyDetailBaseDays > 0
+    ? `${getMonthNumber(detailMonth)}월 ${monthlyDetailBaseDays}일`
+    : `${detailMonth}`;
+
+  const monthlyDetailMins = monthlyDetailDaily
+    .slice(0, monthlyDetailBaseDays)
+    .reduce((sum, day) => {
+      return sum + parseTimeDiffToMins(day?.in, day?.out);
+    }, 0);
+
+  const monthlyDetailActualDays = monthlyDetailDaily
+    .slice(0, monthlyDetailBaseDays)
+    .filter(day => parseTimeDiffToMins(day?.in, day?.out) > 0)
+    .length;
+
+  const monthlyDetailDailyAverageMins = monthlyDetailBaseDays > 0
+    ? Math.floor(monthlyDetailMins / monthlyDetailBaseDays)
+    : 0;
+
+  const isMonthlyDetailView = detailViewMode === 'monthly';
+
+  const primaryStudyLabel = isMonthlyDetailView ? `${detailMonth} 누적 학습 시간` : '누적 학습 시간';
+  const primaryStudyValue = isMonthlyDetailView ? monthlyDetailMins : totalMins;
+
+  const secondStudyLabel = isMonthlyDetailView ? `${detailMonth} 일 평균 학습 시간` : '월 평균 학습 시간';
+  const secondStudyValue = isMonthlyDetailView ? monthlyDetailDailyAverageMins : monthlyAverageMins;
+
+  const thirdStudyLabel = isMonthlyDetailView ? '기준 일수' : '일 평균 학습 시간';
+  const thirdStudyValue = isMonthlyDetailView ? `${monthlyDetailBaseDays}일` : safeFormatTime(dailyAverageMins);
+
+  const fourthStudyLabel = isMonthlyDetailView ? '실제 학습일 수' : '총 학습일 수';
+  const fourthStudyValue = isMonthlyDetailView ? `${monthlyDetailActualDays}일` : `${totalDays}일`;
 
   const selectedMonthData = monthData[currentMonthIndex] || monthData[0];
 
@@ -25540,8 +26303,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                   <Clock size={29} />
                 </div>
                 <div className="min-w-0">
-                  <div className="text-blue-100 text-sm font-bold whitespace-nowrap">누적 학습 시간</div>
-                  <div className="text-[30px] leading-none font-black mt-2 whitespace-nowrap">{safeFormatTime(totalMins)}</div>
+                  <div className="text-blue-100 text-sm font-bold whitespace-nowrap">{primaryStudyLabel}</div>
+                  <div className="text-[30px] leading-none font-black mt-2 whitespace-nowrap">{safeFormatTime(primaryStudyValue)}</div>
                 </div>
               </div>
 
@@ -25550,8 +26313,18 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                   <TrendingUp size={29} />
                 </div>
                 <div className="min-w-0">
-                  <div className="text-blue-100 text-sm font-bold whitespace-nowrap">월 평균 학습 시간</div>
-                  <div className="text-[30px] leading-none font-black mt-2 whitespace-nowrap">{safeFormatTime(monthlyAverageMins)}</div>
+                  <div className="text-blue-100 text-sm font-bold whitespace-nowrap">{secondStudyLabel}</div>
+                  <div className="text-[30px] leading-none font-black mt-2 whitespace-nowrap">{safeFormatTime(secondStudyValue)}</div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-4">
+                <div className="w-14 h-14 rounded-2xl bg-white/12 border border-white/15 flex items-center justify-center shrink-0">
+                  <Timer size={29} />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-blue-100 text-sm font-bold whitespace-nowrap">{thirdStudyLabel}</div>
+                  <div className="text-[30px] leading-none font-black mt-2 whitespace-nowrap">{thirdStudyValue}</div>
                 </div>
               </div>
 
@@ -25560,8 +26333,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                   <CalendarDays size={29} />
                 </div>
                 <div className="min-w-0">
-                  <div className="text-blue-100 text-sm font-bold whitespace-nowrap">총 학습일 수</div>
-                  <div className="text-[30px] leading-none font-black mt-2 whitespace-nowrap">{totalDays}일</div>
+                  <div className="text-blue-100 text-sm font-bold whitespace-nowrap">{fourthStudyLabel}</div>
+                  <div className="text-[30px] leading-none font-black mt-2 whitespace-nowrap">{fourthStudyValue}</div>
                 </div>
               </div>
             </div>
@@ -25590,43 +26363,97 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
                     <FileText size={25} />
                   </span>
                   <h2 className="text-[30px] leading-none font-black text-slate-950 tracking-tight whitespace-nowrap">
-                    월별 학습 시간 분석
+                    학습 시간 상세 분석
                   </h2>
                   <Info size={19} className="text-slate-400 shrink-0" />
                 </div>
                 <p className="mt-3 text-[15px] text-slate-500 font-bold whitespace-nowrap">
-                  최근 12개월 동안의 학습 시간 추이와 반 평균 비교입니다.
+                  {isMonthlyDetailView
+                    ? `${detailMonth} 1일부터 ${detailMonthBaseDayLabel}까지의 학습 시간과 일 평균을 확인합니다.`
+                    : '전체 기간의 누적 학습 시간과 평균을 확인합니다.'}
                 </p>
               </div>
 
-              <div className="mr-10 flex bg-slate-100 p-1 rounded-xl shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setStudyTimeSummaryMode('time')}
-                  className={`h-9 px-6 rounded-lg text-sm font-black transition-all ${
-                    summaryMode === 'time'
-                      ? 'bg-blue-600 text-white shadow-sm'
-                      : 'text-slate-500 hover:text-slate-700'
-                  }`}
-                >
-                  시간
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setStudyTimeSummaryMode('days')}
-                  className={`h-9 px-6 rounded-lg text-sm font-black transition-all ${
-                    summaryMode === 'days'
-                      ? 'bg-blue-600 text-white shadow-sm'
-                      : 'text-slate-500 hover:text-slate-700'
-                  }`}
-                >
-                  일수
-                </button>
+              <div className="mr-10 flex flex-col items-end gap-2 shrink-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-black text-slate-500">보기 방식</span>
+                  <div className="flex bg-slate-100 p-1 rounded-xl">
+                    <button
+                      type="button"
+                      onClick={() => setStudyTimeDetailViewMode('total')}
+                      className={`h-8 px-4 rounded-lg text-xs font-black transition-all ${
+                        detailViewMode === 'total'
+                          ? 'bg-blue-600 text-white shadow-sm'
+                          : 'text-slate-500 hover:text-slate-700'
+                      }`}
+                    >
+                      전체 누적
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setStudyTimeDetailViewMode('monthly')}
+                      className={`h-8 px-4 rounded-lg text-xs font-black transition-all ${
+                        detailViewMode === 'monthly'
+                          ? 'bg-blue-600 text-white shadow-sm'
+                          : 'text-slate-500 hover:text-slate-700'
+                      }`}
+                    >
+                      월별
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex bg-slate-100 p-1 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => setStudyTimeSummaryMode('time')}
+                    className={`h-9 px-6 rounded-lg text-sm font-black transition-all ${
+                      summaryMode === 'time'
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    시간
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setStudyTimeSummaryMode('days')}
+                    className={`h-9 px-6 rounded-lg text-sm font-black transition-all ${
+                      summaryMode === 'days'
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    일수
+                  </button>
+                </div>
               </div>
             </div>
           </div>
 
-          <div className="mt-6 rounded-3xl border border-slate-200 bg-white shadow-sm px-6 pt-5 pb-4 shrink-0">
+          {isMonthlyDetailView && (
+            <div className="mt-5 rounded-2xl border border-blue-100 bg-blue-50/70 px-4 py-3 shrink-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="mr-1 text-[12px] font-black text-blue-700">월 선택</span>
+                {MONTHS.map(month => (
+                  <button
+                    key={month}
+                    type="button"
+                    onClick={() => setStudyTimeDetailMonth(month)}
+                    className={`h-8 px-3 rounded-lg text-[12px] font-black transition-all ${
+                      detailMonth === month
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'bg-white text-slate-600 border border-blue-100 hover:text-blue-700'
+                    }`}
+                  >
+                    {month}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className={`${isMonthlyDetailView ? 'mt-4' : 'mt-6'} rounded-3xl border border-slate-200 bg-white shadow-sm px-6 pt-5 pb-4 shrink-0`}>
             <div className="flex items-center gap-8 mb-2 text-[13px] font-black text-slate-600">
               <div className="flex items-center gap-2 whitespace-nowrap">
                 <span className="w-3 h-3 rounded-full bg-blue-500" />
@@ -25821,7 +26648,7 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
           <div className="mt-4 grid grid-cols-4 rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm shrink-0">
             <div className="p-4 border-r border-slate-200 min-w-0">
               <div className="text-[13px] font-black text-slate-800 whitespace-nowrap">
-                {studyTimeMonth} 학습 시간 비교
+                {detailMonth} 학습 시간 비교
               </div>
               <div className="text-xs text-slate-500 mt-2 font-bold leading-relaxed">
                 {student.name || '-'} 학생은 반 평균 대비
