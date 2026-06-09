@@ -24803,8 +24803,9 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                                   };
                                 }));
 
+                                markStudentDirty(studentProfileToView.id, 'studentInfo');
                                 setViewingProfileId(null);
-                                showAlert('반 소속이 변경되었습니다.');
+                                showAlert('반 소속이 변경되었습니다. 우측 상단 변경사항 저장 버튼을 눌러 Firebase에 반영해주세요.');
                               }
                             );
                           }}
