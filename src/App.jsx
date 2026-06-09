@@ -4513,6 +4513,7 @@ function ClassDashboard({
   });
   const [weeklyScoresClassFilter, setWeeklyScoresClassFilter] = useState('전체');
   const [weeklyScoresViewMode, setWeeklyScoresViewMode] = useState('all');
+  const [weeklyScoreQueryMode, setWeeklyScoreQueryMode] = useState('total');
   const [weeklyScoresScoreBand, setWeeklyScoresScoreBand] = useState('all');
   const [showWeeklyScoreDetailFilter, setShowWeeklyScoreDetailFilter] = useState(false);
   const [weeklyScoresCurrentPage, setWeeklyScoresCurrentPage] = useState(1);
@@ -6362,6 +6363,7 @@ function ClassDashboard({
     weeklySearchTerm,
     weeklyScoresClassFilter,
     weeklyScoresViewMode,
+    weeklyScoreQueryMode,
     weeklyScoresScoreBand,
     weeklyScoresRowsPerPage,
     weeklyScoreSort
@@ -17732,29 +17734,75 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                         return a - b;
                       });
 
+                    const weeklyScoreQueryOptions = [
+                      { key: 'total', label: '전체/누적' },
+                      ...weeklyWeekNumbers.map(week => ({ key: week, label: `${week}주차` }))
+                    ];
+
+                    const normalizedWeeklyScoreQueryMode = weeklyScoreQueryMode === 'total'
+                      ? 'total'
+                      : Number(weeklyScoreQueryMode);
+
+                    const isWeeklyScoreQuery = weeklyWeekNumbers.includes(normalizedWeeklyScoreQueryMode);
+                    const selectedWeeklyScoreQueryWeek = isWeeklyScoreQuery ? normalizedWeeklyScoreQueryMode : null;
+                    const weeklyScoreQueryLabel = isWeeklyScoreQuery
+                      ? `${selectedWeeklyScoreQueryWeek}주차`
+                      : '전체/누적';
+
+                    const getPreviousValidWeeklyItemForStudent = (student, targetWeek) => {
+                      if (!targetWeek) return null;
+
+                      const validItems = getValidStudentWeeklyTrendItems(student)
+                        .filter(item => item.week < targetWeek);
+
+                      return validItems.length ? validItems[validItems.length - 1] : null;
+                    };
+
+                    const getAverageCorrectRateForStudent = (student, validItems = []) => {
+                      const rates = validItems
+                        .map(item => getWeeklyCorrectRateForWeek(student, item.week))
+                        .filter(rate => rate !== null && !Number.isNaN(Number(rate)));
+
+                      return rates.length
+                        ? Math.round((rates.reduce((sum, rate) => sum + Number(rate), 0) / rates.length) * 10) / 10
+                        : null;
+                    };
+
+                    const getAverageScoreFromItems = (validItems = []) => {
+                      const scores = validItems
+                        .map(item => item.score)
+                        .filter(score => Number.isFinite(Number(score)));
+
+                      return scores.length
+                        ? Math.round((scores.reduce((sum, score) => sum + Number(score), 0) / scores.length) * 10) / 10
+                        : null;
+                    };
+
                     const baseScoreRowsWithoutPercentile = weeklyFilteredStudents.map((student, index) => {
                       const weekScores = weeklyWeekNumbers.map(week => getWeeklyScoreValue(student, week));
                       const validTrendItems = getValidStudentWeeklyTrendItems(student);
                       const validScores = validTrendItems.map(item => item.score);
                       const latestValidWeek = getLatestValidWeekForStudent(student);
                       const latestScore = latestValidWeek ? getWeeklyScoreValue(student, latestValidWeek) : null;
+                      const avgScore = getAverageScoreFromItems(validTrendItems);
 
-                      const cumulativeScores = weeklyImplementedWeeks.map(week => {
-                        const score = getWeeklyScoreValue(student, week);
-                        return Number.isFinite(Number(score)) ? Number(score) : 0;
-                      });
-
-                      const avgScore = cumulativeScores.length
-                        ? Math.round((cumulativeScores.reduce((sum, score) => sum + score, 0) / cumulativeScores.length) * 10) / 10
+                      const selectedWeekScore = isWeeklyScoreQuery
+                        ? getWeeklyScoreValue(student, selectedWeeklyScoreQueryWeek)
                         : null;
 
-                      const previousScore = validScores.length >= 2 ? validScores[validScores.length - 2] : null;
-                      const scoreDiff = latestScore !== null && previousScore !== null
-                        ? Math.round((latestScore - previousScore) * 10) / 10
+                      const queryScoreValue = isWeeklyScoreQuery ? selectedWeekScore : avgScore;
+                      const previousItem = isWeeklyScoreQuery
+                        ? getPreviousValidWeeklyItemForStudent(student, selectedWeeklyScoreQueryWeek)
+                        : (validTrendItems.length >= 2 ? validTrendItems[validTrendItems.length - 2] : null);
+
+                      const comparisonScore = previousItem?.score ?? null;
+                      const scoreDiff = queryScoreValue !== null && comparisonScore !== null
+                        ? Math.round((Number(queryScoreValue) - Number(comparisonScore)) * 10) / 10
                         : null;
-                      const correctRate = latestValidWeek
-                        ? getWeeklyCorrectRateForWeek(student, latestValidWeek)
-                        : null;
+
+                      const correctRate = isWeeklyScoreQuery
+                        ? getWeeklyCorrectRateForWeek(student, selectedWeeklyScoreQueryWeek)
+                        : getAverageCorrectRateForStudent(student, validTrendItems);
 
                       return {
                         rank: index + 1,
@@ -17763,39 +17811,41 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                         latestValidWeek,
                         latestScore,
                         avgScore,
+                        queryScoreValue,
+                        selectedWeekScore,
                         correctRate,
                         scoreDiff,
                         percentile: null
                       };
                     });
 
-                    const cumulativeAverageScores = baseScoreRowsWithoutPercentile
-                      .map(row => row.avgScore)
+                    const queryScoreValues = baseScoreRowsWithoutPercentile
+                      .map(row => row.queryScoreValue)
                       .filter(score => Number.isFinite(Number(score)));
 
                     const baseScoreRows = baseScoreRowsWithoutPercentile.map(row => {
-                      const avgScore = Number(row.avgScore);
+                      const queryScoreValue = Number(row.queryScoreValue);
 
-                      if (!Number.isFinite(avgScore) || !cumulativeAverageScores.length) {
+                      if (!Number.isFinite(queryScoreValue) || !queryScoreValues.length) {
                         return {
                           ...row,
                           percentile: null
                         };
                       }
 
-                      const lowerOrEqualCount = cumulativeAverageScores.filter(score => score <= avgScore).length;
+                      const lowerOrEqualCount = queryScoreValues.filter(score => score <= queryScoreValue).length;
 
                       return {
                         ...row,
-                        percentile: Math.round((lowerOrEqualCount / cumulativeAverageScores.length) * 100)
+                        percentile: Math.round((lowerOrEqualCount / queryScoreValues.length) * 100)
                       };
                     });
 
                     const scoreRowsByBand = baseScoreRows.filter(row => {
-                      const targetScore = Number(row.latestScore ?? row.avgScore);
+                      const targetScore = Number(row.queryScoreValue);
 
                       if (weeklyScoresScoreBand === 'all') return true;
-                      if (weeklyScoresScoreBand === 'missing') return row.latestScore === null && row.avgScore === null;
+                      if (weeklyScoresScoreBand === 'missing') return row.queryScoreValue === null;
                       if (!Number.isFinite(targetScore)) return false;
                       if (weeklyScoresScoreBand === 'high') return targetScore >= 90;
                       if (weeklyScoresScoreBand === 'middle') return targetScore >= 70 && targetScore < 90;
@@ -17811,7 +17861,7 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                       }
 
                       if (weeklyScoreSort.metric === 'rank') return row.rank;
-                      if (weeklyScoreSort.metric === 'avgScore') return row.avgScore;
+                      if (weeklyScoreSort.metric === 'avgScore') return row.queryScoreValue;
                       if (weeklyScoreSort.metric === 'percentile') return row.percentile;
                       if (weeklyScoreSort.metric === 'correctRate') return row.correctRate;
                       if (weeklyScoreSort.metric === 'scoreDiff') return row.scoreDiff;
@@ -17847,13 +17897,13 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                       }
 
                       if (weeklyScoresViewMode === 'average') {
-                        return [...scoreRowsByBand].sort((a, b) => Number(b.avgScore ?? -1) - Number(a.avgScore ?? -1));
+                        return [...scoreRowsByBand].sort((a, b) => Number(b.queryScoreValue ?? -1) - Number(a.queryScoreValue ?? -1));
                       }
 
                       if (weeklyScoresViewMode === 'topBottom') {
-                        const submitted = scoreRowsByBand.filter(row => row.latestScore !== null || row.avgScore !== null);
-                        const unsubmitted = scoreRowsByBand.filter(row => row.latestScore === null && row.avgScore === null);
-                        const sorted = [...submitted].sort((a, b) => Number(b.latestScore ?? b.avgScore ?? -1) - Number(a.latestScore ?? a.avgScore ?? -1));
+                        const submitted = scoreRowsByBand.filter(row => row.queryScoreValue !== null);
+                        const unsubmitted = scoreRowsByBand.filter(row => row.queryScoreValue === null);
+                        const sorted = [...submitted].sort((a, b) => Number(b.queryScoreValue ?? -1) - Number(a.queryScoreValue ?? -1));
                         const topRows = sorted.slice(0, 5);
                         const bottomRows = [...sorted].reverse().slice(0, 5);
                         const pickedIds = new Set([...topRows, ...bottomRows].map(row => row.student.id));
@@ -17865,7 +17915,11 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                         ].filter(row => pickedIds.has(row.student.id) || unsubmitted.some(item => item.student.id === row.student.id));
                       }
 
-                      return scoreRowsByBand;
+                      return [...scoreRowsByBand].sort((a, b) => {
+                        const scoreA = a.queryScoreValue === null ? -1 : Number(a.queryScoreValue);
+                        const scoreB = b.queryScoreValue === null ? -1 : Number(b.queryScoreValue);
+                        return scoreB - scoreA;
+                      });
                     })();
 
                     const scoreRows = sortedScoreRows.map((row, index) => ({
@@ -17902,23 +17956,29 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                       return weeklyScoreSort.order === 'asc' ? ' ↑' : ' ↓';
                     };
 
-                    const submittedRows = scoreRows.filter(row => row.latestScore !== null || row.avgScore !== null);
+                    const submittedRows = scoreRows.filter(row => row.queryScoreValue !== null);
                     const submittedCount = submittedRows.length;
                     const totalCount = scoreRows.length;
                     const averageScore = submittedRows.length
-                      ? Math.round((submittedRows.reduce((sum, row) => sum + Number(row.avgScore || row.latestScore || 0), 0) / submittedRows.length) * 10) / 10
+                      ? Math.round((submittedRows.reduce((sum, row) => sum + Number(row.queryScoreValue || 0), 0) / submittedRows.length) * 10) / 10
                       : 0;
                     const highestRow = submittedRows.length
-                      ? [...submittedRows].sort((a, b) => Number(b.latestScore ?? b.avgScore ?? 0) - Number(a.latestScore ?? a.avgScore ?? 0))[0]
+                      ? [...submittedRows].sort((a, b) => Number(b.queryScoreValue ?? 0) - Number(a.queryScoreValue ?? 0))[0]
                       : null;
                     const lowestRow = submittedRows.length
-                      ? [...submittedRows].sort((a, b) => Number(a.latestScore ?? a.avgScore ?? 0) - Number(b.latestScore ?? b.avgScore ?? 0))[0]
+                      ? [...submittedRows].sort((a, b) => Number(a.queryScoreValue ?? 0) - Number(b.queryScoreValue ?? 0))[0]
                       : null;
-                    const validCorrectRows = submittedRows.filter(row => row.correctRate !== null && !Number.isNaN(row.correctRate));
+                    const validCorrectRows = submittedRows.filter(row => row.correctRate !== null && !Number.isNaN(Number(row.correctRate)));
                     const averageCorrectRate = validCorrectRows.length
                       ? Math.round((validCorrectRows.reduce((sum, row) => sum + Number(row.correctRate || 0), 0) / validCorrectRows.length) * 10) / 10
                       : 0;
-                    const improvedCount = scoreRows.filter(row => Number(row.scoreDiff) > 0).length;
+                    const improvedCount = submittedRows.filter(row => Number(row.scoreDiff) > 0).length;
+
+                    const averageScoreLabel = isWeeklyScoreQuery ? '반 평균 점수' : '누적 평균 점수';
+                    const highestScoreLabel = isWeeklyScoreQuery ? '최고 점수' : '최고 누적 평균';
+                    const lowestScoreLabel = isWeeklyScoreQuery ? '최저 점수' : '최저 누적 평균';
+                    const averageCorrectRateSubText = isWeeklyScoreQuery ? `${weeklyScoreQueryLabel} 문항 기준` : '응시 주차 평균 기준';
+                    const improvedSubText = isWeeklyScoreQuery ? `${weeklyScoreQueryLabel} 기준` : '최근 응시 주차 기준';
 
                     const formatWeeklyScoreCompareText = (label, currentValue, compareValue) => {
                       const currentNum = Number(currentValue);
@@ -17980,14 +18040,16 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
 
                       const averages = studentList
                         .map(student => {
-                          const scores = implementedWeeks.map(week => {
-                            const key = `${month}_w${week}`;
-                            const rawScore = student.scores?.[scoreField]?.[key] ?? student.scores?.[scoreField]?.[`w${week}`];
-                            const rawScoreText = String(rawScore ?? '').trim();
-                            const score = rawScoreText === '' ? NaN : Number(rawScoreText);
+                          const scores = implementedWeeks
+                            .map(week => {
+                              const key = `${month}_w${week}`;
+                              const rawScore = student.scores?.[scoreField]?.[key] ?? student.scores?.[scoreField]?.[`w${week}`];
+                              const rawScoreText = String(rawScore ?? '').trim();
+                              const score = rawScoreText === '' ? NaN : Number(rawScoreText);
 
-                            return Number.isFinite(score) ? score : 0;
-                          });
+                              return Number.isFinite(score) ? score : null;
+                            })
+                            .filter(score => score !== null);
 
                           return scores.length
                             ? Math.round((scores.reduce((sum, score) => sum + score, 0) / scores.length) * 10) / 10
@@ -18000,9 +18062,34 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                         : null;
                     };
 
-                    const allWeeklyAverageScore = getWeeklyCumulativeAverageForStudents(filteredStudents, weeklyMonth);
+                    const getWeeklySingleWeekAverageForStudents = (studentList, month, week) => {
+                      if (!month || !studentList.length || !week) return null;
+
+                      const key = `${month}_w${week}`;
+                      const scores = studentList
+                        .map(student => {
+                          const rawScore = student.scores?.[scoreField]?.[key] ?? student.scores?.[scoreField]?.[`w${week}`];
+                          const rawScoreText = String(rawScore ?? '').trim();
+                          const score = rawScoreText === '' ? NaN : Number(rawScoreText);
+
+                          return Number.isFinite(score) ? score : null;
+                        })
+                        .filter(score => score !== null);
+
+                      return scores.length
+                        ? Math.round((scores.reduce((sum, score) => sum + score, 0) / scores.length) * 10) / 10
+                        : null;
+                    };
+
+                    const allWeeklyAverageScore = isWeeklyScoreQuery
+                      ? getWeeklySingleWeekAverageForStudents(filteredStudents, weeklyMonth, selectedWeeklyScoreQueryWeek)
+                      : getWeeklyCumulativeAverageForStudents(filteredStudents, weeklyMonth);
                     const prevWeeklyAverageScore = getWeeklyCumulativeAverageForStudents(filteredStudents, getWeeklyPrevMonthForScores(weeklyMonth));
-                    const weeklyOverallAverageDelta = formatWeeklyScoreCompareText('전체 평균 대비', averageScore, allWeeklyAverageScore);
+                    const weeklyOverallAverageDelta = formatWeeklyScoreCompareText(
+                      isWeeklyScoreQuery ? `${weeklyScoreQueryLabel} 전체 평균 대비` : '전체 평균 대비',
+                      averageScore,
+                      allWeeklyAverageScore
+                    );
                     const weeklyPrevMonthAverageDelta = formatWeeklyScoreCompareText('전월 대비', averageScore, prevWeeklyAverageScore);
 
                     const weeklyScoreRowsPerPageOptions = [10, 20, 50];
@@ -18295,6 +18382,34 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                               </div>
                             </div>
 
+                            <div className="h-5 w-px bg-slate-200"></div>
+
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs font-black text-slate-700">조회 기준</span>
+                              <div className="flex flex-wrap rounded-md bg-slate-100 p-0.5">
+                                {weeklyScoreQueryOptions.map(option => (
+                                  <button
+                                    key={String(option.key)}
+                                    type="button"
+                                    onClick={() => {
+                                      setWeeklyScoreQueryMode(option.key);
+
+                                      if (weeklyWeekNumbers.includes(Number(option.key))) {
+                                        setWeeklyScoreDistributionWeek(Number(option.key));
+                                      }
+                                    }}
+                                    className={`h-7 px-2.5 rounded text-[11px] font-black transition-all ${
+                                      String(weeklyScoreQueryMode) === String(option.key)
+                                        ? 'bg-blue-600 text-white shadow-sm'
+                                        : 'text-slate-500 hover:text-slate-700'
+                                    }`}
+                                  >
+                                    {option.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+
                             <div className="ml-auto flex items-center gap-1.5">
                               <div className="relative">
                                 <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 w-3.5 h-3.5" />
@@ -18313,6 +18428,7 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                                   setWeeklySearchTerm('');
                                   setWeeklyScoresClassFilter('전체');
                                   setWeeklyScoresViewMode('all');
+                                  setWeeklyScoreQueryMode('total');
                                   setWeeklyScoresScoreBand('all');
                                   setShowWeeklyScoreDetailFilter(false);
                                 }}
@@ -18379,7 +18495,7 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                               <BarChart3 size={20} />
                             </div>
                             <div>
-                              <p className="text-[11px] font-black text-slate-500 leading-tight">반 평균 점수</p>
+                              <p className="text-[11px] font-black text-slate-500 leading-tight">{averageScoreLabel}</p>
                               <p className="text-lg font-black text-slate-900 leading-tight">{averageScore}점</p>
                               <p className={`text-[11px] font-bold ${weeklyOverallAverageDelta.className}`}>{weeklyOverallAverageDelta.text}</p>
                             </div>
@@ -18390,8 +18506,8 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                               <Trophy size={25} />
                             </div>
                             <div>
-                              <p className="text-[11px] font-black text-slate-500 leading-tight">최고 점수</p>
-                              <p className="text-lg font-black text-slate-900 leading-tight">{highestRow ? `${highestRow.latestScore ?? highestRow.avgScore}점` : '-점'}</p>
+                              <p className="text-[11px] font-black text-slate-500 leading-tight">{highestScoreLabel}</p>
+                              <p className="text-lg font-black text-slate-900 leading-tight">{highestRow ? `${highestRow.queryScoreValue}점` : '-점'}</p>
                               <p className="text-[10px] font-bold text-slate-400 leading-tight">{highestRow?.student?.name || '-'} </p>
                             </div>
                           </div>
@@ -18401,8 +18517,8 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                               <TrendingUp size={25} className="rotate-90" />
                             </div>
                             <div>
-                              <p className="text-[11px] font-black text-slate-500 leading-tight">최저 점수</p>
-                              <p className="text-lg font-black text-slate-900 leading-tight">{lowestRow ? `${lowestRow.latestScore ?? lowestRow.avgScore}점` : '-점'}</p>
+                              <p className="text-[11px] font-black text-slate-500 leading-tight">{lowestScoreLabel}</p>
+                              <p className="text-lg font-black text-slate-900 leading-tight">{lowestRow ? `${lowestRow.queryScoreValue}점` : '-점'}</p>
                               <p className="text-[10px] font-bold text-slate-400 leading-tight">{lowestRow?.student?.name || '-'} </p>
                             </div>
                           </div>
@@ -18414,7 +18530,7 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                             <div>
                               <p className="text-[11px] font-black text-slate-500 leading-tight">평균 정답률</p>
                               <p className="text-lg font-black text-slate-900 leading-tight">{averageCorrectRate}%</p>
-                              <p className="text-[10px] font-bold text-slate-400 leading-tight">전체 문항 기준</p>
+                              <p className="text-[10px] font-bold text-slate-400 leading-tight">{averageCorrectRateSubText}</p>
                             </div>
                           </div>
 
@@ -18425,7 +18541,7 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                             <div>
                               <p className="text-[11px] font-black text-slate-500 leading-tight">성적 향상 학생</p>
                               <p className="text-lg font-black text-slate-900 leading-tight">{improvedCount}명</p>
-                              <p className="text-[10px] font-bold text-slate-400 leading-tight">지난 주 대비</p>
+                              <p className="text-[10px] font-bold text-slate-400 leading-tight">{improvedSubText}</p>
                             </div>
                           </div>
                         </div>
@@ -18435,22 +18551,6 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                             <div className="flex items-center justify-between mb-1.5">
                               <div>
                                 <h3 className="text-sm font-black text-slate-900">학생별 주차별 성적 상세</h3>
-                              </div>
-
-                              <div className="flex items-center gap-1.5">
-                                <span className="text-[10px] font-bold text-slate-400">성취도 기준</span>
-                                <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-600">
-                                  <span className="w-2 h-2 rounded-full bg-emerald-500"></span>90점 이상
-                                </span>
-                                <span className="inline-flex items-center gap-1 text-[11px] font-bold text-blue-600">
-                                  <span className="w-2 h-2 rounded-full bg-blue-500"></span>80~89점
-                                </span>
-                                <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-600">
-                                  <span className="w-2 h-2 rounded-full bg-amber-500"></span>60~79점
-                                </span>
-                                <span className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-500">
-                                  <span className="w-2 h-2 rounded-full bg-rose-500"></span>60점 미만
-                                </span>
                               </div>
                             </div>
 
@@ -18477,7 +18577,7 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                                       className="py-1 px-1 text-slate-500 font-black cursor-pointer hover:bg-blue-50"
                                       onClick={() => toggleWeeklyScoreSort({ week: null, metric: 'avgScore' })}
                                     >
-                                      누적평균(점){getWeeklySortMark({ metric: 'avgScore' })}
+                                      {isWeeklyScoreQuery ? `${selectedWeeklyScoreQueryWeek}주차 점수(점)` : '누적평균(점)'}{getWeeklySortMark({ metric: 'avgScore' })}
                                     </th>
                                     <th
                                       className="py-1 px-1 text-slate-500 font-black cursor-pointer hover:bg-blue-50"
@@ -18535,7 +18635,7 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                                       <td className="py-1 px-1">
                                         <input type="checkbox" className="rounded border-slate-300" onClick={(e) => e.stopPropagation()} />
                                       </td>
-                                      <td className="py-1 px-1 font-black text-slate-900">{weeklyScoresStartIndex + row.rank}</td>
+                                      <td className="py-1 px-1 font-black text-slate-900">{row.rank}</td>
                                       <td className="py-1 px-1 font-black text-slate-900">{row.student.name}</td>
 
                                       {weeklyWeekNumbers.map((week, weekIndex) => {
@@ -18563,7 +18663,7 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                                         );
                                       })}
 
-                                      <td className="py-1 px-1 font-black text-slate-900">{row.avgScore !== null ? row.avgScore : '-'}</td>
+                                      <td className="py-1 px-1 font-black text-slate-900">{row.queryScoreValue !== null ? row.queryScoreValue : '-'}</td>
                                       <td className="py-1 px-1 font-bold text-slate-700">{row.percentile !== null ? row.percentile : '-'}</td>
                                       <td className="py-1 px-1 font-bold text-slate-700">{row.correctRate !== null && !Number.isNaN(row.correctRate) ? row.correctRate : '-'}</td>
                                       <td className="py-1 px-1">
