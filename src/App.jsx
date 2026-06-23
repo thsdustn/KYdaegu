@@ -20572,7 +20572,7 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                           math: row.mathPrev,
                           total: row.totalPrev
                         };
-                        return toNumber(prevMap[subjectKey]?.scoreDiff);
+                        return toNumber(prevMap[subjectKey]?.percentDiff);
                       }
                       if (metric === 'trackAvgDiff') return toNumber(row.mData?.[subjectKey]?.trackAvgDiff);
                       if (metric === 'top30Diff') return toNumber(row.mData?.[subjectKey]?.top30Diff);
@@ -20717,22 +20717,42 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
 
                       if (scoreNum === null && percentNum === null) return renderEmpty();
 
-                      const 기준값 = scoreNum !== null ? scoreNum : percentNum;
-                      const isUp = 기준값 > 0;
-                      const isDown = 기준값 < 0;
-                      const colorClass = isUp ? 'text-blue-600' : isDown ? 'text-rose-600' : 'text-slate-500';
-                      const arrow = isUp ? '▲' : isDown ? '▼' : '-';
+                      const getDiffColorClass = (value) => {
+                        if (value > 0) return 'text-blue-600';
+                        if (value < 0) return 'text-rose-600';
+                        return 'text-slate-500';
+                      };
+
+                      const renderPercentDiff = () => {
+                        if (percentNum === null) return null;
+
+                        const arrow = percentNum > 0 ? '▲' : percentNum < 0 ? '▼' : '-';
+
+                        return (
+                          <div className={`font-black ${getDiffColorClass(percentNum)}`}>
+                            {arrow} {formatNumber(Math.abs(percentNum))}%p
+                          </div>
+                        );
+                      };
+
+                      const renderScoreDiff = () => {
+                        if (scoreNum === null) return null;
+
+                        const scoreText = scoreNum > 0
+                          ? `+${formatNumber(scoreNum)}`
+                          : formatNumber(scoreNum);
+
+                        return (
+                          <div className={`text-[10px] font-black ${getDiffColorClass(scoreNum)}`}>
+                            ({scoreText})
+                          </div>
+                        );
+                      };
 
                       return (
-                        <div className={`leading-tight font-black ${colorClass}`}>
-                          {scoreNum !== null && (
-                            <div>{scoreNum > 0 ? `+${formatNumber(scoreNum)}` : formatNumber(scoreNum)}</div>
-                          )}
-                          {percentNum !== null && (
-                            <div className="text-[10px] font-black">
-                              ({arrow} {formatNumber(Math.abs(percentNum))}%p)
-                            </div>
-                          )}
+                        <div className="leading-tight font-black">
+                          {renderPercentDiff()}
+                          {renderScoreDiff()}
                         </div>
                       );
                     };
@@ -21513,20 +21533,42 @@ Monthly 점수가 전국/전체 평균보다 10~19점 낮음
                         return <span className="text-slate-300 font-black">-</span>;
                       }
 
-                      const baseValue = scoreDiff !== null ? scoreDiff : percentDiff;
-                      const isUp = baseValue > 0;
-                      const isDown = baseValue < 0;
-                      const colorClass = isUp ? 'text-blue-600' : isDown ? 'text-rose-600' : 'text-slate-500';
-                      const arrow = isUp ? '▲' : isDown ? '▼' : '-';
+                      const getDetailDiffColorClass = (value) => {
+                        if (value > 0) return 'text-blue-600';
+                        if (value < 0) return 'text-rose-600';
+                        return 'text-slate-500';
+                      };
+
+                      const renderPercentDiff = () => {
+                        if (percentDiff === null) return null;
+
+                        const arrow = percentDiff > 0 ? '▲' : percentDiff < 0 ? '▼' : '-';
+
+                        return (
+                          <div className={`font-black ${getDetailDiffColorClass(percentDiff)}`}>
+                            {arrow} {formatNumber(Math.abs(percentDiff))}%p
+                          </div>
+                        );
+                      };
+
+                      const renderScoreDiff = () => {
+                        if (scoreDiff === null) return null;
+
+                        const scoreText = scoreDiff > 0
+                          ? `+${formatNumber(scoreDiff)}`
+                          : formatNumber(scoreDiff);
+
+                        return (
+                          <div className={`text-[10px] font-black mt-1 ${getDetailDiffColorClass(scoreDiff)}`}>
+                            ({scoreText})
+                          </div>
+                        );
+                      };
 
                       return (
-                        <div className={`font-black leading-tight ${colorClass}`}>
-                          <div>{scoreDiff !== null ? formatDiff(scoreDiff) : '-'}</div>
-                          {percentDiff !== null && (
-                            <div className="text-[10px] font-black mt-1">
-                              {arrow} {formatNumber(Math.abs(percentDiff))}%p
-                            </div>
-                          )}
+                        <div className="font-black leading-tight">
+                          {renderPercentDiff()}
+                          {renderScoreDiff()}
                         </div>
                       );
                     };
