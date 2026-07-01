@@ -328,7 +328,7 @@ const CLASS_COLOR_PALETTE = [
   { text: '#059669', bg: '#ecfdf5', border: '#bbf7d0', badge: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
   { text: '#ea580c', bg: '#fff7ed', border: '#fed7aa', badge: 'bg-orange-50 text-orange-700 border-orange-200' },
   { text: '#db2777', bg: '#fdf2f8', border: '#fbcfe8', badge: 'bg-pink-50 text-pink-700 border-pink-200' },
-  { text: '#0f766e', bg: '#f0fdfa', border: '#99f6e4', badge: 'bg-teal-50 text-teal-700 border-teal-200' },
+  { text: '#ca8a04', bg: '#fefce8', border: '#fde68a', badge: 'bg-yellow-50 text-yellow-700 border-yellow-200' },
   { text: '#4f46e5', bg: '#eef2ff', border: '#c7d2fe', badge: 'bg-indigo-50 text-indigo-700 border-indigo-200' },
   { text: '#be123c', bg: '#fff1f2', border: '#fecdd3', badge: 'bg-rose-50 text-rose-700 border-rose-200' }
 ];
