@@ -430,6 +430,9 @@ const getStudyTimeStats = (student) => {
 
 const emptyMonthlyScore = { score: '', percent: '', classRank: '', totalRank: '', trackAvg: '', top30Avg: '', trackAvgDiff: '', top30Diff: '' };
 
+// ✅ Monthly 대기 점수 키: 아이디 소문자 (Firestore 문서 ID에 쓸 수 없는 문자는 _ 로)
+const pendingMonthlyKey = (userId) => String(userId ?? '').trim().toLowerCase().replace(/[\/\s#?\[\]]+/g, '_');
+
 const generateEmptyMonthlyData = () => {
   const data = {}; 
   MONTHS.forEach(m => { data[m] = { english: { ...emptyMonthlyScore }, math: { ...emptyMonthlyScore }, total: { ...emptyMonthlyScore } }; }); 
@@ -758,6 +761,25 @@ export default function App() {
   // ✅ 저장 최적화: Firebase에서 삭제해야 하는 학생 문서 추적
   const [deletedStudentIds, setDeletedStudentIds] = useState(new Set());
 
+  // ✅ Monthly 대기 점수: Monthly 업로드 때 전체 명단에 없던 아이디의 점수 (아이디별 1건, year_연도/pendingMonthly 에 저장)
+  const [pendingMonthly, setPendingMonthly] = useState({});
+  // ✅ 저장 대기 중인 대기 점수 키 (값이 있으면 저장, 비워졌으면 삭제)
+  const [dirtyPendingIds, setDirtyPendingIds] = useState(new Set());
+
+  const markPendingMonthlyDirty = (keys = []) => {
+    const list = (keys || []).filter(Boolean);
+    if (!list.length) return;
+
+    setDirtyPendingIds(prev => {
+      const next = new Set(prev);
+      list.forEach(key => next.add(key));
+      return next;
+    });
+
+    setManualSaveStatus('dirty');
+    setManualSaveMessage('변경사항 있음');
+  };
+
   // ✅ 저장 최적화: 마지막으로 Firebase에서 불러왔거나 저장 완료된 학생 데이터 스냅샷
   const savedStudentsSnapshotRef = useRef({});
 
@@ -781,6 +803,8 @@ export default function App() {
 
     const loadCloudData = async () => {
       setIsDataLoaded(false);
+      setPendingMonthly({});
+      setDirtyPendingIds(new Set());
       try {
         const docRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`);
         const docSnap = await getDoc(docRef);
@@ -835,6 +859,31 @@ export default function App() {
             });
           } catch (settingsError) {
             console.error('반별 설정 로드 에러:', settingsError);
+          }
+
+          // ✅ Monthly 대기 점수 불러오기 (없거나 실패해도 앱은 그대로 동작)
+          try {
+            const pendingColRef = collection(
+              db,
+              'artifacts',
+              APP_ID,
+              'public',
+              'data',
+              'years',
+              `year_${academicYear}`,
+              'pendingMonthly'
+            );
+
+            const pendingSnap = await getDocs(pendingColRef);
+            const loadedPending = {};
+
+            pendingSnap.forEach(pendingDoc => {
+              loadedPending[pendingDoc.id] = pendingDoc.data();
+            });
+
+            setPendingMonthly(loadedPending);
+          } catch (pendingError) {
+            console.error('Monthly 대기 점수 로드 에러:', pendingError);
           }
 
           // 컬렉션 방식 데이터가 존재하거나, 메인 문서에 클래스 정보라도 있으면 반영
@@ -1249,8 +1298,9 @@ export default function App() {
     const classSettingsCount = getDirtyClassSettingsCountForScope(scope);
     const classesCount = isClassesDirty ? 1 : 0;
     const deletedCount = deletedStudentIds.size;
+    const pendingMonthlyCount = dirtyPendingIds.size;
 
-    return studentDirtyCount + classSettingsCount + classesCount + deletedCount;
+    return studentDirtyCount + classSettingsCount + classesCount + deletedCount + pendingMonthlyCount;
   };
 
   const saveDirtyStudentsToFirebase = async (scope = 'all') => {
@@ -1279,8 +1329,9 @@ export default function App() {
     const targetClassSettingNames = getDirtyClassSettingsNamesForScope(scope);
     const shouldSaveClasses = isClassesDirty;
     const targetDeletedStudentIds = Array.from(deletedStudentIds);
+    const targetPendingKeys = Array.from(dirtyPendingIds);
 
-    if (targetStudents.length === 0 && targetClassSettingNames.length === 0 && targetDeletedStudentIds.length === 0 && !shouldSaveClasses) {
+    if (targetStudents.length === 0 && targetClassSettingNames.length === 0 && targetDeletedStudentIds.length === 0 && !shouldSaveClasses && targetPendingKeys.length === 0) {
       setManualSaveStatus('saved');
       setManualSaveMessage('저장할 변경사항이 없습니다.');
       return;
@@ -1398,6 +1449,7 @@ export default function App() {
       const successDeletedStudentIds = [];
       const successClassSettingNames = [];
       let classesSaved = false;
+      const successPendingKeys = [];
 
       operationChunk.forEach(operation => {
         if (operation.target === 'student' && operation.student?.id) {
@@ -1415,6 +1467,10 @@ export default function App() {
 
         if (operation.target === 'classes') {
           classesSaved = true;
+        }
+
+        if (operation.target === 'pendingMonthly' && operation.id) {
+          successPendingKeys.push(operation.id);
         }
       });
 
@@ -1458,6 +1514,14 @@ export default function App() {
 
       if (classesSaved) {
         setIsClassesDirty(false);
+      }
+
+      if (successPendingKeys.length > 0) {
+        setDirtyPendingIds(prev => {
+          const next = new Set(prev);
+          successPendingKeys.forEach(key => next.delete(key));
+          return next;
+        });
       }
     };
 
@@ -1633,6 +1697,32 @@ export default function App() {
         });
       });
 
+      // ✅ Monthly 대기 점수: 바뀐 아이디 문서만 저장 / 비워진 아이디 문서는 삭제
+      const pendingColRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`, 'pendingMonthly');
+
+      targetPendingKeys.forEach(pendingKey => {
+        const pendingRef = doc(pendingColRef, pendingKey);
+        const pendingEntry = pendingMonthly[pendingKey];
+
+        if (pendingEntry) {
+          saveOperations.push({
+            type: 'set',
+            target: 'pendingMonthly',
+            ref: pendingRef,
+            id: pendingKey,
+            payload: { ...pendingEntry, updatedAt: Date.now() },
+            options: { merge: false }
+          });
+        } else {
+          saveOperations.push({
+            type: 'delete',
+            target: 'pendingMonthly',
+            ref: pendingRef,
+            id: pendingKey
+          });
+        }
+      });
+
       if (saveOperations.length === 0) {
         setManualSaveStatus('saved');
         setManualSaveMessage('실제 변경된 저장 항목이 없습니다.');
@@ -1687,7 +1777,7 @@ export default function App() {
     const handleBeforeUnload = (event) => {
       const hasDirtyClassSettings = Object.keys(dirtyClassSettings || {}).length > 0;
 
-      if (dirtyStudentIds.size === 0 && deletedStudentIds.size === 0 && !isClassesDirty && !hasDirtyClassSettings) return;
+      if (dirtyStudentIds.size === 0 && deletedStudentIds.size === 0 && !isClassesDirty && !hasDirtyClassSettings && dirtyPendingIds.size === 0) return;
 
       event.preventDefault();
       event.returnValue = '';
@@ -1695,7 +1785,7 @@ export default function App() {
 
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [dirtyStudentIds, deletedStudentIds, isClassesDirty, dirtyClassSettings]);
+  }, [dirtyStudentIds, deletedStudentIds, isClassesDirty, dirtyClassSettings, dirtyPendingIds]);
 
   /* * [7단계: Supabase/Firebase 연동 준비 가이드 (데이터 구조 분리 제안)]
    * 현재는 localStorage를 이용해 JSON 통짜 데이터를 저장하고 있지만,
@@ -4352,6 +4442,9 @@ null 값은 판단에서 제외합니다.`,
       manualSaveMessage={manualSaveMessage}
       dirtyStudentIds={dirtyStudentIds}
       getDirtyCountForScope={getDirtyCountForScope}
+      pendingMonthly={pendingMonthly}
+      setPendingMonthly={setPendingMonthly}
+      markPendingMonthlyDirty={markPendingMonthlyDirty}
       metricDateMode={metricDateMode}
       setMetricDateMode={handleMetricDateModeChange}
     />
@@ -4379,6 +4472,9 @@ function ClassDashboard({
   manualSaveMessage = '',
   dirtyStudentIds = new Set(),
   getDirtyCountForScope = () => 0,
+  pendingMonthly = {},
+  setPendingMonthly = () => {},
+  markPendingMonthlyDirty = () => {},
   metricDateMode = 'previous',
   setMetricDateMode = () => {}
 }) {
@@ -8336,6 +8432,36 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
       excludeCount = Math.max(students.length - updateCount, 0);
     }
 
+    // ✅ Monthly 대기 점수 (①·② 만): 이번 명단 학생 중 대기 점수가 있는 학생 / 이 반에서 정리할 대기 점수
+    const pendingApplyKeys = new Set();
+    const pendingCleanupKeys = new Set();
+
+    if (uploadMode !== 'allOverwrite') {
+      const rosterPendingKeys = new Set();
+
+      newStudents.forEach(newStu => {
+        const existingIdx = findExistingIndex(students, newStu);
+        const pendingKey = pendingMonthlyKey(newStu.userId || (existingIdx >= 0 ? students[existingIdx].userId : ''));
+
+        if (!pendingKey) return;
+
+        rosterPendingKeys.add(pendingKey);
+        if (pendingMonthly[pendingKey]) pendingApplyKeys.add(pendingKey);
+      });
+
+      if (className !== '대구캠퍼스 전체') {
+        Object.keys(pendingMonthly || {}).forEach(pendingKey => {
+          if (pendingMonthly[pendingKey]?.sourceClass === targetClass && !rosterPendingKeys.has(pendingKey)) {
+            pendingCleanupKeys.add(pendingKey);
+          }
+        });
+      }
+    }
+
+    const pendingPreviewText = (pendingApplyKeys.size > 0 || pendingCleanupKeys.size > 0)
+      ? `\n대기 점수 적용: ${pendingApplyKeys.size}명 · 정리: ${pendingCleanupKeys.size}명`
+      : '';
+
     const modeText =
       uploadMode === 'merge'
         ? '① 추가/수정만 하기'
@@ -8344,11 +8470,12 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
           : '③ 전체 명단 덮어쓰기';
 
     showConfirm(
-      `[${targetClass}] 명단 업로드 미리보기\n\n업로드 방식: ${modeText}\n\n추가될 학생: ${addCount}명\n수정될 학생: ${updateCount}명\n해당 반 소속 추가: ${addClassCount}명\n명단에서 제외될 학생: ${excludeCount}명\n\n적용하시겠습니까?`,
+      `[${targetClass}] 명단 업로드 미리보기\n\n업로드 방식: ${modeText}\n\n추가될 학생: ${addCount}명\n수정될 학생: ${updateCount}명\n해당 반 소속 추가: ${addClassCount}명\n명단에서 제외될 학생: ${excludeCount}명${pendingPreviewText}\n\n적용하시겠습니까?`,
       () => {
         const studentImportDirtyIds = new Set();
         const studentImportFullDirtyIds = new Set();
         const studentImportDeletedIds = new Set();
+        const pendingScoreFilledIds = new Set();
 
         setStudents(prev => {
           if (uploadMode === 'allOverwrite') {
@@ -8463,6 +8590,45 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
             });
           }
 
+          // ✅ Monthly 대기 점수 적용: 이번 명단 학생 중 대기 점수가 있으면 비어 있는 월·과목만 채움 (이미 있는 점수는 그대로)
+          if (pendingApplyKeys.size > 0) {
+            updated = updated.map(s => {
+              if (!touchedIds.has(s.id)) return s;
+
+              const pendingKey = pendingMonthlyKey(s.userId);
+              const pendingEntry = pendingKey && pendingApplyKeys.has(pendingKey) ? pendingMonthly[pendingKey] : null;
+              if (!pendingEntry) return s;
+
+              const baseMonthly = s.scores?.monthly || generateEmptyMonthlyData();
+              const nextMonthly = { ...baseMonthly };
+              let filled = false;
+
+              Object.entries(pendingEntry.months || {}).forEach(([month, subjects]) => {
+                const monthData = { ...(nextMonthly[month] || generateEmptyMonthlyData()[month] || {}) };
+
+                Object.entries(subjects || {}).forEach(([subject, data]) => {
+                  if (String(monthData[subject]?.score ?? '').trim() !== '') return;
+                  monthData[subject] = { ...emptyMonthlyScore, ...data };
+                  filled = true;
+                });
+
+                nextMonthly[month] = monthData;
+              });
+
+              if (!filled) return s;
+
+              pendingScoreFilledIds.add(s.id);
+
+              return {
+                ...s,
+                scores: {
+                  ...(s.scores || {}),
+                  monthly: nextMonthly
+                }
+              };
+            });
+          }
+
           console.log('[학생 엑셀 업로드 적용 완료]', {
             targetClass,
             uploadMode,
@@ -8493,7 +8659,33 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
             setManualSaveMessage('변경사항 있음');
           }
 
-          showAlert(`완료! 총 ${newStudents.length}명의 정보가 처리되었습니다. 우측 상단 변경사항 저장 버튼을 눌러 Firebase에 반영해주세요.`);
+          // ✅ 대기 점수로 채운 기존 학생은 scores dirty (새 학생은 위에서 전체 dirty)
+          pendingScoreFilledIds.forEach(studentId => {
+            if (!studentImportFullDirtyIds.has(studentId)) {
+              markStudentDirty(studentId, 'scores');
+            }
+          });
+
+          // ✅ 적용한 대기 점수 · 이 반 명단에 없는 학생의 대기 점수는 대기 목록에서 삭제 (저장 버튼을 눌러야 Firebase 반영)
+          const pendingRemoveKeys = Array.from(new Set([...pendingApplyKeys, ...pendingCleanupKeys]));
+
+          if (pendingRemoveKeys.length > 0) {
+            setPendingMonthly(prev => {
+              const next = { ...prev };
+              pendingRemoveKeys.forEach(pendingKey => {
+                delete next[pendingKey];
+              });
+              return next;
+            });
+
+            markPendingMonthlyDirty(pendingRemoveKeys);
+          }
+
+          const pendingResultText = (pendingApplyKeys.size > 0 || pendingCleanupKeys.size > 0)
+            ? ` (대기 점수 적용 ${pendingScoreFilledIds.size}명 · 정리 ${pendingCleanupKeys.size}명)`
+            : '';
+
+          showAlert(`완료! 총 ${newStudents.length}명의 정보가 처리되었습니다.${pendingResultText} 우측 상단 변경사항 저장 버튼을 눌러 Firebase에 반영해주세요.`);
         }, 50);
       }
     );
@@ -8735,6 +8927,8 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
     const { headerRowIdx, headerRow } = findHeaderRow(rows, ['아이디', '이름', '실득점']);
     if(headerRowIdx === -1) throw new Error("아이디/이름/실득점 열이 포함된 행을 찾을 수 없습니다.");
     let affectedStudents = new Set();
+    const otherClassStudents = new Set(); // 다른 반에 있어서 아이디로 찾아 반영한 학생
+    const pendingRowsMap = new Map(); // 전체 명단에 없는 아이디 → 대기 점수
     let engAvg='', engTop='', mathAvg='', mathTop='', totAvg='', totTop='';
     let engTotalApplicants='', mathTotalApplicants='', totTotalApplicants='';
 
@@ -8858,7 +9052,56 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
           const idVal = row[baseIdx + 1]; 
           if (!idVal) return;
           const key = String(idVal).trim().toLowerCase();
-          const studentIdx = updated.findIndex(s => s.userId?.toLowerCase() === key && (className === '대구캠퍼스 전체' ? true : (s.classNames || [s.className]).includes(className)));
+          let studentIdx = updated.findIndex(s => s.userId?.toLowerCase() === key && (className === '대구캠퍼스 전체' ? true : (s.classNames || [s.className]).includes(className)));
+
+          // ✅ 고른 반에 없으면 전체 명단에서 아이디로 찾기 (다른 반 학생: 반 소속은 그대로, 점수만 반영 · 반 순위는 비움)
+          if (studentIdx < 0 && className !== '대구캠퍼스 전체') {
+            studentIdx = updated.findIndex(s => s.userId?.toLowerCase() === key);
+
+            if (studentIdx >= 0) {
+              const otherStudent = updated[studentIdx];
+              const otherMonthly = otherStudent.scores?.monthly || generateEmptyMonthlyData();
+
+              updated[studentIdx] = {
+                ...otherStudent,
+                scores: {
+                  ...(otherStudent.scores || {}),
+                  monthly: {
+                    ...otherMonthly,
+                    [selectedMonth]: { ...(otherMonthly[selectedMonth] || generateEmptyMonthlyData()[selectedMonth]) }
+                  }
+                }
+              };
+
+              otherClassStudents.add(otherStudent.id);
+            }
+          }
+
+          // ✅ 전체 명단 어디에도 없는 아이디 → Monthly 대기 점수로 보관 (저장 버튼을 눌러야 Firebase 반영)
+          if (studentIdx < 0) {
+            const pendingScore = row[baseIdx + 8]; if (pendingScore === undefined || pendingScore === '') return;
+            const nameIdxInBlock = headerRow.slice(baseIdx, baseIdx + 20).findIndex(h => String(h ?? '').replace(/\s/g, '') === '이름');
+
+            pendingRowsMap.set(`${key}|${subject}`, {
+              key: pendingMonthlyKey(idVal),
+              userId: String(idVal).trim(),
+              name: nameIdxInBlock >= 0 ? String(row[baseIdx + nameIdxInBlock] ?? '').trim() : '',
+              subject,
+              data: {
+                score: pendingScore,
+                percent: row[baseIdx + 9] !== undefined ? row[baseIdx + 9] : '',
+                classRank: '',
+                totalRank: row[baseIdx + 10] !== undefined ? row[baseIdx + 10] : '',
+                trackAvg: sAvg,
+                top30Avg: sTop30,
+                totalApplicants: sTotalApplicants,
+                trackAvgDiff: (sAvg !== '') ? (Number(pendingScore) - Number(sAvg)).toFixed(1) : '',
+                top30Diff: (sTop30 !== '') ? (Number(pendingScore) - Number(sTop30)).toFixed(1) : ''
+              }
+            });
+            return;
+          }
+
           if (studentIdx >= 0) {
             const score = row[baseIdx + 8]; if (score === undefined || score === '') return;
             const percent = row[baseIdx + 9] !== undefined ? row[baseIdx + 9] : ''; 
@@ -8895,7 +9138,45 @@ const getClassStudentAttendanceRate = (student, month = dashboardMonth) => {
         markStudentDirty(studentId, 'scores');
       });
 
-      showAlert(`완료! 총 ${affectedStudents.size}명의 성적이 연동되었습니다. 우측 상단 변경사항 저장 버튼을 눌러 Firebase에 반영해주세요.`);
+      // ✅ 전체 명단에 없던 아이디의 점수 → 대기 점수 (아이디·월·과목이 같으면 덮어씀)
+      const pendingRows = Array.from(pendingRowsMap.values());
+      const pendingStudentKeys = Array.from(new Set(pendingRows.map(p => p.key).filter(Boolean)));
+
+      if (pendingRows.length > 0) {
+        setPendingMonthly(prev => {
+          const next = { ...prev };
+
+          pendingRows.forEach(p => {
+            if (!p.key) return;
+
+            const current = next[p.key] || { userId: p.userId, name: p.name, sourceClass: className, months: {} };
+            const currentMonths = current.months || {};
+
+            next[p.key] = {
+              ...current,
+              userId: p.userId,
+              name: p.name || current.name || '',
+              sourceClass: className,
+              months: {
+                ...currentMonths,
+                [selectedMonth]: {
+                  ...(currentMonths[selectedMonth] || {}),
+                  [p.subject]: p.data
+                }
+              }
+            };
+          });
+
+          return next;
+        });
+
+        markPendingMonthlyDirty(pendingStudentKeys);
+      }
+
+      const otherClassText = otherClassStudents.size > 0 ? ` (다른 반 ${otherClassStudents.size}명 포함)` : '';
+      const pendingText = pendingStudentKeys.length > 0 ? ` · 명단에 없어 대기 보관 ${pendingStudentKeys.length}명` : '';
+
+      showAlert(`완료! 총 ${affectedStudents.size}명의 성적이 연동되었습니다.${otherClassText}${pendingText} 우측 상단 변경사항 저장 버튼을 눌러 Firebase에 반영해주세요.`);
     }, 50);
   };
 
