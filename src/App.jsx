@@ -433,6 +433,18 @@ const emptyMonthlyScore = { score: '', percent: '', classRank: '', totalRank: ''
 // ✅ Monthly 대기 점수 키: 아이디 소문자 (Firestore 문서 ID에 쓸 수 없는 문자는 _ 로)
 const pendingMonthlyKey = (userId) => String(userId ?? '').trim().toLowerCase().replace(/[\/\s#?\[\]]+/g, '_');
 
+// ✅ Monthly 대기 점수 묶음 저장: year_연도/pendingMonthlyPack/p000~p127 (묶음 1개 = 여러 아이디 · 내용은 JSON 글자 1칸)
+// · 아이디키로 묶음 번호를 정함 (같은 아이디는 항상 같은 묶음) · 예전 year_연도/pendingMonthly 문서는 지우지 않고 백업으로 둠
+const PENDING_PACK_COUNT = 128;
+const PENDING_PACK_MAX_BYTES = 900 * 1024; // 묶음 1개 안전 한도 (Firebase 문서 한도 1MB)
+const PENDING_PACK_META_ID = '_meta'; // 옮기기 완료 표시 문서
+const pendingPackIdOf = (key) => {
+  const s = String(key || '');
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return `p${String(h % PENDING_PACK_COUNT).padStart(3, '0')}`;
+};
+
 const generateEmptyMonthlyData = () => {
   const data = {}; 
   MONTHS.forEach(m => { data[m] = { english: { ...emptyMonthlyScore }, math: { ...emptyMonthlyScore }, total: { ...emptyMonthlyScore } }; }); 
@@ -765,6 +777,8 @@ export default function App() {
   const [pendingMonthly, setPendingMonthly] = useState({});
   // ✅ 저장 대기 중인 대기 점수 키 (값이 있으면 저장, 비워졌으면 삭제)
   const [dirtyPendingIds, setDirtyPendingIds] = useState(new Set());
+  // ✅ 대기 점수 묶음 옮기기 완료 여부 (불러올 때 _meta 확인 · false면 저장할 때 모든 대기 점수를 묶음으로 옮기고 _meta 기록)
+  const [pendingPackMigrated, setPendingPackMigrated] = useState(true);
 
   const markPendingMonthlyDirty = (keys = []) => {
     const list = (keys || []).filter(Boolean);
@@ -805,6 +819,7 @@ export default function App() {
       setIsDataLoaded(false);
       setPendingMonthly({});
       setDirtyPendingIds(new Set());
+      setPendingPackMigrated(true);
       try {
         const docRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`);
         const docSnap = await getDoc(docRef);
@@ -861,27 +876,46 @@ export default function App() {
             console.error('반별 설정 로드 에러:', settingsError);
           }
 
-          // ✅ Monthly 대기 점수 불러오기 (없거나 실패해도 앱은 그대로 동작)
+          // ✅ Monthly 대기 점수 불러오기 (묶음 저장 · 없거나 실패해도 앱은 그대로 동작)
+          // · 묶음(pendingMonthlyPack)을 먼저 읽음 · _meta(옮기기 완료)가 없으면 예전 아이디별 문서(pendingMonthly)도 읽어 합침 (같은 아이디는 묶음 값 우선)
+          // · 옮기기 전이면 모든 대기 점수를 변경사항으로 표시 → 저장 버튼을 눌러야 묶음으로 옮겨짐 (자동 저장 없음)
           try {
-            const pendingColRef = collection(
-              db,
-              'artifacts',
-              APP_ID,
-              'public',
-              'data',
-              'years',
-              `year_${academicYear}`,
-              'pendingMonthly'
-            );
-
-            const pendingSnap = await getDocs(pendingColRef);
+            const pendingYearPath = ['artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`];
+            const packSnap = await getDocs(collection(db, ...pendingYearPath, 'pendingMonthlyPack'));
             const loadedPending = {};
+            let packMigrated = false;
 
-            pendingSnap.forEach(pendingDoc => {
-              loadedPending[pendingDoc.id] = pendingDoc.data();
+            packSnap.forEach(packDoc => {
+              if (packDoc.id === PENDING_PACK_META_ID) {
+                packMigrated = packDoc.data()?.migrated === true;
+                return;
+              }
+              let items = {};
+              try {
+                items = JSON.parse(packDoc.data()?.json || '{}') || {};
+              } catch (packParseError) {
+                console.error('Monthly 대기 점수 묶음 읽기 에러:', packDoc.id, packParseError);
+              }
+              Object.keys(items).forEach(pendingKey => {
+                loadedPending[pendingKey] = items[pendingKey];
+              });
             });
 
+            if (!packMigrated) {
+              const pendingSnap = await getDocs(collection(db, ...pendingYearPath, 'pendingMonthly'));
+              pendingSnap.forEach(pendingDoc => {
+                if (!loadedPending[pendingDoc.id]) loadedPending[pendingDoc.id] = pendingDoc.data();
+              });
+            }
+
             setPendingMonthly(loadedPending);
+            setPendingPackMigrated(packMigrated);
+
+            const migrateKeys = packMigrated ? [] : Object.keys(loadedPending);
+            if (migrateKeys.length > 0) {
+              markPendingMonthlyDirty(migrateKeys);
+              setManualSaveMessage('대기 점수 묶음 옮기기: 저장 버튼을 눌러주세요');
+            }
           } catch (pendingError) {
             console.error('Monthly 대기 점수 로드 에러:', pendingError);
           }
@@ -1450,6 +1484,7 @@ export default function App() {
       const successClassSettingNames = [];
       let classesSaved = false;
       const successPendingKeys = [];
+      let pendingPackMetaSaved = false;
 
       operationChunk.forEach(operation => {
         if (operation.target === 'student' && operation.student?.id) {
@@ -1469,8 +1504,12 @@ export default function App() {
           classesSaved = true;
         }
 
-        if (operation.target === 'pendingMonthly' && operation.id) {
-          successPendingKeys.push(operation.id);
+        if (operation.target === 'pendingMonthlyPack' && Array.isArray(operation.keys)) {
+          successPendingKeys.push(...operation.keys);
+        }
+
+        if (operation.target === 'pendingPackMeta') {
+          pendingPackMetaSaved = true;
         }
       });
 
@@ -1522,6 +1561,10 @@ export default function App() {
           successPendingKeys.forEach(key => next.delete(key));
           return next;
         });
+      }
+
+      if (pendingPackMetaSaved) {
+        setPendingPackMigrated(true);
       }
     };
 
@@ -1697,31 +1740,66 @@ export default function App() {
         });
       });
 
-      // ✅ Monthly 대기 점수: 바뀐 아이디 문서만 저장 / 비워진 아이디 문서는 삭제
-      const pendingColRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`, 'pendingMonthly');
-
+      // ✅ Monthly 대기 점수 (묶음 저장): 바뀐 아이디가 속한 묶음만 현재 화면 데이터로 통째로 다시 저장 / 비워진 묶음은 삭제
+      // · 예전 아이디별 문서(pendingMonthly)는 건드리지 않음 (백업) · 900KB 넘는 묶음은 저장하지 않고 알림
+      const pendingPackColRef = collection(db, 'artifacts', APP_ID, 'public', 'data', 'years', `year_${academicYear}`, 'pendingMonthlyPack');
+      const pendingKeysByPack = {};
       targetPendingKeys.forEach(pendingKey => {
-        const pendingRef = doc(pendingColRef, pendingKey);
-        const pendingEntry = pendingMonthly[pendingKey];
+        const packId = pendingPackIdOf(pendingKey);
+        (pendingKeysByPack[packId] = pendingKeysByPack[packId] || []).push(pendingKey);
+      });
+      const targetPackIds = Object.keys(pendingKeysByPack);
+      const pendingItemsByPack = {};
+      Object.keys(pendingMonthly || {}).forEach(pendingKey => {
+        const packId = pendingPackIdOf(pendingKey);
+        if (!pendingKeysByPack[packId] || !pendingMonthly[pendingKey]) return;
+        (pendingItemsByPack[packId] = pendingItemsByPack[packId] || {})[pendingKey] = pendingMonthly[pendingKey];
+      });
+      const oversizedPackIds = [];
+      const pendingSavedAt = Date.now();
 
-        if (pendingEntry) {
+      targetPackIds.forEach(packId => {
+        const packRef = doc(pendingPackColRef, packId);
+        const items = pendingItemsByPack[packId] || {};
+        const itemCount = Object.keys(items).length;
+
+        if (itemCount > 0) {
+          const json = JSON.stringify(items);
+          if (getApproxBytes(json) > PENDING_PACK_MAX_BYTES) {
+            oversizedPackIds.push(packId);
+            return;
+          }
           saveOperations.push({
             type: 'set',
-            target: 'pendingMonthly',
-            ref: pendingRef,
-            id: pendingKey,
-            payload: { ...pendingEntry, updatedAt: Date.now() },
+            target: 'pendingMonthlyPack',
+            ref: packRef,
+            id: packId,
+            keys: pendingKeysByPack[packId],
+            payload: { json, count: itemCount, updatedAt: pendingSavedAt },
             options: { merge: false }
           });
         } else {
           saveOperations.push({
             type: 'delete',
-            target: 'pendingMonthly',
-            ref: pendingRef,
-            id: pendingKey
+            target: 'pendingMonthlyPack',
+            ref: packRef,
+            id: packId,
+            keys: pendingKeysByPack[packId]
           });
         }
       });
+
+      // 옮기기 중이면 모든 묶음 다음(맨 마지막)에 _meta 기록 → 중간에 실패하면 다음에 다시 예전 문서까지 읽어서 옮김
+      if (!pendingPackMigrated && targetPackIds.length > 0 && oversizedPackIds.length === 0) {
+        saveOperations.push({
+          type: 'set',
+          target: 'pendingPackMeta',
+          ref: doc(pendingPackColRef, PENDING_PACK_META_ID),
+          id: PENDING_PACK_META_ID,
+          payload: { migrated: true, packCount: PENDING_PACK_COUNT, migratedAt: pendingSavedAt },
+          options: { merge: true }
+        });
+      }
 
       if (saveOperations.length === 0) {
         setManualSaveStatus('saved');
@@ -1754,6 +1832,13 @@ export default function App() {
 
       const savedAt = new Date();
       setLastManualSavedAt(savedAt);
+
+      if (oversizedPackIds.length > 0) {
+        setManualSaveStatus('error');
+        setManualSaveMessage(`대기 점수 묶음 ${oversizedPackIds.length}개가 너무 커서 저장하지 않았습니다 (나머지는 저장완료)`);
+        return;
+      }
+
       setManualSaveStatus('saved');
       setManualSaveMessage(`저장완료 ${savedAt.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}`);
     } catch (error) {
